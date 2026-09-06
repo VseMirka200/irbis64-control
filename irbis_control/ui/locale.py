@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import QApplication
 
 
 class _RussianButtonTranslator(QTranslator):
-    """Fallback for standard Qt buttons when qtbase_ru.qm is unavailable."""
+    """Переводит стандартные кнопки, если файл перевода Qt недоступен."""
 
     _translations = {
         "Yes": "Да",
@@ -35,7 +35,7 @@ class _RussianButtonTranslator(QTranslator):
 
 
 def install_russian_ui(app: QApplication) -> None:
-    """Enable Russian labels in QMessageBox and native Qt file dialogs."""
+    """Принимает приложение Qt и подключает русский перевод диалогов."""
     QLocale.setDefault(QLocale(QLocale.Language.Russian, QLocale.Country.Russia))
 
     qt_translator = QTranslator(app)

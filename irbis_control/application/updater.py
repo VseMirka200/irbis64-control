@@ -3,22 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 
 GITHUB_REPOSITORY_URL = "https://github.com/VseMirka200/irbis64-control"
-GITHUB_LATEST_RELEASE_API = (
-    "https://api.github.com/repos/VseMirka200/irbis64-control/releases/latest"
-)
+GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/VseMirka200/irbis64-control/releases/latest"
 _TRUSTED_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -27,10 +26,12 @@ _TRUSTED_DOWNLOAD_HOSTS = {
 }
 
 
+# Передаёт понятную причину, по которой обновление нельзя продолжить.
 class UpdateError(RuntimeError):
     pass
 
 
+# Описывает файл релиза и данные для проверки его загрузки.
 @dataclass(frozen=True)
 class ReleaseAsset:
     name: str
@@ -39,6 +40,7 @@ class ReleaseAsset:
     digest: str = ""
 
 
+# Объединяет версию релиза и файлы, доступные для установки.
 @dataclass(frozen=True)
 class GitHubRelease:
     version: str
@@ -49,16 +51,14 @@ class GitHubRelease:
 
 def version_parts(value: str) -> tuple[int, ...]:
     cleaned = value.strip().lower().lstrip("v")
-    return tuple(int(part) for part in __import__("re").findall(r"\d+", cleaned)) or (0,)
+    return tuple(int(part) for part in re.findall(r"\d+", cleaned)) or (0,)
 
 
 def is_newer_version(latest: str, current: str) -> bool:
     latest_parts = version_parts(latest)
     current_parts = version_parts(current)
     length = max(len(latest_parts), len(current_parts))
-    return latest_parts + (0,) * (length - len(latest_parts)) > current_parts + (
-        0,
-    ) * (length - len(current_parts))
+    return latest_parts + (0,) * (length - len(latest_parts)) > current_parts + (0,) * (length - len(current_parts))
 
 
 def fetch_latest_release(*, timeout: float = 15.0) -> GitHubRelease:
@@ -149,9 +149,7 @@ def download_asset(
             asset.download_url,
             headers={"User-Agent": "IRBIS64Control-Updater"},
         )
-        with os.fdopen(descriptor, "wb") as output, urllib.request.urlopen(
-            request, timeout=timeout
-        ) as response:
+        with os.fdopen(descriptor, "wb") as output, urllib.request.urlopen(request, timeout=timeout) as response:
             _validate_download_url(response.geturl())
             total = asset.size or int(response.headers.get("Content-Length") or 0)
             while True:
@@ -167,9 +165,7 @@ def download_asset(
             os.fsync(output.fileno())
 
         if asset.size and downloaded != asset.size:
-            raise UpdateError(
-                f"Размер обновления не совпал: получено {downloaded}, ожидалось {asset.size}."
-            )
+            raise UpdateError(f"Размер обновления не совпал: получено {downloaded}, ожидалось {asset.size}.")
         expected = asset.digest.removeprefix("sha256:")
         if expected and digest.hexdigest().lower() != expected:
             raise UpdateError("Контрольная сумма обновления не совпала.")
@@ -212,10 +208,7 @@ Expand-Archive -LiteralPath {ps_quote(package)} -DestinationPath $staging -Force
 Copy-Item -Path (Join-Path $staging '*') -Destination {ps_quote(install_dir)} -Recurse -Force
 """
     elif package.suffix.casefold() == ".exe":
-        install_commands = (
-            f"Copy-Item -LiteralPath {ps_quote(package)} "
-            f"-Destination {ps_quote(executable)} -Force\n"
-        )
+        install_commands = f"Copy-Item -LiteralPath {ps_quote(package)} -Destination {ps_quote(executable)} -Force\n"
     else:
         raise UpdateError("Формат обновления не поддерживается; требуется ZIP или EXE.")
 

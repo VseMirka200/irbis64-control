@@ -4,92 +4,21 @@ import json
 import re
 import subprocess
 import sys
-import traceback
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from threading import Event
-from time import perf_counter
 
-from irbis_control import __version__
-from irbis_control.application.settings import (
-    ApplicationSettings,
-    load_application_settings,
-    save_application_settings,
-)
-from irbis_control.application.updater import (
-    GITHUB_REPOSITORY_URL,
-    GitHubRelease,
-    ReleaseAsset,
-    UpdateError,
-    download_asset,
-    fetch_latest_release,
-    is_newer_version,
-    schedule_install,
-    select_windows_asset,
-)
-from irbis_control.core.matcher import (
-    EXTRA_MATCH_RULES,
-    MATCH_RULE_LABELS,
-    MATCH_FIELDS,
-    parse_match_rule,
-    match_rule_needs_review,
-    SOURCE_SUBSTANCES,
-    SOURCE_FOREIGN_AGENTS,
-    DEFAULT_AGE_MARKER,
-    DEFAULT_AGE_MARKER_FIELD,
-    DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
-    DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
-    DEFAULT_SUBSTANCE_MARKER,
-    DEFAULT_SUBSTANCE_MARKER_FIELD,
-    ComparisonCancelled,
-    ComparisonSummary,
-    MarkerApplicationStats,
-    MatchResult,
-    apply_markers_to_tag_values,
-    build_markers_by_record,
-    compare_and_export,
-    compare_database_records,
-    database_record_from_tag_values,
-    export_results,
-    remove_database_markers,
-    remove_markers_from_tag_values,
-)
-from irbis_control.infrastructure.atomic_io import atomic_write_text
-from irbis_control.infrastructure.irbis_bridge import (
-    IrbisClient,
-    IrbisError,
-    IrbisField,
-    IrbisRecord,
-    apply_modified_snapshot,
-    create_irbis_snapshot,
-    load_manifest,
-)
-from irbis_control.paths import project_root, resource_path
-from irbis_control.reporting.result_diff import (
-    ResultDiffRow,
-    ResultDiffSummary,
-    compare_result_files,
-    compare_text_files,
-)
-from irbis_control.ui.locale import install_russian_ui
-from irbis_control.ui.storage_paths import application_settings_path
-from irbis_control.ui.theme import apply_light_palette
-
-from PyQt6.QtCore import QEvent, QObject, QRect, QSize, QStandardPaths, QThread, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon
+from PyQt6.QtCore import QObject, QRect, QStandardPaths, Qt, QThread, QTimer, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
-    QInputDialog,
     QFrame,
-    QFormLayout,
     QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -101,30 +30,107 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
-    QStyle,
-    QStyleOptionComboBox,
-    QStylePainter,
-    QTableWidget,
-    QTableWidgetItem,
-    QTabWidget,
     QTextBrowser,
     QTextEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-APP_TITLE = "ИРБИС64 Контроль"
+from irbis_control import APP_TITLE as APP_TITLE
+from irbis_control import __version__
+from irbis_control.application.marker_settings import (
+    DEFAULT_MARKER_SETTINGS as DEFAULT_MARKER_SETTINGS,
+)
+from irbis_control.application.marker_settings import (
+    load_marker_settings as _load_marker_settings,
+)
+from irbis_control.application.marker_settings import (
+    save_marker_settings as _save_marker_settings,
+)
+from irbis_control.application.settings import (
+    ApplicationSettings,
+    load_application_settings,
+    save_application_settings,
+)
+from irbis_control.application.updater import (
+    GITHUB_REPOSITORY_URL,
+    GitHubRelease,
+    ReleaseAsset,
+    is_newer_version,
+    schedule_install,
+    select_windows_asset,
+)
+from irbis_control.core.matcher import (
+    DEFAULT_AGE_MARKER,
+    DEFAULT_AGE_MARKER_FIELD,
+    DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    DEFAULT_SUBSTANCE_MARKER,
+    DEFAULT_SUBSTANCE_MARKER_FIELD,
+    EXTRA_MATCH_RULES,
+    remove_database_markers,
+)
+from irbis_control.core.models import ComparisonSummary, MatchResult
+from irbis_control.infrastructure.atomic_io import atomic_write_text
+from irbis_control.infrastructure.irbis_bridge import (
+    load_manifest,
+)
+from irbis_control.paths import project_root, resource_path
+from irbis_control.ui.dialogs import (
+    DEFAULT_USEFUL_LINKS as DEFAULT_USEFUL_LINKS,
+)
+from irbis_control.ui.dialogs import (
+    ProgressDialog as ProgressDialog,
+)
+from irbis_control.ui.dialogs import (
+    ResultComparisonDialog as ResultComparisonDialog,
+)
+from irbis_control.ui.dialogs import (
+    TextComparisonDialog as TextComparisonDialog,
+)
+from irbis_control.ui.dialogs import (
+    UsefulLinksDialog as UsefulLinksDialog,
+)
+from irbis_control.ui.locale import install_russian_ui
+from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
+from irbis_control.ui.storage_paths import application_settings_path
+from irbis_control.ui.storage_paths import database_connector_config_path as database_connector_config_path
+from irbis_control.ui.theme import apply_light_palette
+from irbis_control.ui.widgets import (
+    CompactTabWidget as CompactTabWidget,
+)
+from irbis_control.ui.widgets import (
+    DatabaseComboBox as DatabaseComboBox,
+)
+from irbis_control.ui.widgets import (
+    LayoutHintWidget as LayoutHintWidget,
+)
+from irbis_control.ui.widgets import (
+    ListResizeHandle as ListResizeHandle,
+)
+from irbis_control.ui.widgets import (
+    MatchFieldsComboBox as MatchFieldsComboBox,
+)
+from irbis_control.ui.widgets import (
+    MatchRulesEditor as MatchRulesEditor,
+)
+from irbis_control.ui.widgets import (
+    SectionCard as SectionCard,
+)
+from irbis_control.ui.workers import (
+    ComparisonWorker as ComparisonWorker,
+)
+from irbis_control.ui.workers import (
+    DirectIrbisComparisonWorker as DirectIrbisComparisonWorker,
+)
+from irbis_control.ui.workers import (
+    IrbisOperationWorker as IrbisOperationWorker,
+)
+from irbis_control.ui.workers import (
+    UpdateWorker as UpdateWorker,
+)
+
 APP_VERSION = __version__
-
-def app_data_dir() -> Path:
-    folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
-    folder.mkdir(parents=True, exist_ok=True)
-    return folder
-
-
-def database_connector_config_path() -> Path:
-    return app_data_dir() / "database_connector.json"
 
 
 def window_state_path() -> Path:
@@ -135,1886 +141,24 @@ def run_journal_path() -> Path:
     return app_data_dir() / "run_journal.log"
 
 
-class UpdateWorker(QObject):
-    progress = pyqtSignal(int)
-    finished = pyqtSignal(object)
-    failed = pyqtSignal(str)
-
-    def __init__(self, mode: str, asset: ReleaseAsset | None = None) -> None:
-        super().__init__()
-        self.mode = mode
-        self.asset = asset
-
-    @pyqtSlot()
-    def run(self) -> None:
-        try:
-            if self.mode == "check":
-                self.finished.emit(fetch_latest_release())
-                return
-            if self.mode == "download" and self.asset is not None:
-                target = download_asset(
-                    self.asset,
-                    app_data_dir() / "updates",
-                    progress_cb=self.progress.emit,
-                )
-                self.finished.emit(target)
-                return
-            raise UpdateError("Неизвестная операция обновления.")
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-class ProgressDialog(QDialog):
-    def __init__(self, title: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
-        self.resize(460, 260)
-        self.setMinimumSize(360, 220)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(6, 6, 6, 6)
-        root.setSpacing(5)
-
-        self.status_label = QLabel("Ожидание...")
-        root.addWidget(self.status_label)
-
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        root.addWidget(self.progress)
-
-        self.text_edit = QTextEdit()
-        self.text_edit.setObjectName("plainLogEdit")
-        self.text_edit.setReadOnly(True)
-        self.text_edit.setPlaceholderText("Здесь будет отображаться ход выполнения.")
-        root.addWidget(self.text_edit, 1)
-
-        self.close_button = QPushButton("Закрыть")
-        self.close_button.clicked.connect(self.hide)
-        bottom = QHBoxLayout()
-        bottom.addStretch()
-        bottom.addWidget(self.close_button)
-        root.addLayout(bottom)
-
-    def start(self, text: str) -> None:
-        self.clear()
-        self.set_running(True)
-        self.set_progress(0, text)
-        self.show()
-        self.raise_()
-        self.activateWindow()
-        QApplication.processEvents()
-
-    def set_running(self, running: bool) -> None:
-        self.close_button.setEnabled(not running)
-
-    def set_progress(self, percent: int, text: str) -> None:
-        self.progress.setValue(max(0, min(100, percent)))
-        self.status_label.setText(text)
-
-    def append_line(self, text: str) -> None:
-        self.text_edit.append(text)
-        QApplication.processEvents()
-
-    def clear(self) -> None:
-        self.text_edit.clear()
-        self.progress.setValue(0)
-        self.status_label.setText("Ожидание...")
-
-    def finish(self, text: str, percent: int = 100) -> None:
-        self.set_progress(percent, text)
-        self.set_running(False)
-        self.append_line(text)
-
-    def closeEvent(self, event) -> None:
-        if self.close_button.isEnabled():
-            event.accept()
-        else:
-            event.ignore()
-
-
-class ComparisonWorker(QObject):
-    progress = pyqtSignal(int, str)
-    finished = pyqtSignal(object, object)
-    failed = pyqtSignal(str)
-    cancelled = pyqtSignal(str)
-
-    def __init__(
-        self,
-        database_path: list[str],
-        foreign_agents_path: str,
-        excel_paths: list[str],
-        output_path: str,
-        modified_database_path: str,
-        use_isbn_matching: bool,
-        use_title_fallback: bool,
-        use_fuzzy: bool,
-        fuzzy_threshold: int,
-        report_options: dict[str, object],
-        substance_marker: str,
-        foreign_agent_marker_template: str,
-        age_marker: str,
-        substance_marker_field: int,
-        foreign_agent_marker_field: int,
-        age_marker_field: int,
-        match_rules: dict[str, bool] | None = None,
-    ) -> None:
-        super().__init__()
-        self.database_path = database_path
-        self.foreign_agents_path = foreign_agents_path
-        self.excel_paths = excel_paths
-        self.output_path = output_path
-        self.modified_database_path = modified_database_path
-        self.use_isbn_matching = use_isbn_matching
-        self.use_title_fallback = use_title_fallback
-        self.match_rules = dict(match_rules or {})
-        self.use_fuzzy = use_fuzzy
-        self.fuzzy_threshold = fuzzy_threshold
-        self.report_options = dict(report_options)
-        self.substance_marker = substance_marker
-        self.foreign_agent_marker_template = foreign_agent_marker_template
-        self.age_marker = age_marker
-        self.substance_marker_field = substance_marker_field
-        self.foreign_agent_marker_field = foreign_agent_marker_field
-        self.age_marker_field = age_marker_field
-        self.cancel_event = Event()
-
-    def request_cancel(self) -> None:
-        self.cancel_event.set()
-
-    @pyqtSlot()
-    def run(self) -> None:
-        try:
-            results, summary = compare_and_export(
-                self.database_path,
-                self.excel_paths,
-                self.output_path,
-                self.modified_database_path,
-                foreign_agents_path=self.foreign_agents_path or None,
-                use_isbn_matching=self.use_isbn_matching,
-                use_title_fallback=self.use_title_fallback,
-                match_rules=self.match_rules,
-                use_fuzzy=self.use_fuzzy,
-                fuzzy_threshold=self.fuzzy_threshold,
-                report_options=self.report_options,
-                substance_marker=self.substance_marker,
-                foreign_agent_marker_template=self.foreign_agent_marker_template,
-                age_marker=self.age_marker,
-                substance_marker_field=self.substance_marker_field,
-                foreign_agent_marker_field=self.foreign_agent_marker_field,
-                age_marker_field=self.age_marker_field,
-                progress_cb=lambda percent, text: self.progress.emit(percent, text),
-                cancel_cb=self.cancel_event.is_set,
-            )
-            self.finished.emit(results, summary)
-        except ComparisonCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class DirectIrbisComparisonWorker(QObject):
-    """Сверяет и изменяет записи прямо на сервере ИРБИС без TXT-снимка."""
-
-    progress = pyqtSignal(int, str)
-    finished = pyqtSignal(object, object)
-    failed = pyqtSignal(str)
-    cancelled = pyqtSignal(str)
-    preview_requested = pyqtSignal(object)
-
-    def __init__(
-        self,
-        *,
-        host: str,
-        port: int,
-        login: str,
-        password: str,
-        database: str,
-        query: str,
-        page_size: int,
-        foreign_agents_path: str,
-        excel_paths: list[str],
-        output_path: str,
-        use_isbn_matching: bool,
-        use_title_fallback: bool,
-        use_fuzzy: bool,
-        fuzzy_threshold: int,
-        report_options: dict[str, object],
-        substance_marker: str,
-        foreign_agent_marker_template: str,
-        age_marker: str,
-        substance_marker_field: int,
-        foreign_agent_marker_field: int,
-        age_marker_field: int,
-        backup_dir: str,
-        create_backup: bool = True,
-        match_rules: dict[str, bool] | None = None,
-    ) -> None:
-        super().__init__()
-        self.host = host
-        self.port = int(port)
-        self.login = login
-        self.password = password
-        self.database = database
-        self.query = query or "I=$"
-        self.page_size = max(100, min(int(page_size or 500), 2000))
-        self.foreign_agents_path = foreign_agents_path
-        self.excel_paths = list(excel_paths)
-        self.output_path = output_path
-        self.use_isbn_matching = use_isbn_matching
-        self.use_title_fallback = use_title_fallback
-        self.match_rules = dict(match_rules or {})
-        self.use_fuzzy = use_fuzzy
-        self.fuzzy_threshold = fuzzy_threshold
-        self.report_options = dict(report_options)
-        self.substance_marker = substance_marker
-        self.foreign_agent_marker_template = foreign_agent_marker_template
-        self.age_marker = age_marker
-        self.substance_marker_field = int(substance_marker_field)
-        self.foreign_agent_marker_field = int(foreign_agent_marker_field)
-        self.age_marker_field = int(age_marker_field)
-        self.backup_dir = Path(backup_dir)
-        self.create_backup = bool(create_backup)
-        self.cancel_event = Event()
-        self.preview_event = Event()
-        self.preview_approved = False
-
-    def request_cancel(self) -> None:
-        self.cancel_event.set()
-        self.preview_event.set()
-
-    def confirm_preview(self, approved: bool) -> None:
-        self.preview_approved = bool(approved)
-        self.preview_event.set()
-
-    def _cancelled(self) -> bool:
-        return self.cancel_event.is_set()
-
-    @staticmethod
-    def _raw_record(record: IrbisRecord) -> str:
-        return "\n".join(f"#{field.tag:03d}: {field.value}" for field in record.fields)
-
-    def _save_rollback(self, records: list[IrbisRecord]) -> Path | None:
-        if not records or not self.create_backup:
-            return None
-        self.backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        target = self.backup_dir / f"direct_irbis_{self.database}_{stamp}.json"
-        payload = {
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "host": self.host,
-            "port": self.port,
-            "database": self.database,
-            "records": [
-                {
-                    "mfn": record.mfn,
-                    "status": record.status,
-                    "version": record.version,
-                    "fields": [{"tag": field.tag, "value": field.value} for field in record.fields],
-                }
-                for record in records
-            ],
-        }
-        atomic_write_text(
-            target,
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        return target
-
-    @pyqtSlot()
-    def run(self) -> None:
-        try:
-            client = IrbisClient(
-                self.host,
-                self.port,
-                self.login,
-                self.password,
-                "C",
-                timeout=30,
-            )
-            with client as connected:
-                self.progress.emit(2, f"Подключение к ИРБИС • база {self.database}")
-                irbis_records = connected.search_read_all(
-                    self.database,
-                    self.query,
-                    page_size=self.page_size,
-                    progress_cb=lambda percent, message: self.progress.emit(percent, message),
-                    cancel_cb=self._cancelled,
-                )
-                if self._cancelled():
-                    raise ComparisonCancelled("Операция отменена пользователем")
-                if not irbis_records:
-                    raise RuntimeError("По запросу ИРБИС не найдено ни одной записи.")
-
-                self.progress.emit(49, f"Подготовка к сравнению: {len(irbis_records):,} записей")
-                scan_versions = {record.mfn: record.version for record in irbis_records}
-                source_label = f"ИРБИС://{self.host}:{self.port}/{self.database}"
-                records = [
-                    database_record_from_tag_values(
-                        record.mfn,
-                        ((field.tag, field.value) for field in record.fields),
-                        source_file=source_label,
-                        source_record_number=record.mfn,
-                        raw_record="",
-                    )
-                    for record in irbis_records
-                ]
-                # Полные серверные записи больше не нужны в памяти: перед записью
-                # каждый изменяемый MFN всё равно перечитывается для проверки версии.
-                del irbis_records
-
-                results, summary = compare_database_records(
-                    records,
-                    self.excel_paths,
-                    database_label=source_label,
-                    foreign_agents_path=self.foreign_agents_path or None,
-                    use_isbn_matching=self.use_isbn_matching,
-                    use_title_fallback=self.use_title_fallback,
-                    match_rules=self.match_rules,
-                    use_fuzzy=self.use_fuzzy,
-                    fuzzy_threshold=self.fuzzy_threshold,
-                    progress_cb=lambda percent, message: self.progress.emit(percent, message),
-                    cancel_cb=self._cancelled,
-                )
-                if self.report_options.get("enabled", True):
-                    export_results(
-                        self.output_path,
-                        results,
-                        summary,
-                        progress_cb=lambda percent, message: self.progress.emit(percent, message),
-                        cancel_cb=self._cancelled,
-                        report_options=self.report_options,
-                    )
-
-                if self.report_options.get("report_only", False):
-                    summary.modified_database_file = ""
-                    summary.modified_database_records = 0
-                    self.progress.emit(100, "Отчёт создан, записи ИРБИС не изменялись")
-                    self.finished.emit(results, summary)
-                    return
-
-                markers_by_mfn = build_markers_by_record(
-                    results,
-                    substance_marker=self.substance_marker,
-                    foreign_agent_marker_template=self.foreign_agent_marker_template,
-                    substance_marker_field=self.substance_marker_field,
-                    foreign_agent_marker_field=self.foreign_agent_marker_field,
-                )
-                if self._cancelled():
-                    raise ComparisonCancelled("Операция отменена пользователем")
-
-                pending: list[IrbisRecord] = []
-                rollback_records: list[IrbisRecord] = []
-                preview_records: list[dict[str, object]] = []
-                marker_stats = MarkerApplicationStats()
-                conflicts = 0
-                total_candidates = len(markers_by_mfn)
-                for index, mfn in enumerate(sorted(markers_by_mfn), start=1):
-                    if self._cancelled():
-                        raise ComparisonCancelled("Операция отменена пользователем")
-                    live = connected.read_record(self.database, int(mfn))
-                    scanned_version = scan_versions.get(int(mfn))
-                    if scanned_version is not None and live.version != scanned_version:
-                        conflicts += 1
-                        continue
-                    record_stats = MarkerApplicationStats()
-                    tag_values, changed = apply_markers_to_tag_values(
-                        ((field.tag, field.value) for field in live.fields),
-                        markers_by_mfn[mfn],
-                        age_marker=self.age_marker,
-                        age_marker_field=self.age_marker_field,
-                        stats=record_stats,
-                    )
-                    marker_stats.already_present += record_stats.already_present
-                    marker_stats.added += record_stats.added
-                    marker_stats.duplicates_repaired += record_stats.duplicates_repaired
-                    if changed:
-                        rollback_records.append(live)
-                        pending.append(
-                            IrbisRecord(
-                                live.mfn,
-                                live.status,
-                                live.version,
-                                [IrbisField(tag, value) for tag, value in tag_values],
-                            )
-                        )
-                        requested_markers = [
-                            f"#{int(tag):03d}: {marker}"
-                            for tag, marker in markers_by_mfn[mfn]
-                            if str(marker).strip()
-                        ]
-                        if self.age_marker.strip():
-                            requested_markers.append(
-                                f"#{self.age_marker_field:03d}: {self.age_marker.strip()}"
-                            )
-                        preview_records.append(
-                            {
-                                "mfn": live.mfn,
-                                "markers": requested_markers,
-                                "added": record_stats.added,
-                                "already_present": record_stats.already_present,
-                                "duplicates_repaired": record_stats.duplicates_repaired,
-                            }
-                        )
-                    if index == total_candidates or index % 25 == 0:
-                        self.progress.emit(
-                            92 + int(index / max(total_candidates, 1) * 4),
-                            f"Проверка найденных MFN перед записью: {index:,} из {total_candidates:,}",
-                        )
-
-                if pending:
-                    self.progress.emit(96, "Ожидание подтверждения записи в ИРБИС")
-                    self.preview_event.clear()
-                    self.preview_approved = False
-                    self.preview_requested.emit(
-                        {
-                            "database": self.database,
-                            "records": preview_records,
-                            "record_count": len(pending),
-                            "markers_added": marker_stats.added,
-                            "markers_already_present": marker_stats.already_present,
-                            "duplicates_repaired": marker_stats.duplicates_repaired,
-                            "conflicts": conflicts,
-                            "review_rows": summary.review_rows,
-                            "create_backup": self.create_backup,
-                        }
-                    )
-                    self.preview_event.wait()
-                    if self._cancelled() or not self.preview_approved:
-                        suffix = " Excel-отчёт уже сохранён." if self.output_path else ""
-                        raise ComparisonCancelled(
-                            "Запись изменений в ИРБИС отменена пользователем." + suffix
-                        )
-
-                    self.progress.emit(96, "Повторная проверка версий MFN перед записью")
-                    changed_during_confirmation: list[int] = []
-                    for original in rollback_records:
-                        latest = connected.read_record(self.database, original.mfn)
-                        if latest.version != original.version:
-                            changed_during_confirmation.append(original.mfn)
-                    if changed_during_confirmation:
-                        preview = ", ".join(
-                            str(mfn) for mfn in changed_during_confirmation[:20]
-                        )
-                        if len(changed_during_confirmation) > 20:
-                            preview += f" и ещё {len(changed_during_confirmation) - 20}"
-                        raise IrbisError(
-                            "Запись отменена: после показа предварительного просмотра "
-                            f"на сервере изменились MFN {preview}. Запустите проверку заново."
-                        )
-
-                backup = self._save_rollback(rollback_records)
-                written = 0
-                readback_repairs = 0
-                # После создания rollback-копии запись выполняется до конца: остановка
-                # посередине оставила бы базу частично изменённой.
-                # Важно: после каждой записи перечитываем MFN с сервера. Это защищает
-                # от ситуации, когда визуально одинаковые повторения 333 появились уже
-                # на серверной стороне/из старой версии программы.
-                for index, record in enumerate(pending, start=1):
-                    try:
-                        connected.write_record(self.database, record, actualize=1)
-                    except Exception as exc:
-                        rollback_hint = (
-                            f"Rollback-копия: {backup}."
-                            if backup
-                            else "Rollback-копия отключена в настройках."
-                        )
-                        raise IrbisError(
-                            f"Запись прервана на MFN {record.mfn}; до сбоя записано: {written}. "
-                            f"{rollback_hint} Причина: {exc}"
-                        ) from exc
-
-                    readback = connected.read_record(self.database, record.mfn)
-                    verified_values, needs_repair = apply_markers_to_tag_values(
-                        ((field.tag, field.value) for field in readback.fields),
-                        markers_by_mfn.get(record.mfn, []),
-                        age_marker=self.age_marker,
-                        age_marker_field=self.age_marker_field,
-                    )
-                    if needs_repair:
-                        repaired = IrbisRecord(
-                            readback.mfn,
-                            readback.status,
-                            readback.version,
-                            [IrbisField(tag, value) for tag, value in verified_values],
-                        )
-                        connected.write_record(self.database, repaired, actualize=1)
-                        readback_repairs += 1
-
-                        # Контрольный read-back: молча оставлять дубль нельзя.
-                        final_record = connected.read_record(self.database, record.mfn)
-                        _final_values, still_needs_repair = apply_markers_to_tag_values(
-                            ((field.tag, field.value) for field in final_record.fields),
-                            markers_by_mfn.get(record.mfn, []),
-                            age_marker=self.age_marker,
-                            age_marker_field=self.age_marker_field,
-                        )
-                        if still_needs_repair:
-                            raise IrbisError(
-                                f"MFN {record.mfn}: сервер ИРБИС повторно вернул дублирующую метку после исправления."
-                            )
-
-                    written += 1
-                    self.progress.emit(
-                        96 + int(index / max(len(pending), 1) * 4),
-                        f"Запись изменений в ИРБИС: {index:,} из {len(pending):,}",
-                    )
-
-                summary.modified_database_file = source_label
-                summary.modified_database_records = written
-                summary.markers_already_present = marker_stats.already_present
-                summary.markers_added = marker_stats.added
-                summary.marker_duplicates_repaired = (
-                    marker_stats.duplicates_repaired + readback_repairs
-                )
-                if conflicts:
-                    summary.warnings.append(
-                        f"Пропущено записей, изменённых на сервере во время проверки: {conflicts}. "
-                        "Для них запустите проверку ещё раз."
-                    )
-                if backup:
-                    summary.warnings.append(f"Rollback-копия серверных записей: {backup}")
-                if readback_repairs:
-                    summary.warnings.append(
-                        f"После контрольного чтения автоматически исправлено дублей меток: {readback_repairs}."
-                    )
-                suffix = f"; конфликтов версий: {conflicts}" if conflicts else ""
-                self.progress.emit(100, f"Готово: изменено записей ИРБИС — {written:,}{suffix}")
-                self.finished.emit(results, summary)
-        except ComparisonCancelled as exc:
-            self.cancelled.emit(str(exc))
-        except IrbisError as exc:
-            if self._cancelled():
-                self.cancelled.emit("Операция отменена пользователем")
-            else:
-                self.failed.emit(str(exc))
-        except Exception:
-            self.failed.emit(traceback.format_exc())
-
-
-class IrbisOperationWorker(QObject):
-    progress = pyqtSignal(int, str)
-    finished = pyqtSignal(str, object)
-    failed = pyqtSignal(str, str)
-
-    def __init__(self, mode: str, params: dict[str, object]) -> None:
-        super().__init__()
-        self.mode = mode
-        self.params = dict(params)
-
-    @pyqtSlot()
-    def run(self) -> None:
-        try:
-            operation_started = perf_counter()
-            client = IrbisClient(
-                str(self.params.get("host", "127.0.0.1")),
-                int(self.params.get("port", 6666)),
-                str(self.params.get("login", "")),
-                str(self.params.get("password", "")),
-                "C",
-                timeout=5 if self.mode == "health" else 20,
-            )
-            if self.mode == "health":
-                with client:
-                    pass
-                self.finished.emit(
-                    self.mode,
-                    {
-                        "ok": True,
-                        "response_ms": max(1, round((perf_counter() - operation_started) * 1000)),
-                    },
-                )
-                return
-            if self.mode in {"test", "databases", "tune_read"}:
-                self.progress.emit(20, "Подключение к серверу ИРБИС…")
-                with client as connected:
-                    databases = []
-                    if self.mode in {"test", "databases"}:
-                        self.progress.emit(45, "Получение списка доступных баз…")
-                        databases = connected.list_databases()
-                    page_size = int(self.params.get("page_size", 500) or 500)
-                    total = 0
-                    database = str(self.params.get("database", "")).strip()
-                    available_names = [
-                        str(item.get("name", "") if isinstance(item, dict) else item).strip()
-                        for item in databases
-                    ]
-                    if available_names and database.casefold() not in {
-                        name.casefold() for name in available_names
-                    }:
-                        database = available_names[0]
-                    if self.mode == "tune_read":
-                        if not database:
-                            raise RuntimeError("Не выбрана база ИРБИС для теста пакета чтения.")
-                        page_size, total = connected.tune_read_page_size(
-                            database,
-                            str(self.params.get("query", "I=$")),
-                            progress_cb=lambda percent, message: self.progress.emit(percent, message),
-                        )
-                    if self.mode == "tune_read":
-                        self.progress.emit(100, f"Пакет чтения подобран: {page_size} записей")
-                    else:
-                        self.progress.emit(100, f"Доступных баз: {len(databases)}")
-                self.finished.emit(
-                    self.mode,
-                    {
-                        "ok": True,
-                        "databases": databases,
-                        "page_size": page_size,
-                        "probe_total": total,
-                        "probe_database": database,
-                        "response_ms": max(1, round((perf_counter() - operation_started) * 1000)),
-                    },
-                )
-                return
-
-            if self.mode == "clean_markers":
-                database = str(self.params.get("database", "")).strip()
-                if not database:
-                    raise RuntimeError("Не выбрана база ИРБИС для очистки меток.")
-                page_size = max(100, min(int(self.params.get("page_size", 500) or 500), 2000))
-                query = "I=$"
-                candidates: list[int] = []
-
-                with client as connected:
-                    first = 1
-                    total: int | None = None
-                    scanned = 0
-                    self.progress.emit(2, f"Поиск меток в базе {database}…")
-                    while total is None or scanned < total:
-                        current_total, page = connected.search_read_page(
-                            database, query, number=page_size, first=first
-                        )
-                        if total is None:
-                            total = current_total
-                            if total <= 0:
-                                break
-                        if not page:
-                            break
-                        for record in page:
-                            _cleaned, changed = remove_markers_from_tag_values(
-                                ((field.tag, field.value) for field in record.fields),
-                                substance_marker=str(self.params.get("substance_marker", DEFAULT_SUBSTANCE_MARKER)),
-                                foreign_agent_marker_template=str(self.params.get("foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)),
-                                age_marker=str(self.params.get("age_marker", DEFAULT_AGE_MARKER)),
-                                substance_marker_field=int(self.params.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)),
-                                foreign_agent_marker_field=int(self.params.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)),
-                                age_marker_field=int(self.params.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
-                            )
-                            if changed:
-                                candidates.append(record.mfn)
-                        scanned += len(page)
-                        first += len(page)
-                        self.progress.emit(
-                            min(55, 5 + int(scanned / max(total or 1, 1) * 50)),
-                            f"Поиск меток: {scanned:,} из {total:,} • найдено записей: {len(candidates):,}",
-                        )
-                        if len(page) < page_size:
-                            break
-
-                    if not candidates:
-                        self.progress.emit(100, "Метки для удаления не найдены.")
-                        self.finished.emit(
-                            self.mode,
-                            {"scanned": scanned, "found": 0, "written": 0, "backup": ""},
-                        )
-                        return
-
-                    rollback_records: list[IrbisRecord] = []
-                    pending: list[IrbisRecord] = []
-                    for index, mfn in enumerate(candidates, start=1):
-                        # Перечитываем только найденные MFN непосредственно перед
-                        # изменением, чтобы не затереть правки другого пользователя.
-                        live = connected.read_record(database, int(mfn))
-                        cleaned_values, changed = remove_markers_from_tag_values(
-                            ((field.tag, field.value) for field in live.fields),
-                            substance_marker=str(self.params.get("substance_marker", DEFAULT_SUBSTANCE_MARKER)),
-                            foreign_agent_marker_template=str(self.params.get("foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)),
-                            age_marker=str(self.params.get("age_marker", DEFAULT_AGE_MARKER)),
-                            substance_marker_field=int(self.params.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)),
-                            foreign_agent_marker_field=int(self.params.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)),
-                            age_marker_field=int(self.params.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
-                        )
-                        if changed:
-                            rollback_records.append(live)
-                            pending.append(
-                                IrbisRecord(
-                                    live.mfn, live.status, live.version,
-                                    [IrbisField(tag, value) for tag, value in cleaned_values],
-                                )
-                            )
-                        if index == len(candidates) or index % 25 == 0:
-                            self.progress.emit(
-                                55 + int(index / max(len(candidates), 1) * 20),
-                                f"Проверка найденных MFN: {index:,} из {len(candidates):,}",
-                            )
-
-                    backup_path: Path | None = None
-                    if rollback_records and bool(self.params.get("create_backup", True)):
-                        backup_dir = Path(str(self.params.get("backup_dir", app_data_dir() / "backups")))
-                        backup_dir.mkdir(parents=True, exist_ok=True)
-                        backup_path = backup_dir / f"irbis_cleanup_{database}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
-                        atomic_write_text(
-                            backup_path,
-                            json.dumps(
-                                {
-                                    "created_at": datetime.now().isoformat(timespec="seconds"),
-                                    "host": str(self.params.get("host", "")),
-                                    "port": int(self.params.get("port", 6666)),
-                                    "database": database,
-                                    "operation": "marker_cleanup",
-                                    "records": [
-                                        {
-                                            "mfn": record.mfn,
-                                            "status": record.status,
-                                            "version": record.version,
-                                            "fields": [
-                                                {"tag": field.tag, "value": field.value}
-                                                for field in record.fields
-                                            ],
-                                        }
-                                        for record in rollback_records
-                                    ],
-                                },
-                                ensure_ascii=False, indent=2,
-                            ),
-                            encoding="utf-8",
-                        )
-
-                    written = 0
-                    # Сначала создана rollback-копия, затем меняем живую базу.
-                    for index, record in enumerate(pending, start=1):
-                        connected.write_record(database, record, actualize=1)
-                        written += 1
-                        self.progress.emit(
-                            75 + int(index / max(len(pending), 1) * 25),
-                            f"Очистка меток в ИРБИС: {index:,} из {len(pending):,}",
-                        )
-
-                self.finished.emit(
-                    self.mode,
-                    {
-                        "scanned": scanned,
-                        "found": len(candidates),
-                        "written": written,
-                        "backup": str(backup_path) if backup_path else "",
-                    },
-                )
-                return
-
-            if self.mode == "fetch":
-                with client as connected:
-                    manifest = create_irbis_snapshot(
-                        connected,
-                        str(self.params["database"]),
-                        str(self.params["query"]),
-                        str(self.params["snapshot"]),
-                        str(self.params["manifest"]),
-                        progress_cb=lambda percent, text: self.progress.emit(percent, text),
-                        read_workers=int(self.params.get("read_workers", 4)),
-                    )
-                self.finished.emit(self.mode, manifest)
-                return
-
-            if self.mode == "apply":
-                with client as connected:
-                    written, conflicts, backup = apply_modified_snapshot(
-                        connected,
-                        Path(str(self.params["manifest"])),
-                        Path(str(self.params["modified"])),
-                        Path(str(self.params["backup_dir"])),
-                        progress_cb=lambda percent, text: self.progress.emit(percent, text),
-                        create_backup=bool(self.params.get("create_backup", True)),
-                    )
-                self.finished.emit(
-                    self.mode,
-                    {"written": written, "conflicts": conflicts, "backup": str(backup) if backup else ""},
-                )
-                return
-
-            raise RuntimeError(f"Неизвестная операция ИРБИС: {self.mode}")
-        except Exception as exc:
-            self.failed.emit(self.mode, str(exc))
-
-
-class DatabaseComboBox(QComboBox):
-    """A database field with adjacent dropdown and refresh icons on the right."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("databaseCombo")
-        self.setEditable(True)
-        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.lineEdit().setReadOnly(True)
-        self.lineEdit().setTextMargins(0, 0, 44, 0)
-        self.dropdown_button = QToolButton(self)
-        self.dropdown_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
-        self.dropdown_button.setToolTip("Выбрать базу")
-        self.dropdown_button.setAccessibleName("Выбрать базу")
-        self.dropdown_button.clicked.connect(self.showPopup)
-        self.refresh_action = QAction(QIcon(resource_path("assets", "refresh.svg")), "Обновить список баз", self)
-        self.refresh_button = QToolButton(self)
-        self.refresh_button.setDefaultAction(self.refresh_action)
-        for button in (self.dropdown_button, self.refresh_button):
-            button.setAutoRaise(True)
-            button.setIconSize(QSize(16, 16))
-            button.setStyleSheet("QToolButton { border: none; padding: 0; background: transparent; }")
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        icon_width = 20
-        right = self.width() - 3
-        height = max(0, self.height() - 4)
-        self.refresh_button.setGeometry(right - icon_width, 2, icon_width, height)
-        self.dropdown_button.setGeometry(right - 2 * icon_width, 2, icon_width, height)
-        self.dropdown_button.raise_()
-        self.refresh_button.raise_()
-
-
-class CompactTabWidget(QTabWidget):
-    """A tab container that does not inherit the widest page as its minimum."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.currentChanged.connect(self._current_page_changed)
-
-    def minimumSizeHint(self) -> QSize:
-        return QSize(320, 240)
-
-    def sizeHint(self) -> QSize:
-        current = self.currentWidget()
-        if current is None:
-            return super().sizeHint()
-        page_hint = current.sizeHint()
-        tab_height = self.tabBar().sizeHint().height()
-        return QSize(max(320, page_hint.width()), max(240, page_hint.height() + tab_height + 2))
-
-    def _current_page_changed(self, _index: int) -> None:
-        self.updateGeometry()
-        if self.parentWidget() is not None:
-            self.parentWidget().updateGeometry()
-
-
-class LayoutHintWidget(QWidget):
-    """Expose the current layout hint to a resizable scroll area."""
-
-    def sizeHint(self) -> QSize:
-        layout = self.layout()
-        return layout.sizeHint() if layout is not None else super().sizeHint()
-
-    def minimumSizeHint(self) -> QSize:
-        layout = self.layout()
-        return layout.minimumSize() if layout is not None else super().minimumSizeHint()
-
-
-class SectionCard(QFrame):
-    def __init__(self, title: str, description: str) -> None:
-        super().__init__()
-        self.setObjectName("sectionCard")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-
-        self.outer_layout = QVBoxLayout(self)
-        self.outer_layout.setContentsMargins(4, 4, 4, 4)
-        self.outer_layout.setSpacing(4)
-
-        title_row = QHBoxLayout()
-        title_row.setSpacing(6)
-        self.title_row = title_row
-
-        # В компактном стандартном интерфейсе декоративные иконки карточек
-        # не показываем: остаётся обычный заголовок секции и системные контролы.
-        self.title_label = QLabel(title)
-        self.title_label.setObjectName("cardTitle")
-        title_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
-        self.outer_layout.addLayout(title_row)
-
-        self.description_label: QLabel | None = None
-        if description:
-            self.description_label = QLabel(description)
-            self.description_label.setObjectName("cardDescription")
-            self.description_label.setWordWrap(True)
-            self.description_label.hide()
-            self.outer_layout.addWidget(self.description_label)
-
-        self.body = QVBoxLayout()
-        self.body.setContentsMargins(0, 1, 0, 0)
-        self.body.setSpacing(4)
-        self.outer_layout.addLayout(self.body)
-
-    def set_compact(self, compact: bool, very_compact: bool = False) -> None:
-        horizontal = 3 if very_compact else 4
-        vertical = 3 if compact else 4
-        self.outer_layout.setContentsMargins(horizontal, vertical, horizontal, vertical)
-        self.outer_layout.setSpacing(4)
-        self.body.setSpacing(4)
-
-
-DEFAULT_USEFUL_LINKS = [
-    {
-        "title": "Рекомендации по выявлению запрещённой литературы — РГБ",
-        "url": "https://nkp.rsl.ru/drug-literature-recommendations",
-    },
-    {
-        "title": "Экспертный совет Российского книжного союза",
-        "url": "https://bookunion.ru/expert/",
-    },
-]
-
-
-class UsefulLinksDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Полезные ссылки")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
-        self.resize(620, 360)
-        self.setMinimumSize(620, 300)
-        self.links = self._load_links()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        title = QLabel("Полезные ссылки")
-        title.setObjectName("dialogTitle")
-        layout.addWidget(title)
-
-        description = QLabel(
-            "Откройте нужный сайт двойным щелчком. В этот список можно добавлять свои ссылки."
-        )
-        description.setObjectName("cardDescription")
-        description.setWordWrap(True)
-        layout.addWidget(description)
-
-        self.list_widget = QListWidget()
-        self.list_widget.setObjectName("linksList")
-        self.list_widget.setAlternatingRowColors(False)
-        self.list_widget.setWordWrap(True)
-        self.list_widget.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.list_widget.setSpacing(2)
-        self.list_widget.setUniformItemSizes(False)
-        self.list_widget.itemDoubleClicked.connect(lambda _item: self.open_selected())
-        layout.addWidget(self.list_widget, 1)
-
-        buttons = QHBoxLayout()
-        buttons.setSpacing(5)
-        add_button = QPushButton("Добавить ссылку")
-        add_button.setObjectName("secondaryButton")
-        add_button.clicked.connect(self.add_link)
-        buttons.addWidget(add_button)
-
-        remove_button = QPushButton("Удалить выбранную")
-        remove_button.setObjectName("dangerButton")
-        remove_button.clicked.connect(self.remove_selected)
-        buttons.addWidget(remove_button)
-
-        buttons.addStretch()
-
-        open_button = QPushButton("Открыть сайт")
-        open_button.setObjectName("primaryButton")
-        open_button.clicked.connect(self.open_selected)
-        buttons.addWidget(open_button)
-        layout.addLayout(buttons)
-
-        transfer_buttons = QHBoxLayout()
-        transfer_buttons.setSpacing(5)
-        import_button = QPushButton("Импорт ссылок")
-        import_button.setObjectName("secondaryButton")
-        import_button.clicked.connect(self.import_links)
-        transfer_buttons.addWidget(import_button)
-
-        export_button = QPushButton("Экспорт ссылок")
-        export_button.setObjectName("secondaryButton")
-        export_button.clicked.connect(self.export_links)
-        transfer_buttons.addWidget(export_button)
-        transfer_buttons.addStretch()
-
-        close_button = QPushButton("Закрыть")
-        close_button.setObjectName("mutedButton")
-        close_button.clicked.connect(self.accept)
-        transfer_buttons.addWidget(close_button)
-
-        dialog_buttons = (
-            add_button,
-            remove_button,
-            open_button,
-            import_button,
-            export_button,
-            close_button,
-        )
-        margins = layout.contentsMargins()
-        three_button_row_width = (
-            self.minimumWidth() - margins.left() - margins.right() - buttons.spacing() * 2
-        ) // 3
-        common_button_width = min(
-            max(button.sizeHint().width() for button in dialog_buttons),
-            three_button_row_width,
-        )
-        for button in dialog_buttons:
-            button.setFixedWidth(common_button_width)
-        layout.addLayout(transfer_buttons)
-
-        self._refresh()
-
-    @staticmethod
-    def _storage_path() -> Path:
-        folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
-        folder.mkdir(parents=True, exist_ok=True)
-        return folder / "useful_links.json"
-
-    def _load_links(self) -> list[dict[str, str]]:
-        path = self._storage_path()
-        if not path.is_file():
-            return [dict(item) for item in DEFAULT_USEFUL_LINKS]
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            links = []
-            for item in data:
-                title = str(item.get("title", "")).strip()
-                url = str(item.get("url", "")).strip()
-                if title and url:
-                    links.append({"title": title, "url": url})
-            return links or [dict(item) for item in DEFAULT_USEFUL_LINKS]
-        except Exception:
-            return [dict(item) for item in DEFAULT_USEFUL_LINKS]
-
-    @staticmethod
-    def _validated_links(data) -> list[dict[str, str]]:
-        if not isinstance(data, list):
-            raise ValueError("ожидался список ссылок")
-        links: list[dict[str, str]] = []
-        for number, item in enumerate(data, start=1):
-            if not isinstance(item, dict):
-                raise ValueError(f"элемент {number} должен быть объектом")
-            title = str(item.get("title", "")).strip()
-            address = str(item.get("url", "")).strip()
-            url = QUrl.fromUserInput(address)
-            if not title or not url.isValid() or url.scheme().lower() not in {"http", "https"} or not url.host():
-                raise ValueError(f"у ссылки {number} отсутствует название или неверный адрес")
-            normalized_url = url.toString()
-            if not any(link["url"].rstrip("/") == normalized_url.rstrip("/") for link in links):
-                links.append({"title": title, "url": normalized_url})
-        if not links:
-            raise ValueError("список ссылок пуст")
-        return links
-
-    def _save_links(self) -> bool:
-        try:
-            atomic_write_text(
-                self._storage_path(),
-                json.dumps(self.links, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            return True
-        except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось сохранить список ссылок:\n{exc}")
-            return False
-
-    def _refresh(self) -> None:
-        self.list_widget.clear()
-        for link in self.links:
-            item = QListWidgetItem(f"{link['title']}\n{link['url']}")
-            item.setData(Qt.ItemDataRole.UserRole, link["url"])
-            item.setToolTip(link["url"])
-            item.setForeground(QColor("#000000"))
-            item.setSizeHint(QSize(0, 62))
-            self.list_widget.addItem(item)
-        if self.list_widget.count():
-            self.list_widget.setCurrentRow(0)
-
-    def export_links(self) -> None:
-        documents = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
-        default_path = str(Path(documents) / "Полезные ссылки ИРБИС64 Контроль.json")
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Экспорт полезных ссылок",
-            default_path,
-            "JSON-файлы (*.json)",
-        )
-        if not path:
-            return
-        if not path.lower().endswith(".json"):
-            path += ".json"
-        try:
-            atomic_write_text(
-                path,
-                json.dumps(self.links, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось экспортировать ссылки:\n{exc}")
-            return
-        QMessageBox.information(self, APP_TITLE, f"Ссылки экспортированы:\n{path}")
-
-    def import_links(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Импорт полезных ссылок",
-            "",
-            "JSON-файлы (*.json);;Все файлы (*.*)",
-        )
-        if not path:
-            return
-        try:
-            imported = self._validated_links(json.loads(Path(path).read_text(encoding="utf-8")))
-        except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось импортировать ссылки:\n{exc}")
-            return
-        answer = QMessageBox.question(
-            self,
-            APP_TITLE,
-            f"Заменить текущий список импортированными ссылками ({len(imported)})?",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        previous = self.links
-        self.links = imported
-        if self._save_links():
-            self._refresh()
-        else:
-            self.links = previous
-
-    def open_selected(self) -> None:
-        item = self.list_widget.currentItem()
-        if item is None:
-            QMessageBox.information(self, APP_TITLE, "Выберите ссылку в списке.")
-            return
-        url = QUrl.fromUserInput(str(item.data(Qt.ItemDataRole.UserRole)))
-        if not url.isValid() or url.scheme().lower() not in {"http", "https"}:
-            QMessageBox.warning(self, APP_TITLE, "У ссылки неверный адрес.")
-            return
-        QDesktopServices.openUrl(url)
-
-    def add_link(self) -> None:
-        title, accepted = QInputDialog.getText(self, "Добавить ссылку", "Название сайта:")
-        if not accepted or not title.strip():
-            return
-        address, accepted = QInputDialog.getText(
-            self,
-            "Добавить ссылку",
-            "Адрес сайта:",
-            text="https://",
-        )
-        if not accepted or not address.strip():
-            return
-        url = QUrl.fromUserInput(address.strip())
-        if not url.isValid() or url.scheme().lower() not in {"http", "https"} or not url.host():
-            QMessageBox.warning(self, APP_TITLE, "Введите полный адрес сайта, например https://example.ru")
-            return
-        normalized_url = url.toString()
-        if any(item["url"].rstrip("/") == normalized_url.rstrip("/") for item in self.links):
-            QMessageBox.information(self, APP_TITLE, "Эта ссылка уже есть в списке.")
-            return
-        self.links.append({"title": title.strip(), "url": normalized_url})
-        if self._save_links():
-            self._refresh()
-            self.list_widget.setCurrentRow(self.list_widget.count() - 1)
-
-    def remove_selected(self) -> None:
-        row = self.list_widget.currentRow()
-        if row < 0:
-            QMessageBox.information(self, APP_TITLE, "Выберите ссылку для удаления.")
-            return
-        link = self.links[row]
-        answer = QMessageBox.question(
-            self,
-            APP_TITLE,
-            f"Удалить ссылку «{link['title']}»?",
-        )
-        if answer != QMessageBox.StandardButton.Yes:
-            return
-        self.links.pop(row)
-        if self._save_links():
-            self._refresh()
-
-
-class ResultComparisonDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Сравнение старого и нового результата")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
-        self.resize(900, 580)
-        self.setMinimumSize(680, 440)
-        self.last_output_path = ""
-        self.last_differences: list[ResultDiffRow] = []
-        self.last_summary: ResultDiffSummary | None = None
-        self.progress_dialog = ProgressDialog("Ход сравнения", self)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
-
-        title = QLabel("Сравнение результатов по книгам")
-        title.setObjectName("dialogTitle")
-        root.addWidget(title)
-        description = QLabel(
-            "Выберите старый и новый Excel-отчёты «ИРБИС64 Контроль». Сравнение выполняется "
-            "отдельно для листов «Вещества» и «Иностранные агенты»."
-        )
-        description.setObjectName("cardDescription")
-        description.setWordWrap(True)
-        root.addWidget(description)
-
-        files_card = QFrame()
-        files_card.setObjectName("sectionCard")
-        files_layout = QGridLayout(files_card)
-        files_layout.setContentsMargins(5, 5, 5, 5)
-        files_layout.setHorizontalSpacing(6)
-        files_layout.setVerticalSpacing(4)
-
-        files_layout.addWidget(QLabel("Старый результат:"), 0, 0)
-        self.old_edit = QLineEdit()
-        self.old_edit.setObjectName("filePath")
-        self.old_edit.setReadOnly(True)
-        self.old_edit.setPlaceholderText("Старый Excel-отчёт не выбран")
-        files_layout.addWidget(self.old_edit, 0, 1, 1, 2)
-        old_button = QPushButton("Выбрать старый…")
-        old_button.setObjectName("secondaryButton")
-        old_button.clicked.connect(self.select_old)
-        files_layout.addWidget(old_button, 1, 1, 1, 2)
-
-        files_layout.addWidget(QLabel("Новый результат:"), 2, 0)
-        self.new_edit = QLineEdit()
-        self.new_edit.setObjectName("filePath")
-        self.new_edit.setReadOnly(True)
-        self.new_edit.setPlaceholderText("Новый Excel-отчёт не выбран")
-        files_layout.addWidget(self.new_edit, 2, 1, 1, 2)
-        new_button = QPushButton("Выбрать новый…")
-        new_button.setObjectName("secondaryButton")
-        new_button.clicked.connect(self.select_new)
-        files_layout.addWidget(new_button, 3, 1, 1, 2)
-
-        files_layout.addWidget(QLabel("Файл изменений:"), 4, 0)
-        self.output_edit = QLineEdit()
-        self.output_edit.setObjectName("filePath")
-        self.output_edit.setReadOnly(True)
-        self.output_edit.setPlaceholderText("Путь будет выбран автоматически")
-        files_layout.addWidget(self.output_edit, 4, 1, 1, 2)
-        output_button = QPushButton("Изменить путь…")
-        output_button.setObjectName("mutedButton")
-        output_button.clicked.connect(self.select_output)
-        files_layout.addWidget(output_button, 5, 1, 1, 2)
-        files_layout.setColumnStretch(1, 1)
-        root.addWidget(files_card)
-
-        summary_row = QHBoxLayout()
-        summary_row.setSpacing(5)
-        self.summary_label = QLabel("Сравнение ещё не выполнялось")
-        self.summary_label.setObjectName("statusLabel")
-        self.summary_label.setWordWrap(True)
-        summary_row.addWidget(self.summary_label, 1)
-        self.open_button = QPushButton("Открыть файл изменений")
-        self.open_button.setObjectName("mutedButton")
-        self.open_button.setEnabled(False)
-        self.open_button.clicked.connect(self.open_output)
-        summary_row.addWidget(self.open_button)
-        compare_button = QPushButton("Сравнить")
-        compare_button.setObjectName("primaryButton")
-        compare_button.clicked.connect(self.run_comparison)
-        summary_row.addWidget(compare_button)
-        root.addLayout(summary_row)
-
-        self.table = QTableWidget(0, 6)
-        self.table.setObjectName("resultsTable")
-        self.table.setHorizontalHeaderLabels(
-            ["Изменение", "Раздел", "Автор", "Название", "ISBN", "Изменённые поля"]
-        )
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        table_header = self.table.horizontalHeader()
-        table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        table_header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        table_header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
-        root.addWidget(self.table, 1)
-
-        bottom = QHBoxLayout()
-        bottom.addStretch()
-        close_button = QPushButton("Закрыть")
-        close_button.setObjectName("mutedButton")
-        close_button.clicked.connect(self.accept)
-        bottom.addWidget(close_button)
-        root.addLayout(bottom)
-
-    def _choose_excel(self, title: str) -> str:
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            title,
-            "",
-            "Excel-отчёты (*.xlsx *.xlsm *.xls);;Все файлы (*)",
-        )
-        return path
-
-    def select_old(self) -> None:
-        path = self._choose_excel("Выберите старый результат")
-        if path:
-            self.old_edit.setText(path)
-            self._set_default_output()
-
-    def select_new(self) -> None:
-        path = self._choose_excel("Выберите новый результат")
-        if path:
-            self.new_edit.setText(path)
-            self._set_default_output()
-
-    def _default_output(self) -> str:
-        source = Path(self.new_edit.text().strip()) if self.new_edit.text().strip() else Path.home() / "Documents"
-        folder = source.parent if source.suffix else source
-        name = f"Изменения_между_результатами_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
-        return str(folder / name)
-
-    def _set_default_output(self) -> None:
-        self.output_edit.setText(self._default_output())
-
-    def select_output(self) -> None:
-        initial = self.output_edit.text().strip() or self._default_output()
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Сохранить изменения",
-            initial,
-            "Excel (*.xlsx)",
-        )
-        if path:
-            if not path.lower().endswith(".xlsx"):
-                path += ".xlsx"
-            self.output_edit.setText(path)
-
-    def run_comparison(self) -> None:
-        old_path = self.old_edit.text().strip()
-        new_path = self.new_edit.text().strip()
-        output_path = self.output_edit.text().strip() or self._default_output()
-        if not old_path or not Path(old_path).is_file():
-            QMessageBox.warning(self, APP_TITLE, "Выберите существующий старый Excel-отчёт.")
-            return
-        if not new_path or not Path(new_path).is_file():
-            QMessageBox.warning(self, APP_TITLE, "Выберите существующий новый Excel-отчёт.")
-            return
-        if not output_path.lower().endswith(".xlsx"):
-            output_path += ".xlsx"
-            self.output_edit.setText(output_path)
-
-        self.progress_dialog.start("Запуск сравнения отчётов...")
-        self._append_progress("Старый отчёт: " + old_path)
-        self._append_progress("Новый отчёт: " + new_path)
-        self._append_progress("Файл изменений: " + output_path)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            self.progress_dialog.set_progress(40, "Сравнение файлов...")
-            QApplication.processEvents()
-            differences, summary = compare_result_files(old_path, new_path, output_path)
-        except Exception as exc:
-            self.progress_dialog.finish(f"Ошибка сравнения: {exc}", 0)
-            QMessageBox.critical(self, APP_TITLE, f"Не удалось сравнить отчёты:\n{exc}")
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-
-        self.last_differences = differences
-        self.last_summary = summary
-        self.last_output_path = output_path
-        self.open_button.setEnabled(Path(output_path).is_file())
-        self._fill_preview(differences)
-        self.summary_label.setText(
-            f"Добавлено: {summary.added}   •   Удалено: {summary.removed}   •   "
-            f"Изменено: {summary.changed}   •   Без изменений: {summary.unchanged}"
-        )
-        self._append_progress("Сравнение завершено.")
-        self._append_progress(f"Добавлено: {summary.added}")
-        self._append_progress(f"Удалено: {summary.removed}")
-        self._append_progress(f"Изменено: {summary.changed}")
-        self._append_progress(f"Без изменений: {summary.unchanged}")
-        if summary.warnings:
-            self._append_progress("Предупреждения:")
-            for item in summary.warnings:
-                self._append_progress("- " + item)
-        self.progress_dialog.finish("Готово.", 100)
-        warning_text = ""
-        if summary.warnings:
-            warning_text = "\n\nПредупреждения:\n" + "\n".join(f"• {item}" for item in summary.warnings)
-        QMessageBox.information(
-            self,
-            APP_TITLE,
-            "Сравнение завершено. В итоговом Excel находятся только изменения.\n\n"
-            f"Добавлено: {summary.added}\n"
-            f"Удалено: {summary.removed}\n"
-            f"Изменено: {summary.changed}\n"
-            f"Без изменений: {summary.unchanged}\n\n"
-            f"Файл: {output_path}{warning_text}",
-        )
-
-    def _fill_preview(self, differences: list[ResultDiffRow]) -> None:
-        preview = differences[:1000]
-        self.table.setRowCount(len(preview))
-        fills = {
-            "Добавлено": QColor("#E2F0D9"),
-            "Удалено": QColor("#FCE4D6"),
-            "Изменено": QColor("#FFF2CC"),
-        }
-        for row_index, difference in enumerate(preview):
-            values = [
-                difference.change_type,
-                difference.values.get("Раздел отчёта", ""),
-                difference.values.get("Автор", ""),
-                difference.values.get("Название", ""),
-                difference.values.get("ISBN", ""),
-                ", ".join(difference.changed_fields),
-            ]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                if difference.change_type in fills:
-                    item.setBackground(fills[difference.change_type])
-                self.table.setItem(row_index, column, item)
-        if len(differences) > len(preview):
-            self.summary_label.setText(
-                self.summary_label.text() + f". В окне показаны первые {len(preview)} изменений."
-            )
-
-    def open_output(self) -> None:
-        if self.last_output_path and Path(self.last_output_path).is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_output_path))
-        else:
-            QMessageBox.warning(self, APP_TITLE, "Файл изменений не найден.")
-
-    def _append_progress(self, text: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        self.progress_dialog.append_line(f"[{timestamp}] {text}")
-
-
-class TextComparisonDialog(QDialog):
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Сравнение TXT-баз")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
-        self.resize(780, 520)
-        self.setMinimumSize(600, 400)
-        self.last_output_path = ""
-        self.progress_dialog = ProgressDialog("Ход сравнения TXT", self)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(6)
-
-        title = QLabel("Сравнение текстовых баз")
-        title.setObjectName("dialogTitle")
-        root.addWidget(title)
-
-        files_card = QFrame()
-        files_card.setObjectName("sectionCard")
-        files_layout = QGridLayout(files_card)
-        files_layout.setContentsMargins(5, 5, 5, 5)
-        files_layout.setHorizontalSpacing(8)
-        files_layout.setVerticalSpacing(8)
-
-        files_layout.addWidget(QLabel("Старая TXT-база:"), 0, 0)
-        self.old_edit = QLineEdit()
-        self.old_edit.setObjectName("filePath")
-        self.old_edit.setReadOnly(True)
-        files_layout.addWidget(self.old_edit, 0, 1, 1, 2)
-        old_button = QPushButton("Выбрать старую...")
-        old_button.clicked.connect(self.select_old)
-        files_layout.addWidget(old_button, 1, 1, 1, 2)
-
-        files_layout.addWidget(QLabel("Новая TXT-база:"), 2, 0)
-        self.new_edit = QLineEdit()
-        self.new_edit.setObjectName("filePath")
-        self.new_edit.setReadOnly(True)
-        files_layout.addWidget(self.new_edit, 2, 1, 1, 2)
-        new_button = QPushButton("Выбрать новую...")
-        new_button.clicked.connect(self.select_new)
-        files_layout.addWidget(new_button, 3, 1, 1, 2)
-
-        files_layout.addWidget(QLabel("Отчёт:"), 4, 0)
-        self.output_edit = QLineEdit()
-        self.output_edit.setObjectName("filePath")
-        self.output_edit.setReadOnly(True)
-        files_layout.addWidget(self.output_edit, 4, 1, 1, 2)
-        output_button = QPushButton("Изменить путь...")
-        output_button.clicked.connect(self.select_output)
-        files_layout.addWidget(output_button, 5, 1, 1, 2)
-        files_layout.setColumnStretch(1, 1)
-        root.addWidget(files_card)
-
-        row = QHBoxLayout()
-        self.summary_label = QLabel("Сравнение ещё не выполнялось")
-        self.summary_label.setWordWrap(True)
-        row.addWidget(self.summary_label, 1)
-        self.open_button = QPushButton("Открыть отчёт")
-        self.open_button.setEnabled(False)
-        self.open_button.clicked.connect(self.open_output)
-        row.addWidget(self.open_button)
-        compare_button = QPushButton("Сравнить")
-        compare_button.setObjectName("primaryButton")
-        compare_button.clicked.connect(self.run_comparison)
-        row.addWidget(compare_button)
-        root.addLayout(row)
-
-        self.table = QTableWidget(0, 2)
-        self.table.setHorizontalHeaderLabels(["Изменение", "Запись"])
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        root.addWidget(self.table, 1)
-
-    def _choose_txt(self, title: str) -> str:
-        path, _ = QFileDialog.getOpenFileName(self, title, "", "TXT (*.txt);;Все файлы (*)")
-        return path
-
-    def select_old(self) -> None:
-        path = self._choose_txt("Выберите старую TXT-базу")
-        if path:
-            self.old_edit.setText(path)
-            self._set_default_output()
-
-    def select_new(self) -> None:
-        path = self._choose_txt("Выберите новую TXT-базу")
-        if path:
-            self.new_edit.setText(path)
-            self._set_default_output()
-
-    def _default_output(self) -> str:
-        source = Path(self.new_edit.text().strip()) if self.new_edit.text().strip() else Path.home() / "Documents"
-        folder = source.parent if source.suffix else source
-        return str(folder / f"Изменения_TXT_{datetime.now():%Y%m%d_%H%M%S}.txt")
-
-    def _set_default_output(self) -> None:
-        self.output_edit.setText(self._default_output())
-
-    def select_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчёт", self.output_edit.text() or self._default_output(), "TXT (*.txt)")
-        if path:
-            if not path.lower().endswith(".txt"):
-                path += ".txt"
-            self.output_edit.setText(path)
-
-    def run_comparison(self) -> None:
-        old_path = self.old_edit.text().strip()
-        new_path = self.new_edit.text().strip()
-        output_path = self.output_edit.text().strip() or self._default_output()
-        if not old_path or not Path(old_path).is_file():
-            QMessageBox.warning(self, APP_TITLE, "Выберите существующую старую TXT-базу.")
-            return
-        if not new_path or not Path(new_path).is_file():
-            QMessageBox.warning(self, APP_TITLE, "Выберите существующую новую TXT-базу.")
-            return
-        if not output_path.lower().endswith(".txt"):
-            output_path += ".txt"
-            self.output_edit.setText(output_path)
-
-        self.progress_dialog.start("Запуск сравнения TXT...")
-        try:
-            self.progress_dialog.set_progress(40, "Сравнение записей...")
-            differences, summary = compare_text_files(old_path, new_path, output_path)
-        except Exception as exc:
-            self.progress_dialog.finish(f"Ошибка: {exc}", 0)
-            QMessageBox.critical(self, APP_TITLE, f"Не удалось сравнить TXT-файлы:\n{exc}")
-            return
-
-        self.last_output_path = output_path
-        self.open_button.setEnabled(Path(output_path).is_file())
-        self.summary_label.setText(
-            f"Добавлено: {summary.added}   Удалено: {summary.removed}   "
-            f"Изменено: {summary.changed}   Без изменений: {summary.unchanged}"
-        )
-        self.table.setRowCount(len(differences[:1000]))
-        for row_index, diff in enumerate(differences[:1000]):
-            self.table.setItem(row_index, 0, QTableWidgetItem(diff.change_type))
-            self.table.setItem(row_index, 1, QTableWidgetItem(str(diff.record_number)))
-        self.progress_dialog.finish("Готово.", 100)
-        QMessageBox.information(self, APP_TITLE, f"Сравнение TXT завершено.\n\nФайл: {output_path}")
-
-    def open_output(self) -> None:
-        if self.last_output_path and Path(self.last_output_path).is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_output_path))
-        else:
-            QMessageBox.warning(self, APP_TITLE, "Файл отчёта не найден.")
-
-
-DEFAULT_MARKER_SETTINGS = {
-    **{key: False for key in EXTRA_MATCH_RULES},
-    "use_isbn_matching": True,
-    "use_title_fallback": True,
-    "use_fuzzy": False,
-    "fuzzy_threshold": 90,
-    "create_excel_report": True,
-    "report_substances": True,
-    "report_foreign_agents": True,
-    "report_combined": False,
-    "report_summary": False,
-    "report_deduplicate": True,
-    "report_sort": "record",
-    "report_only": False,
-    "substance_marker": DEFAULT_SUBSTANCE_MARKER,
-    "foreign_agent_marker_template": DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
-    "age_marker": DEFAULT_AGE_MARKER,
-    "substance_marker_field": DEFAULT_SUBSTANCE_MARKER_FIELD,
-    "foreign_agent_marker_field": DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
-    "age_marker_field": DEFAULT_AGE_MARKER_FIELD,
-}
-
-
 def _marker_settings_path() -> Path:
     folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
     return folder / "marker_settings.json"
 
 
+# Возвращает настройки из каталога данных текущего пользователя.
 def load_marker_settings() -> dict[str, str | int | bool]:
-    settings = dict(DEFAULT_MARKER_SETTINGS)
-    path = _marker_settings_path()
-    if not path.is_file():
-        return settings
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        for key, default in settings.items():
-            value = data.get(key)
-            if isinstance(default, bool) and isinstance(value, bool):
-                settings[key] = value
-            elif isinstance(default, str) and isinstance(value, str):
-                settings[key] = value
-            elif isinstance(default, int) and isinstance(value, int):
-                if key == "fuzzy_threshold" and 70 <= value <= 100:
-                    settings[key] = value
-                elif key.endswith("_field") and 1 <= value <= 999:
-                    settings[key] = value
-    except Exception:
-        pass
-    # Нечёткий поиск отключён: приложение работает только с точными совпадениями.
-    settings["use_fuzzy"] = False
-    settings["fuzzy_threshold"] = 90
-    return settings
+    return _load_marker_settings(_marker_settings_path())
 
 
+# Сохраняет настройки в каталоге данных текущего пользователя.
 def save_marker_settings(settings: dict[str, str | int | bool]) -> None:
     path = _marker_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(
-        path,
-        json.dumps(settings, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _save_marker_settings(path, settings)
 
 
-class MatchFieldsComboBox(QComboBox):
-    """Select several rule fields while keeping the dropdown open."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setAccessibleName("Поля правила совпадения")
-        for key, label in MATCH_FIELDS.items():
-            self.addItem(label if key == "isbn" else label.capitalize(), key)
-            self.model().item(self.count() - 1).setCheckable(True)
-            self.setItemData(self.count() - 1, Qt.CheckState.Unchecked.value, Qt.ItemDataRole.CheckStateRole)
-        self.view().viewport().installEventFilter(self)
-        self.view().installEventFilter(self)
-        self._update_summary()
-
-    def rule_text(self) -> str:
-        return " + ".join(
-            MATCH_FIELDS[self.itemData(index)] for index in range(self.count())
-            if self.itemData(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
-        )
-
-    def reset_fields(self) -> None:
-        for index in range(self.count()):
-            self.setItemData(index, Qt.CheckState.Unchecked.value, Qt.ItemDataRole.CheckStateRole)
-        self._update_summary()
-
-    def _toggle_field(self, index: int) -> None:
-        checked = self.itemData(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
-        state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
-        self.setItemData(index, state.value, Qt.ItemDataRole.CheckStateRole)
-        self._update_summary()
-
-    def _update_summary(self) -> None:
-        self.setToolTip(self.rule_text() or "Отметьте нужные поля, затем нажмите «Добавить».")
-        self.setAccessibleDescription(self.toolTip())
-        self.update()
-
-    def eventFilter(self, watched, event) -> bool:
-        if watched is self.view().viewport() and event.type() == QEvent.Type.MouseButtonRelease:
-            if event.button() == Qt.MouseButton.LeftButton:
-                index = self.view().indexAt(event.position().toPoint())
-                if index.isValid():
-                    self._toggle_field(index.row())
-                    return True
-        if watched is self.view() and event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Space:
-                index = self.view().currentIndex()
-                if index.isValid():
-                    self._toggle_field(index.row())
-                return True
-            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-                self.hidePopup()
-                return True
-        return super().eventFilter(watched, event)
-
-    def paintEvent(self, event) -> None:
-        option = QStyleOptionComboBox()
-        self.initStyleOption(option)
-        field = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, self)
-        option.currentText = self.fontMetrics().elidedText(
-            self.rule_text() or "Выберите поля…", Qt.TextElideMode.ElideRight, max(0, field.width() - 4),
-        )
-        painter = QStylePainter(self)
-        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
-        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
-
-
-class ListResizeHandle(QFrame):
-    def __init__(self, target: QListWidget) -> None:
-        super().__init__()
-        self.target = target
-        self._drag_y: float | None = None
-        self._start_height = target.height()
-        self.setFixedHeight(10)
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName("Изменить высоту списка правил")
-        self.setToolTip("Потяните вверх или вниз, чтобы изменить высоту списка. Также можно использовать стрелки ↑ и ↓.")
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 3, 0, 3)
-        grip = QFrame()
-        grip.setFixedSize(32, 3)
-        grip.setStyleSheet("background: #aebdcd; border-radius: 1px;")
-        grip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignCenter)
-
-    def _set_height(self, height: int) -> None:
-        self.target.setFixedHeight(max(76, min(600, height)))
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_y = event.globalPosition().y()
-            self._start_height = self.target.height()
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_y is not None:
-            self._set_height(self._start_height + round(event.globalPosition().y() - self._drag_y))
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_y = None
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
-            self._set_height(self.target.height() + (20 if event.key() == Qt.Key.Key_Down else -20))
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-
-
-class MatchRulesEditor(QWidget):
-    changed = pyqtSignal()
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(4)
-        row = QHBoxLayout()
-        row.setSpacing(4)
-        self.fields_combo = MatchFieldsComboBox()
-        row.addWidget(self.fields_combo, 1)
-        add = QPushButton("Добавить")
-        add.clicked.connect(self.add_rule)
-        row.addWidget(add)
-        root.addLayout(row)
-        self.rules = QListWidget()
-        self.rules.setObjectName("matchRulesList")
-        self.rules.setFixedHeight(76)
-        self.rules.setWordWrap(True)
-        self.rules.setTextElideMode(Qt.TextElideMode.ElideNone)
-        self.rules.setResizeMode(QListWidget.ResizeMode.Adjust)
-        self.rules.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        root.addWidget(self.rules)
-        self.resize_handle = ListResizeHandle(self.rules)
-        root.addWidget(self.resize_handle)
-        self.error = QLabel()
-        self.error.setWordWrap(True)
-        self.error.setStyleSheet("color: #b52f2f;")
-        self.error.hide()
-        root.addWidget(self.error)
-        footer = QHBoxLayout()
-        hint = QLabel("Поля: ISBN, название, автор, издательство, год. Достаточно одного правила.")
-        hint.setWordWrap(True)
-        hint.setObjectName("tabIntro")
-        footer.addWidget(hint, 1)
-        self.remove = QPushButton("Удалить")
-        self.remove.setEnabled(False)
-        self.remove.clicked.connect(self.remove_rule)
-        footer.addWidget(self.remove)
-        root.addLayout(footer)
-        self.rules.currentRowChanged.connect(lambda row: self.remove.setEnabled(row >= 0))
-
-    def values(self) -> dict[str, bool]:
-        active = {self.rules.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.rules.count())}
-        return {key: key in active for key in MATCH_RULE_LABELS}
-
-    @staticmethod
-    def _rule_item(key: str) -> QListWidgetItem:
-        label = MATCH_RULE_LABELS[key]
-        if key in EXTRA_MATCH_RULES and match_rule_needs_review(EXTRA_MATCH_RULES[key][1]):
-            label += " — ручная проверка"
-        item = QListWidgetItem(label)
-        item.setData(Qt.ItemDataRole.UserRole, key)
-        item.setToolTip(label)
-        return item
-
-    def set_values(self, settings: dict[str, str | int | bool]) -> None:
-        self.rules.clear()
-        for key, label in MATCH_RULE_LABELS.items():
-            if settings.get(key, False):
-                self.rules.addItem(self._rule_item(key))
-        self.error.hide()
-
-    def add_rule(self) -> None:
-        try:
-            text = self.fields_combo.rule_text()
-            if not text:
-                raise ValueError("Выберите поля в выпадающем списке.")
-            key = parse_match_rule(text)
-            if self.values()[key]:
-                raise ValueError("Такое правило уже добавлено, в том числе с другим порядком полей.")
-        except ValueError as exc:
-            self.error.setText(str(exc))
-            self.error.show()
-            return
-        item = self._rule_item(key)
-        self.rules.addItem(item)
-        self.rules.setCurrentItem(item)
-        self.rules.scrollToItem(item)
-        self.fields_combo.reset_fields()
-        self.error.hide()
-        self.changed.emit()
-
-    def remove_rule(self) -> None:
-        if self.rules.currentRow() < 0:
-            return
-        if self.rules.count() == 1:
-            self.error.setText("Оставьте хотя бы одно правило. Сначала добавьте новое, затем удалите старое.")
-            self.error.show()
-            return
-        self.rules.takeItem(self.rules.currentRow())
-        self.error.hide()
-        self.changed.emit()
-
-
+# Проверяет значения служебных полей перед сохранением настроек меток.
 class MarkerSettingsDialog(QDialog):
     def __init__(self, settings: dict[str, str | int | bool], parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -2087,12 +231,16 @@ class MarkerSettingsDialog(QDialog):
         self.foreign_edit = QLineEdit(str(settings["foreign_agent_marker_template"]))
         self.foreign_edit.setObjectName("settingsField")
         self.foreign_edit.setPlaceholderText(DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
-        self.foreign_edit.setToolTip("{name} будет заменено на совпавшего автора. Организации и проекты в эту метку не записываются")
+        self.foreign_edit.setToolTip(
+            "{name} будет заменено на совпавшего автора. Организации и проекты в эту метку не записываются"
+        )
         form.addWidget(foreign_label, 2, 0)
         form.addWidget(self.foreign_field_spin, 2, 1)
         form.addWidget(self.foreign_edit, 2, 2)
 
-        foreign_hint = QLabel("Используйте {name}, чтобы подставить совпавшего автора. Если у автора есть псевдоним, он будет оформлен как «ФИО (ПСЕВДОНИМ: ...)».")
+        foreign_hint = QLabel(
+            "Используйте {name}, чтобы подставить совпавшего автора. Если у автора есть псевдоним, он будет оформлен как «ФИО (ПСЕВДОНИМ: ...)»."
+        )
         foreign_hint.setObjectName("cardDescription")
         foreign_hint.setWordWrap(True)
         form.addWidget(foreign_hint, 3, 2)
@@ -2173,9 +321,7 @@ class MarkerSettingsDialog(QDialog):
 
     def _update_preview(self) -> None:
         values = self._values()
-        foreign_preview = str(values["foreign_agent_marker_template"]).replace(
-            "{name}", "ИВАНОВ ИВАН ИВАНОВИЧ"
-        )
+        foreign_preview = str(values["foreign_agent_marker_template"]).replace("{name}", "ИВАНОВ ИВАН ИВАНОВИЧ")
         self.preview.setText(
             f"Пример: #{int(values['substance_marker_field']):03d}: "
             f"{values['substance_marker'] or 'не добавляется'}; "
@@ -2213,6 +359,7 @@ class MarkerSettingsDialog(QDialog):
         self.accept()
 
 
+# Редактирует общие настройки и передаёт их окну только после сохранения.
 class ApplicationSettingsPage(QWidget):
     saved = pyqtSignal(object)
     cancelled = pyqtSignal()
@@ -2220,7 +367,7 @@ class ApplicationSettingsPage(QWidget):
     def __init__(
         self,
         settings: ApplicationSettings,
-        parent: "MainWindow | None" = None,
+        parent: MainWindow | None = None,
     ) -> None:
         super().__init__(parent)
         self.settings = settings
@@ -2236,9 +383,7 @@ class ApplicationSettingsPage(QWidget):
 
         safety_card = SectionCard("Безопасность базы", "")
         layout.addWidget(safety_card)
-        self.backup_check = QCheckBox(
-            "Создавать rollback-копию базы перед изменением записей"
-        )
+        self.backup_check = QCheckBox("Создавать rollback-копию базы перед изменением записей")
         self.backup_check.setChecked(settings.create_database_backup)
         self.backup_check.setToolTip(
             "Рекомендуется оставить включённым: копия позволяет восстановить исходные поля MFN."
@@ -2247,9 +392,7 @@ class ApplicationSettingsPage(QWidget):
 
         updates_card = SectionCard("Обновления", "")
         layout.addWidget(updates_card)
-        self.auto_updates_check = QCheckBox(
-            "Проверять обновления на GitHub при запуске"
-        )
+        self.auto_updates_check = QCheckBox("Проверять обновления на GitHub при запуске")
         self.auto_updates_check.setChecked(settings.check_updates_on_start)
         updates_card.body.addWidget(self.auto_updates_check)
         check_button = QPushButton("Проверить обновление сейчас")
@@ -2356,6 +499,7 @@ class ApplicationSettingsPage(QWidget):
         self.saved.emit(settings)
 
 
+# Связывает вкладки, настройки и фоновые операции, сохраняя состояние текущего запуска.
 class MainWindow(QMainWindow):
     RUN_JOURNAL_MAX_LINES = 10_000
     IRBIS_HEALTH_CHECK_INTERVAL_MS = 60_000
@@ -2375,8 +519,6 @@ class MainWindow(QMainWindow):
         self.worker: QObject | None = None
         self.irbis_thread: QThread | None = None
         self.irbis_worker: IrbisOperationWorker | None = None
-        self._irbis_operation = ""
-        self._irbis_operation_silent = False
         self._irbis_connection_state = "error"
         self._irbis_connection_status_text = "Готово к подключению"
         self._irbis_response_ms: int | None = None
@@ -2418,7 +560,7 @@ class MainWindow(QMainWindow):
         return QIcon(resource_path("assets", filename))
 
     def _align_all_control_heights(self) -> None:
-        """Keep the main-window fields and buttons at one compact height."""
+        """Согласует высоту полей и кнопок, чтобы форма оставалась компактной."""
         field_height = max(
             self.irbis_host_edit.minimumHeight(),
             self.irbis_host_edit.sizeHint().height(),
@@ -2548,7 +690,7 @@ class MainWindow(QMainWindow):
                 if connector is None:
                     raise FileNotFoundError(
                         "Рядом с ИРБИС64 Контроль не найден IRBIS64ControlDB.exe. "
-                        "Пересоберите комплект через build_exe.bat."
+                        "Пересоберите комплект через scripts\\build_exe.bat."
                     )
                 command = [str(connector)]
             else:
@@ -2563,11 +705,7 @@ class MainWindow(QMainWindow):
                 command.extend(["--modified", modified_path])
             subprocess.Popen(
                 command,
-                cwd=str(
-                    Path(command[0]).resolve().parent
-                    if getattr(sys, "frozen", False)
-                    else project_root()
-                ),
+                cwd=str(Path(command[0]).resolve().parent if getattr(sys, "frozen", False) else project_root()),
             )
         except Exception as exc:
             QMessageBox.warning(self, APP_TITLE, f"Не удалось запустить подключение к базе:\n{exc}")
@@ -2739,20 +877,6 @@ class MainWindow(QMainWindow):
                 path += ".txt"
             self.modified_database_edit.setText(path)
 
-    def _pick_irbis_snapshot(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Рабочая TXT-копия ИРБИС",
-            self.irbis_snapshot_edit.text().strip(),
-            "TXT (*.txt)",
-        )
-        if path:
-            if not path.lower().endswith(".txt"):
-                path += ".txt"
-            self.irbis_snapshot_edit.setText(path)
-            self.irbis_manifest_edit.setText(str(Path(path).with_suffix(".map.json")))
-            self._save_irbis_config()
-
     def _current_irbis_database(self) -> str:
         data = self.irbis_db_combo.currentData()
         return str(data if data is not None else self.irbis_db_combo.currentText()).strip()
@@ -2785,7 +909,7 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 self.irbis_db_combo.setCurrentIndex(index)
         self.irbis_db_combo.blockSignals(False)
-        # Keep the embedded refresh action available even when the list is empty.
+        # Обновление списка должно быть доступно и до получения первой базы.
         self.irbis_db_combo.setEnabled(True)
 
     def _update_direct_mode_ui(self, checked: bool | None = None) -> None:
@@ -2795,14 +919,11 @@ class MainWindow(QMainWindow):
             self.database_button.setVisible(not direct)
             self.clear_database_button.setVisible(not direct)
             database = self._current_irbis_database() or "не выбрана"
-            self.direct_source_label.setText(
-                f"ИРБИС · {database}" if direct else "Локальная TXT-база"
-            )
+            self.direct_source_label.setText(f"ИРБИС · {database}" if direct else "Локальная TXT-база")
             self._sync_direct_source_status()
         if hasattr(self, "irbis_base_status"):
             self.irbis_base_status.setText(
-                "База читается пакетами при запуске"
-                if direct else "Выберите локальный TXT на вкладке «Источники»"
+                "База читается пакетами при запуске" if direct else "Выберите локальный TXT на вкладке «Источники»"
             )
         if hasattr(self, "irbis_local_hint"):
             self.irbis_local_hint.setVisible(not direct)
@@ -2821,9 +942,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "marker_card"):
             self.marker_card.title_label.setText("Метки в ИРБИС" if direct else "Метки в TXT-копии")
         if hasattr(self, "cleanup_button"):
-            self.cleanup_button.setText(
-                "Удалить метки из ИРБИС" if direct else "Удалить все метки из TXT"
-            )
+            self.cleanup_button.setText("Удалить метки из ИРБИС" if direct else "Удалить все метки из TXT")
         if direct and hasattr(self, "_irbis_health_debounce"):
             self._set_irbis_status("Проверка подключения к ИРБИС…", "running")
             self._irbis_health_debounce.start(250)
@@ -2833,11 +952,7 @@ class MainWindow(QMainWindow):
             return
         direct = self.direct_irbis_checkbox.isChecked()
         state = self._irbis_connection_state if direct else "local"
-        status_text = (
-            self._irbis_connection_status_text
-            if direct
-            else "Используется локальная TXT-база"
-        )
+        status_text = self._irbis_connection_status_text if direct else "Используется локальная TXT-база"
         self.direct_source_dot.setProperty("state", state)
         short_status = {
             "success": "Подключено",
@@ -2925,8 +1040,7 @@ class MainWindow(QMainWindow):
             "modified": self.last_modified_database_path or self.modified_database_edit.text().strip(),
         }
         atomic_write_text(
-            database_connector_config_path(),
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            database_connector_config_path(), json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
     def _irbis_params(self) -> dict[str, object]:
@@ -2946,10 +1060,16 @@ class MainWindow(QMainWindow):
             "backup_dir": str(app_data_dir() / "backups"),
             "create_backup": self.app_settings.create_database_backup,
             "substance_marker": self.marker_settings.get("substance_marker", DEFAULT_SUBSTANCE_MARKER),
-            "foreign_agent_marker_template": self.marker_settings.get("foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE),
+            "foreign_agent_marker_template": self.marker_settings.get(
+                "foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE
+            ),
             "age_marker": self.marker_settings.get("age_marker", DEFAULT_AGE_MARKER),
-            "substance_marker_field": int(self.marker_settings.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)),
-            "foreign_agent_marker_field": int(self.marker_settings.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)),
+            "substance_marker_field": int(
+                self.marker_settings.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)
+            ),
+            "foreign_agent_marker_field": int(
+                self.marker_settings.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
+            ),
             "age_marker_field": int(self.marker_settings.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
         }
 
@@ -2972,8 +1092,6 @@ class MainWindow(QMainWindow):
 
         if not silent:
             self._save_irbis_config()
-        self._irbis_operation = mode
-        self._irbis_operation_silent = silent
         if not silent:
             self.irbis_progress.setValue(0)
             self.irbis_progress.show()
@@ -3043,8 +1161,7 @@ class MainWindow(QMainWindow):
                 "success",
             )
             self._append_progress(
-                f"Тест чтения завершён. Автоматически выбран пакет: {page_size}; "
-                f"записей по запросу: {probe_total:,}."
+                f"Тест чтения завершён. Автоматически выбран пакет: {page_size}; записей по запросу: {probe_total:,}."
             )
             self._save_irbis_config()
             return
@@ -3082,7 +1199,9 @@ class MainWindow(QMainWindow):
             self._set_default_outputs(force=True)
             self.irbis_base_status.setText(f"Готово: {len(manifest.records)} записей • {snapshot.name}")
             self._set_irbis_status(f"Рабочая база готова: {len(manifest.records)} записей", "success")
-            self._append_progress(f"Рабочая база готова: {len(manifest.records)} записей. Файл автоматически выбран для проверки.")
+            self._append_progress(
+                f"Рабочая база готова: {len(manifest.records)} записей. Файл автоматически выбран для проверки."
+            )
             self.last_modified_database_path = ""
             self.write_irbis_button.setEnabled(
                 snapshot.is_file() and Path(self.irbis_manifest_edit.text().strip()).is_file()
@@ -3103,12 +1222,12 @@ class MainWindow(QMainWindow):
             if backup:
                 self._append_progress(f"Rollback-копия перед очисткой: {backup}")
             QMessageBox.information(
-                self, APP_TITLE,
+                self,
+                APP_TITLE,
                 f"Очистка меток в ИРБИС завершена.\n\n"
                 f"Просмотрено записей: {scanned:,}\n"
                 f"Записей с метками: {found:,}\n"
-                f"Очищено записей: {written:,}"
-                + (f"\n\nRollback-копия: {backup}" if backup else ""),
+                f"Очищено записей: {written:,}" + (f"\n\nRollback-копия: {backup}" if backup else ""),
             )
             return
         if mode == "apply":
@@ -3150,16 +1269,13 @@ class MainWindow(QMainWindow):
             self.irbis_thread.deleteLater()
         self.irbis_thread = None
         self.irbis_worker = None
-        self._irbis_operation_silent = False
         self.irbis_test_button.setEnabled(True)
         self.irbis_tune_read_button.setEnabled(True)
         self.irbis_refresh_databases_action.setEnabled(True)
         self.irbis_fetch_button.setEnabled(True)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(True)
-        modified_candidates = [
-            item.strip() for item in self.last_modified_database_path.split(";") if item.strip()
-        ]
+        modified_candidates = [item.strip() for item in self.last_modified_database_path.split(";") if item.strip()]
         if not modified_candidates:
             output_candidate = self.modified_database_edit.text().strip()
             if output_candidate and Path(output_candidate).is_file():
@@ -3190,8 +1306,9 @@ class MainWindow(QMainWindow):
                 modified_paths = [snapshot_candidate]
         if len(modified_paths) != 1 or not Path(modified_paths[0]).is_file():
             QMessageBox.warning(
-                self, APP_TITLE,
-                "Не найдена TXT-копия для отправки в ИРБИС. Сначала получите базу или создайте очищенную/изменённую копию."
+                self,
+                APP_TITLE,
+                "Не найдена TXT-копия для отправки в ИРБИС. Сначала получите базу или создайте очищенную/изменённую копию.",
             )
             return
         modified = modified_paths[0]
@@ -3208,8 +1325,9 @@ class MainWindow(QMainWindow):
             return
         if len(selected_databases) != 1 or selected_databases[0] != snapshot:
             QMessageBox.warning(
-                self, APP_TITLE,
-                "Текущая выбранная TXT-база не совпадает со снимком, полученным из ИРБИС. Для безопасности запись отменена."
+                self,
+                APP_TITLE,
+                "Текущая выбранная TXT-база не совпадает со снимком, полученным из ИРБИС. Для безопасности запись отменена.",
             )
             return
         source_name = Path(modified).name
@@ -3248,9 +1366,7 @@ class MainWindow(QMainWindow):
         asset: ReleaseAsset | None = None,
     ) -> None:
         self.update_button.setEnabled(False)
-        self.update_button.setText(
-            "Загрузка обновления…" if mode == "download" else "Проверка обновления…"
-        )
+        self.update_button.setText("Загрузка обновления…" if mode == "download" else "Проверка обновления…")
         self.update_thread = QThread(self)
         self.update_worker = UpdateWorker(mode, asset)
         self.update_worker.moveToThread(self.update_thread)
@@ -3320,8 +1436,7 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.information(
                 self,
                 APP_TITLE,
-                f"Доступна версия {release.version}. Автоустановка работает в EXE-сборке. "
-                "Открыть страницу релиза?",
+                f"Доступна версия {release.version}. Автоустановка работает в EXE-сборке. Открыть страницу релиза?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if answer == QMessageBox.StandardButton.Yes:
@@ -3445,14 +1560,10 @@ class MainWindow(QMainWindow):
                 source_path,
                 output_path,
                 substance_marker=str(self.marker_settings["substance_marker"]),
-                foreign_agent_marker_template=str(
-                    self.marker_settings["foreign_agent_marker_template"]
-                ),
+                foreign_agent_marker_template=str(self.marker_settings["foreign_agent_marker_template"]),
                 age_marker=str(self.marker_settings["age_marker"]),
                 substance_marker_field=int(self.marker_settings["substance_marker_field"]),
-                foreign_agent_marker_field=int(
-                    self.marker_settings["foreign_agent_marker_field"]
-                ),
+                foreign_agent_marker_field=int(self.marker_settings["foreign_agent_marker_field"]),
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
             )
         except Exception as exc:
@@ -3468,9 +1579,7 @@ class MainWindow(QMainWindow):
             and Path(self.irbis_snapshot_edit.text().strip()).is_file()
         )
         self._save_irbis_config()
-        self._append_progress(
-            f"Очищенная TXT-копия выбрана для отправки в ИРБИС: {cleaned_path}"
-        )
+        self._append_progress(f"Очищенная TXT-копия выбрана для отправки в ИРБИС: {cleaned_path}")
         QMessageBox.information(
             self,
             APP_TITLE,
@@ -3516,15 +1625,9 @@ class MainWindow(QMainWindow):
         self.main_title.setObjectName("mainTitle")
         self.subtitle_primary = QLabel("Проверка и контроль библиотечных баз")
         self.subtitle_primary.setObjectName("subtitle")
-        self.subtitle_secondary = QLabel("")
-        self.subtitle_secondary.hide()
-        self.subtitle_label = self.subtitle_primary
         header_text.addWidget(self.main_title)
         header_text.addWidget(self.subtitle_primary)
         self.header_layout.addLayout(header_text, 1)
-
-        self.header_divider = QFrame(); self.header_divider.hide()
-        self.header_watermark = QLabel(); self.header_watermark.hide()
 
         self.header_actions = QHBoxLayout()
         self.header_actions.setSpacing(4)
@@ -3564,14 +1667,60 @@ class MainWindow(QMainWindow):
         self.workflow_tabs.tabBar().setMovable(False)
         self.workflow_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
         self.workflow_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-        # The permanent settings page uses a navigation item aligned to the right.
+        # Кнопка настроек остаётся справа от вкладок и доступна с любой страницы.
         self.workflow_tabs.setCornerWidget(
             self.marker_settings_button,
             Qt.Corner.TopRightCorner,
         )
         self.root_layout.addWidget(self.workflow_tabs, 1)
 
-        # ------------------------- Вкладка 1: ИРБИС -------------------------
+        self.section_cards: list[SectionCard] = []
+        self._build_connection_tab()
+        compare_card, utility_row = self._build_sources_tab()
+        self._build_lists_tab(compare_card, utility_row)
+        self._build_markers_tab()
+        self._build_results_tab()
+
+        self._responsive_mode = None
+
+        self._restore_irbis_config()
+        self.irbis_host_edit.textChanged.connect(self._invalidate_irbis_connection_status)
+        self.irbis_port_spin.valueChanged.connect(self._invalidate_irbis_connection_status)
+        self.irbis_login_edit.textChanged.connect(self._invalidate_irbis_connection_status)
+        self.irbis_password_edit.textChanged.connect(self._invalidate_irbis_connection_status)
+        self._apply_marker_settings_to_ui()
+        for checkbox in (
+            self.create_excel_report_check,
+            self.report_only_check,
+            *self.report_list_checks,
+            self.report_deduplicate_check,
+        ):
+            checkbox.toggled.connect(self._queue_report_settings_autosave)
+        self.report_sort_combo.currentIndexChanged.connect(self._queue_report_settings_autosave)
+        self._marker_autosave_timer = QTimer(self)
+        self._marker_autosave_timer.setSingleShot(True)
+        self._marker_autosave_timer.timeout.connect(self._autosave_marker_settings)
+        self.match_rules_editor.changed.connect(self._queue_marker_settings_autosave)
+        for widget in (
+            self.substance_marker_edit,
+            self.foreign_marker_edit,
+            self.age_marker_edit,
+            self.substance_field_spin,
+            self.foreign_field_spin,
+            self.age_field_spin,
+        ):
+            if isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self._queue_marker_settings_autosave)
+            else:
+                widget.valueChanged.connect(self._queue_marker_settings_autosave)
+        self._update_database_summary()
+        self._update_foreign_agents_summary()
+        self._update_excel_summary()
+        self._set_default_outputs(force=False)
+        self._apply_responsive_layout(force=True)
+
+    # Собирает параметры подключения и состояние сервера на одной вкладке.
+    def _build_connection_tab(self) -> None:
         self.irbis_tab = QWidget()
         self.irbis_tab.setObjectName("tabPage")
         irbis_root = QVBoxLayout(self.irbis_tab)
@@ -3594,10 +1743,13 @@ class MainWindow(QMainWindow):
         form.setHorizontalSpacing(7)
         form.setVerticalSpacing(4)
         self.irbis_host_edit = QLineEdit()
-        self.irbis_port_spin = QSpinBox(); self.irbis_port_spin.setRange(1, 65535); self.irbis_port_spin.setValue(6666)
+        self.irbis_port_spin = QSpinBox()
+        self.irbis_port_spin.setRange(1, 65535)
+        self.irbis_port_spin.setValue(6666)
         self.irbis_port_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.irbis_login_edit = QLineEdit()
-        self.irbis_password_edit = QLineEdit(); self.irbis_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.irbis_password_edit = QLineEdit()
+        self.irbis_password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.irbis_show_password = self.irbis_password_edit.addAction(
             self._asset_icon("eye.svg"),
             QLineEdit.ActionPosition.TrailingPosition,
@@ -3607,12 +1759,8 @@ class MainWindow(QMainWindow):
         self.irbis_show_password.setToolTip("Показать пароль")
 
         def toggle_irbis_password(visible: bool) -> None:
-            self.irbis_password_edit.setEchoMode(
-                QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
-            )
-            self.irbis_show_password.setIcon(
-                self._asset_icon("eye-crossed.svg" if visible else "eye.svg")
-            )
+            self.irbis_password_edit.setEchoMode(QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password)
+            self.irbis_show_password.setIcon(self._asset_icon("eye-crossed.svg" if visible else "eye.svg"))
             hint = "Скрыть пароль" if visible else "Показать пароль"
             self.irbis_show_password.setText(hint)
             self.irbis_show_password.setToolTip(hint)
@@ -3622,7 +1770,9 @@ class MainWindow(QMainWindow):
         self.irbis_db_combo.setToolTip("Список загружается с сервера ИРБИС из доступных баз АРМ Каталогизатор.")
         self.irbis_db_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.irbis_db_combo.setMinimumContentsLength(18)
-        self.irbis_db_combo.currentIndexChanged.connect(lambda _index: self._update_direct_mode_ui() if hasattr(self, "direct_source_label") else None)
+        self.irbis_db_combo.currentIndexChanged.connect(
+            lambda _index: self._update_direct_mode_ui() if hasattr(self, "direct_source_label") else None
+        )
         self.irbis_refresh_databases_action = self.irbis_db_combo.refresh_action
         self.irbis_refresh_databases_action.setText("Обновить список баз")
         self.irbis_refresh_databases_action.setToolTip("Заново получить список существующих баз с сервера ИРБИС")
@@ -3680,11 +1830,11 @@ class MainWindow(QMainWindow):
         self.direct_irbis_checkbox = QCheckBox()
         self.direct_irbis_checkbox.setAccessibleName("Работать напрямую с ИРБИС")
         self.direct_irbis_checkbox.setChecked(True)
-        self.direct_irbis_checkbox.setToolTip("Без создания полной TXT-копии: чтение пакетами с сервера и запись найденных меток сразу в ИРБИС.")
-        self.direct_irbis_label = QLabel("Работать напрямую с ИРБИС")
-        self.direct_irbis_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        self.direct_irbis_checkbox.setToolTip(
+            "Без создания полной TXT-копии: чтение пакетами с сервера и запись найденных меток сразу в ИРБИС."
         )
+        self.direct_irbis_label = QLabel("Работать напрямую с ИРБИС")
+        self.direct_irbis_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.direct_irbis_label.setBuddy(self.direct_irbis_checkbox)
         self.direct_irbis_label.setToolTip(self.direct_irbis_checkbox.toolTip())
         self.direct_irbis_box = QWidget()
@@ -3707,24 +1857,27 @@ class MainWindow(QMainWindow):
         direct_note.setWordWrap(True)
         base_card.body.addWidget(direct_note)
 
-        batch_row = QHBoxLayout(); batch_row.setSpacing(4)
-        batch_label = QLabel("Пакет чтения"); batch_label.setObjectName("fieldLabel"); batch_row.addWidget(batch_label)
+        batch_row = QHBoxLayout()
+        batch_row.setSpacing(4)
+        batch_label = QLabel("Пакет чтения")
+        batch_label.setObjectName("fieldLabel")
+        batch_row.addWidget(batch_label)
         self.irbis_page_size_spin = QSpinBox()
         self.irbis_page_size_spin.setRange(100, 2000)
         self.irbis_page_size_spin.setSingleStep(100)
         self.irbis_page_size_spin.setValue(500)
         self.irbis_page_size_spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.irbis_page_size_spin.setSuffix(" зап.")
-        self.irbis_page_size_spin.setToolTip("Подбирается кнопкой «Тест»; при необходимости значение можно изменить вручную.")
+        self.irbis_page_size_spin.setToolTip(
+            "Подбирается кнопкой «Тест»; при необходимости значение можно изменить вручную."
+        )
         batch_row.addWidget(self.irbis_page_size_spin)
         self.irbis_tune_read_button = QPushButton("Тест")
         self.irbis_tune_read_button.setObjectName("mutedButton")
         self.irbis_tune_read_button.setToolTip(
             "Проверить доступные размеры пакета чтения и автоматически выбрать максимальный стабильный"
         )
-        self.irbis_tune_read_button.clicked.connect(
-            lambda: self._start_irbis_operation("tune_read")
-        )
+        self.irbis_tune_read_button.clicked.connect(lambda: self._start_irbis_operation("tune_read"))
         batch_row.addWidget(self.irbis_tune_read_button)
         batch_row.addStretch()
         base_card.body.addLayout(batch_row)
@@ -3751,10 +1904,17 @@ class MainWindow(QMainWindow):
         irbis_columns.setColumnStretch(1, 2)
         irbis_root.addLayout(irbis_columns)
 
-        irbis_actions = QFrame(); irbis_actions.setObjectName("irbisActions")
-        ia = QVBoxLayout(irbis_actions); ia.setContentsMargins(0, 0, 0, 0); ia.setSpacing(4)
-        action_box = QFrame(); action_box.setObjectName("actionCard")
-        action_row = QGridLayout(action_box); action_row.setContentsMargins(5, 5, 5, 5); action_row.setHorizontalSpacing(4); action_row.setVerticalSpacing(4)
+        irbis_actions = QFrame()
+        irbis_actions.setObjectName("irbisActions")
+        ia = QVBoxLayout(irbis_actions)
+        ia.setContentsMargins(0, 0, 0, 0)
+        ia.setSpacing(4)
+        action_box = QFrame()
+        action_box.setObjectName("actionCard")
+        action_row = QGridLayout(action_box)
+        action_row.setContentsMargins(5, 5, 5, 5)
+        action_row.setHorizontalSpacing(4)
+        action_row.setVerticalSpacing(4)
         self.irbis_action_layout = action_row
         self.irbis_test_button = QPushButton("Подключиться")
         self.irbis_test_button.setObjectName("primaryButton")
@@ -3771,7 +1931,9 @@ class MainWindow(QMainWindow):
         action_row.addWidget(self.irbis_test_button, 0, 0)
         action_row.setColumnStretch(0, 1)
         ia.addWidget(action_box)
-        self.irbis_progress = QProgressBar(); self.irbis_progress.setRange(0, 100); self.irbis_progress.setValue(0)
+        self.irbis_progress = QProgressBar()
+        self.irbis_progress.setRange(0, 100)
+        self.irbis_progress.setValue(0)
         self.irbis_progress.hide()
         action_row.addWidget(self.irbis_progress, 1, 0)
         self.irbis_status_box = QWidget()
@@ -3795,12 +1957,18 @@ class MainWindow(QMainWindow):
         irbis_root.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.workflow_tabs.addTab(self.irbis_tab, "Подключение")
 
-        # --------------------- Вкладка 2: источник записей ------------------
-        self.files_tab = QWidget(); self.files_tab.setObjectName("tabPage")
-        files_root = QVBoxLayout(self.files_tab); files_root.setContentsMargins(6, 6, 6, 6); files_root.setSpacing(7)
+    # Собирает источники данных и правила, по которым будут сверяться записи.
+    def _build_sources_tab(self) -> tuple[SectionCard, QHBoxLayout]:
+        self.files_tab = QWidget()
+        self.files_tab.setObjectName("tabPage")
+        files_root = QVBoxLayout(self.files_tab)
+        files_root.setContentsMargins(6, 6, 6, 6)
+        files_root.setSpacing(7)
         files_intro = QLabel("Выберите источник библиографических записей. В прямом режиме TXT-база не требуется.")
         self.files_intro = files_intro
-        files_intro.setObjectName("tabIntro"); files_intro.setWordWrap(True); files_root.addWidget(files_intro)
+        files_intro.setObjectName("tabIntro")
+        files_intro.setWordWrap(True)
+        files_root.addWidget(files_intro)
 
         self.database_card = SectionCard("Источник записей", "")
         self.direct_source_dot = QLabel()
@@ -3845,46 +2013,78 @@ class MainWindow(QMainWindow):
         source_summary_row.addLayout(source_left, 1)
         self.source_useful_links_button = QPushButton("Справочные сайты")
         self.source_useful_links_button.setObjectName("mutedButton")
-        self.source_useful_links_button.setToolTip(
-            "Открыть полезные ссылки на справочные и экспертные материалы"
-        )
+        self.source_useful_links_button.setToolTip("Открыть полезные ссылки на справочные и экспертные материалы")
         self.source_useful_links_button.clicked.connect(self.open_useful_links)
         source_summary_row.addWidget(
             self.source_useful_links_button,
             alignment=Qt.AlignmentFlag.AlignVCenter,
         )
         self.database_card.body.addLayout(source_summary_row)
-        self.database_edit = QLineEdit(); self.database_edit.hide()
-        self.database_list = QListWidget(); self.database_list.setObjectName("compactList"); self.database_list.setMaximumHeight(58); self.database_list.setMinimumHeight(38)
-        self.database_button = QPushButton("Добавить TXT-базы"); self.database_button.setObjectName("secondaryButton"); self.database_button.clicked.connect(self.select_database)
-        self.clear_database_button = QPushButton("Очистить"); self.clear_database_button.setObjectName("mutedButton"); self.clear_database_button.clicked.connect(self._clear_database_files)
-        database_row = QGridLayout(); database_row.setHorizontalSpacing(4); database_row.setVerticalSpacing(4)
+        self.database_edit = QLineEdit()
+        self.database_edit.hide()
+        self.database_list = QListWidget()
+        self.database_list.setObjectName("compactList")
+        self.database_list.setMaximumHeight(58)
+        self.database_list.setMinimumHeight(38)
+        self.database_button = QPushButton("Добавить TXT-базы")
+        self.database_button.setObjectName("secondaryButton")
+        self.database_button.clicked.connect(self.select_database)
+        self.clear_database_button = QPushButton("Очистить")
+        self.clear_database_button.setObjectName("mutedButton")
+        self.clear_database_button.clicked.connect(self._clear_database_files)
+        database_row = QGridLayout()
+        database_row.setHorizontalSpacing(4)
+        database_row.setVerticalSpacing(4)
         self.database_controls = database_row
         self.database_card.body.addLayout(database_row)
         self.direct_irbis_checkbox.toggled.connect(self._update_direct_mode_ui)
         files_root.addWidget(self.database_card)
 
-        sources_row = QGridLayout(); sources_row.setHorizontalSpacing(6); sources_row.setVerticalSpacing(5); self.sources_grid = sources_row
+        sources_row = QGridLayout()
+        sources_row.setHorizontalSpacing(6)
+        sources_row.setVerticalSpacing(5)
+        self.sources_grid = sources_row
         self.foreign_agents_card = SectionCard("Реестр иностранных агентов", "")
-        self.foreign_agents_edit = QLineEdit(); self.foreign_agents_edit.hide()
-        self.foreign_agents_list = QListWidget(); self.foreign_agents_list.setObjectName("compactList"); self.foreign_agents_list.setMaximumHeight(58); self.foreign_agents_list.setMinimumHeight(38)
-        self.foreign_agents_button = QPushButton("Добавить Excel"); self.foreign_agents_button.setObjectName("secondaryButton"); self.foreign_agents_button.clicked.connect(self.select_foreign_agents)
-        self.clear_foreign_agents_button = QPushButton("Очистить"); self.clear_foreign_agents_button.setObjectName("mutedButton"); self.clear_foreign_agents_button.clicked.connect(self._clear_foreign_agents)
-        fa_actions = QGridLayout(); fa_actions.setHorizontalSpacing(4); fa_actions.setVerticalSpacing(4)
+        self.foreign_agents_edit = QLineEdit()
+        self.foreign_agents_edit.hide()
+        self.foreign_agents_list = QListWidget()
+        self.foreign_agents_list.setObjectName("compactList")
+        self.foreign_agents_list.setMaximumHeight(58)
+        self.foreign_agents_list.setMinimumHeight(38)
+        self.foreign_agents_button = QPushButton("Добавить Excel")
+        self.foreign_agents_button.setObjectName("secondaryButton")
+        self.foreign_agents_button.clicked.connect(self.select_foreign_agents)
+        self.clear_foreign_agents_button = QPushButton("Очистить")
+        self.clear_foreign_agents_button.setObjectName("mutedButton")
+        self.clear_foreign_agents_button.clicked.connect(self._clear_foreign_agents)
+        fa_actions = QGridLayout()
+        fa_actions.setHorizontalSpacing(4)
+        fa_actions.setVerticalSpacing(4)
         self.foreign_agents_controls = fa_actions
         self.foreign_agents_card.body.addLayout(fa_actions)
         sources_row.addWidget(self.foreign_agents_card, 0, 0)
 
         self.excel_card = SectionCard("Реестр по наркотическим веществам", "")
-        self.excel_list = QListWidget(); self.excel_list.setObjectName("compactList"); self.excel_list.setMaximumHeight(58); self.excel_list.setMinimumHeight(38)
-        self.excel_summary_edit = QLineEdit(); self.excel_summary_edit.hide()
-        self.add_excel_button = QPushButton("Добавить Excel"); self.add_excel_button.setObjectName("secondaryButton"); self.add_excel_button.clicked.connect(self.add_excel_files)
-        self.clear_excel_button = QPushButton("Очистить"); self.clear_excel_button.setObjectName("mutedButton"); self.clear_excel_button.clicked.connect(self._clear_excel_files)
-        ex_actions = QGridLayout(); ex_actions.setHorizontalSpacing(4); ex_actions.setVerticalSpacing(4)
+        self.excel_list = QListWidget()
+        self.excel_list.setObjectName("compactList")
+        self.excel_list.setMaximumHeight(58)
+        self.excel_list.setMinimumHeight(38)
+        self.excel_summary_edit = QLineEdit()
+        self.excel_summary_edit.hide()
+        self.add_excel_button = QPushButton("Добавить Excel")
+        self.add_excel_button.setObjectName("secondaryButton")
+        self.add_excel_button.clicked.connect(self.add_excel_files)
+        self.clear_excel_button = QPushButton("Очистить")
+        self.clear_excel_button.setObjectName("mutedButton")
+        self.clear_excel_button.clicked.connect(self._clear_excel_files)
+        ex_actions = QGridLayout()
+        ex_actions.setHorizontalSpacing(4)
+        ex_actions.setVerticalSpacing(4)
         self.excel_controls = ex_actions
         self.excel_card.body.addLayout(ex_actions)
         sources_row.addWidget(self.excel_card, 0, 1)
-        sources_row.setColumnStretch(0, 1); sources_row.setColumnStretch(1, 1)
+        sources_row.setColumnStretch(0, 1)
+        sources_row.setColumnStretch(1, 1)
         files_root.addLayout(sources_row)
 
         match_settings_card = SectionCard("Настройка совпадений", "")
@@ -3893,7 +2093,9 @@ class MainWindow(QMainWindow):
         files_root.addWidget(match_settings_card)
 
         compare_card = SectionCard("Результаты", "")
-        compare_row = QGridLayout(); compare_row.setHorizontalSpacing(7); compare_row.setVerticalSpacing(4)
+        compare_row = QGridLayout()
+        compare_row.setHorizontalSpacing(7)
+        compare_row.setVerticalSpacing(4)
         self.compare_controls = compare_row
         self.create_excel_report_check = QCheckBox("Создавать Excel-отчёт")
         self.create_excel_report_check.toggled.connect(self._update_report_controls)
@@ -3901,28 +2103,62 @@ class MainWindow(QMainWindow):
         self.report_only_check.toggled.connect(self._update_report_only)
         compare_card.body.addLayout(compare_row)
 
-        output_grid = QGridLayout(); output_grid.setHorizontalSpacing(5); output_grid.setVerticalSpacing(4)
-        self.output_edit = QLineEdit(); self.output_edit.setObjectName("filePath"); self.output_edit.setReadOnly(True)
-        self.modified_database_edit = QLineEdit(); self.modified_database_edit.setObjectName("filePath"); self.modified_database_edit.setReadOnly(True)
-        self.output_label = QLabel("Excel-отчёт"); output_grid.addWidget(self.output_label, 0, 0); output_grid.addWidget(self.output_edit, 0, 1)
-        self.report_path_button = QPushButton("Изменить…"); self.report_path_button.setObjectName("mutedButton"); self.report_path_button.clicked.connect(self.select_output); output_grid.addWidget(self.report_path_button, 0, 2)
-        self.modified_database_label = QLabel("TXT-копия с метками"); output_grid.addWidget(self.modified_database_label, 1, 0); output_grid.addWidget(self.modified_database_edit, 1, 1)
-        self.txt_path_button = QPushButton("Изменить…"); self.txt_path_button.setObjectName("mutedButton"); self.txt_path_button.clicked.connect(self.select_modified_database_output); output_grid.addWidget(self.txt_path_button, 1, 2)
-        output_grid.setColumnStretch(1, 1); compare_card.body.addLayout(output_grid)
+        output_grid = QGridLayout()
+        output_grid.setHorizontalSpacing(5)
+        output_grid.setVerticalSpacing(4)
+        self.output_edit = QLineEdit()
+        self.output_edit.setObjectName("filePath")
+        self.output_edit.setReadOnly(True)
+        self.modified_database_edit = QLineEdit()
+        self.modified_database_edit.setObjectName("filePath")
+        self.modified_database_edit.setReadOnly(True)
+        self.output_label = QLabel("Excel-отчёт")
+        output_grid.addWidget(self.output_label, 0, 0)
+        output_grid.addWidget(self.output_edit, 0, 1)
+        self.report_path_button = QPushButton("Изменить…")
+        self.report_path_button.setObjectName("mutedButton")
+        self.report_path_button.clicked.connect(self.select_output)
+        output_grid.addWidget(self.report_path_button, 0, 2)
+        self.modified_database_label = QLabel("TXT-копия с метками")
+        output_grid.addWidget(self.modified_database_label, 1, 0)
+        output_grid.addWidget(self.modified_database_edit, 1, 1)
+        self.txt_path_button = QPushButton("Изменить…")
+        self.txt_path_button.setObjectName("mutedButton")
+        self.txt_path_button.clicked.connect(self.select_modified_database_output)
+        output_grid.addWidget(self.txt_path_button, 1, 2)
+        output_grid.setColumnStretch(1, 1)
+        compare_card.body.addLayout(output_grid)
 
-        utility_row = QGridLayout(); utility_row.setHorizontalSpacing(4); utility_row.setVerticalSpacing(4)
+        utility_row = QGridLayout()
+        utility_row.setHorizontalSpacing(4)
+        utility_row.setVerticalSpacing(4)
         self.utility_controls = utility_row
-        self.compare_reports_button = QPushButton("Сравнить Excel-отчёты"); self.compare_reports_button.setObjectName("mutedButton"); self.compare_reports_button.clicked.connect(self.open_result_comparison)
-        next_lists = QPushButton("Далее: списки →"); next_lists.setObjectName("primaryButton"); next_lists.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(2))
+        self.compare_reports_button = QPushButton("Сравнить Excel-отчёты")
+        self.compare_reports_button.setObjectName("mutedButton")
+        self.compare_reports_button.clicked.connect(self.open_result_comparison)
+        next_lists = QPushButton("Далее: списки →")
+        next_lists.setObjectName("primaryButton")
+        next_lists.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(2))
         files_root.addWidget(next_lists)
         files_root.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.workflow_tabs.addTab(self.files_tab, "Источники")
 
-        # --------------------- Вкладка 3: состав списков ------------------
-        self.lists_tab = QWidget(); self.lists_tab.setObjectName("tabPage")
-        lists_root = QVBoxLayout(self.lists_tab); lists_root.setContentsMargins(6, 6, 6, 6); lists_root.setSpacing(7)
+        self.section_cards.extend(
+            [self.database_card, self.foreign_agents_card, self.excel_card, match_settings_card, compare_card]
+        )
+        return compare_card, utility_row
+
+    # Собирает настройки состава отчёта, чтобы сохранять только выбранные разделы.
+    def _build_lists_tab(self, compare_card: SectionCard, utility_row: QHBoxLayout) -> None:
+        self.lists_tab = QWidget()
+        self.lists_tab.setObjectName("tabPage")
+        lists_root = QVBoxLayout(self.lists_tab)
+        lists_root.setContentsMargins(6, 6, 6, 6)
+        lists_root.setSpacing(7)
         self.lists_intro = QLabel("Настройте состав листов в итоговом Excel-отчёте.")
-        self.lists_intro.setObjectName("tabIntro"); self.lists_intro.setWordWrap(True); lists_root.addWidget(self.lists_intro)
+        self.lists_intro.setObjectName("tabIntro")
+        self.lists_intro.setWordWrap(True)
+        lists_root.addWidget(self.lists_intro)
         lists_root.addWidget(compare_card)
 
         report_lists_card = SectionCard("Списки точных совпадений", "")
@@ -3931,7 +2167,9 @@ class MainWindow(QMainWindow):
         report_lists_hint.setObjectName("cardDescription")
         report_lists_hint.setWordWrap(True)
         report_lists_card.body.addWidget(report_lists_hint)
-        report_lists_grid = QGridLayout(); report_lists_grid.setHorizontalSpacing(12); report_lists_grid.setVerticalSpacing(5)
+        report_lists_grid = QGridLayout()
+        report_lists_grid.setHorizontalSpacing(12)
+        report_lists_grid.setVerticalSpacing(5)
         self.report_lists_grid = report_lists_grid
         self.report_substances_check = QCheckBox("Вещества — отдельный список")
         self.report_foreign_agents_check = QCheckBox("Иностранные агенты — отдельный список")
@@ -3947,9 +2185,11 @@ class MainWindow(QMainWindow):
         report_lists_grid.addWidget(self.report_foreign_agents_check, 0, 1)
         report_lists_grid.addWidget(self.report_combined_check, 1, 0)
         report_lists_grid.addWidget(self.report_summary_check, 1, 1)
-        report_lists_grid.setColumnStretch(0, 1); report_lists_grid.setColumnStretch(1, 1)
+        report_lists_grid.setColumnStretch(0, 1)
+        report_lists_grid.setColumnStretch(1, 1)
         report_lists_card.body.addLayout(report_lists_grid)
-        report_format_row = QHBoxLayout(); report_format_row.setSpacing(7)
+        report_format_row = QHBoxLayout()
+        report_format_row.setSpacing(7)
         self.report_deduplicate_check = QCheckBox("Объединять дубли записей")
         report_format_row.addWidget(self.report_deduplicate_check)
         self.report_sort_label = QLabel("Сортировка:")
@@ -3967,9 +2207,7 @@ class MainWindow(QMainWindow):
 
         report_create_card = SectionCard("Создание Excel-файла с совпадениями", "")
         self.report_create_card = report_create_card
-        report_create_hint = QLabel(
-            "Создать выбранные списки совпадений без добавления меток в ИРБИС или TXT-базу."
-        )
+        report_create_hint = QLabel("Создать выбранные списки совпадений без добавления меток в ИРБИС или TXT-базу.")
         report_create_hint.setObjectName("cardDescription")
         report_create_hint.setWordWrap(True)
         report_create_card.body.addWidget(report_create_hint)
@@ -3989,18 +2227,28 @@ class MainWindow(QMainWindow):
         report_create_card.body.addLayout(report_create_actions)
         lists_root.addWidget(report_create_card)
 
-        next_marks = QPushButton("Далее: метки →"); next_marks.setObjectName("primaryButton"); next_marks.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(3))
+        next_marks = QPushButton("Далее: метки →")
+        next_marks.setObjectName("primaryButton")
+        next_marks.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(3))
         self.next_marks_button = next_marks
         lists_root.addLayout(utility_row)
         lists_root.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.workflow_tabs.addTab(self.lists_tab, "Списки")
 
-        # ---------------------- Вкладка 4: метки --------------------
-        self.run_tab = QWidget(); self.run_tab.setObjectName("tabPage")
-        run_root = QVBoxLayout(self.run_tab); run_root.setContentsMargins(6, 6, 6, 6); run_root.setSpacing(7)
+        self.section_cards.extend([report_lists_card, report_create_card])
+
+    # Собирает настройки служебных полей для записи меток.
+    def _build_markers_tab(self) -> None:
+        self.run_tab = QWidget()
+        self.run_tab.setObjectName("tabPage")
+        run_root = QVBoxLayout(self.run_tab)
+        run_root.setContentsMargins(6, 6, 6, 6)
+        run_root.setSpacing(7)
         run_intro = QLabel("Настройте поля и содержимое меток.")
         self.markers_intro = run_intro
-        run_intro.setObjectName("tabIntro"); run_intro.setWordWrap(True); run_root.addWidget(run_intro)
+        run_intro.setObjectName("tabIntro")
+        run_intro.setWordWrap(True)
+        run_root.addWidget(run_intro)
 
         marker_card = SectionCard("Метки в ИРБИС", "")
         self.marker_card = marker_card
@@ -4042,23 +2290,38 @@ class MainWindow(QMainWindow):
         run_root.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.workflow_tabs.addTab(self.run_tab, "Метки")
 
-        # ---------------------- Вкладка 5: запуск и журнал --------------------
-        self.results_tab = QWidget(); self.results_tab.setObjectName("tabPage")
-        results_root = QVBoxLayout(self.results_tab); results_root.setContentsMargins(6, 6, 6, 6); results_root.setSpacing(7)
+        self.section_cards.append(marker_card)
+
+    # Собирает запуск, журнал и страницу настроек приложения.
+    def _build_results_tab(self) -> None:
+        self.results_tab = QWidget()
+        self.results_tab.setObjectName("tabPage")
+        results_root = QVBoxLayout(self.results_tab)
+        results_root.setContentsMargins(6, 6, 6, 6)
+        results_root.setSpacing(7)
         results_intro = QLabel("Запуск, прогресс, результаты и журнал работы.")
         self.results_intro = results_intro
-        results_intro.setObjectName("tabIntro"); results_intro.setWordWrap(True); results_root.addWidget(results_intro)
+        results_intro.setObjectName("tabIntro")
+        results_intro.setWordWrap(True)
+        results_root.addWidget(results_intro)
 
-        self.actions_card = QFrame(); self.actions_card.setObjectName("actionCard")
-        self.actions_layout = QVBoxLayout(self.actions_card); self.actions_layout.setContentsMargins(4, 3, 4, 4); self.actions_layout.setSpacing(4)
-        action_title_row = QHBoxLayout(); action_title_row.setSpacing(6)
-        action_title = QLabel("Управление запуском и результатами"); action_title.setObjectName("cardTitle"); action_title_row.addWidget(action_title, 1)
+        self.actions_card = QFrame()
+        self.actions_card.setObjectName("actionCard")
+        self.actions_layout = QVBoxLayout(self.actions_card)
+        self.actions_layout.setContentsMargins(4, 3, 4, 4)
+        self.actions_layout.setSpacing(4)
+        action_title_row = QHBoxLayout()
+        action_title_row.setSpacing(6)
+        action_title = QLabel("Управление запуском и результатами")
+        action_title.setObjectName("cardTitle")
+        action_title_row.addWidget(action_title, 1)
         self.actions_layout.addLayout(action_title_row)
         action_hint = QLabel("Запустите проверку или удалите ранее добавленные метки из выбранной базы.")
         action_hint.setObjectName("cardDescription")
         action_hint.setWordWrap(True)
         self.actions_layout.addWidget(action_hint)
-        local_start_row = QHBoxLayout(); local_start_row.setSpacing(4)
+        local_start_row = QHBoxLayout()
+        local_start_row.setSpacing(4)
         self.run_tab_start_button = QPushButton("Запустить действие")
         self.run_tab_start_button.setObjectName("primaryButton")
         self.run_tab_start_button.clicked.connect(self.start_comparison)
@@ -4071,42 +2334,77 @@ class MainWindow(QMainWindow):
             button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         local_start_row.addWidget(self.cleanup_button, 1)
         self.actions_layout.addLayout(local_start_row)
-        self.actions_buttons_layout = QGridLayout(); self.actions_buttons_layout.setHorizontalSpacing(4); self.actions_buttons_layout.setVerticalSpacing(4)
+        self.actions_buttons_layout = QGridLayout()
+        self.actions_buttons_layout.setHorizontalSpacing(4)
+        self.actions_buttons_layout.setVerticalSpacing(4)
         # Служебные объекты остаются для логики состояния, но эти действия
         # больше не выводятся в интерфейсе блока запуска.
-        self.cancel_button = QPushButton("Отменить", self.actions_card); self.cancel_button.setEnabled(False); self.cancel_button.hide()
-        self.open_button = QPushButton("Открыть Excel-отчёт", self.actions_card); self.open_button.setEnabled(False); self.open_button.hide()
-        self.open_modified_database_button = QPushButton("Открыть TXT-копию"); self.open_modified_database_button.setObjectName("mutedButton"); self.open_modified_database_button.setEnabled(False); self.open_modified_database_button.clicked.connect(self.open_modified_database)
+        self.cancel_button = QPushButton("Отменить", self.actions_card)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.hide()
+        self.open_button = QPushButton("Открыть Excel-отчёт", self.actions_card)
+        self.open_button.setEnabled(False)
+        self.open_button.hide()
+        self.open_modified_database_button = QPushButton("Открыть TXT-копию")
+        self.open_modified_database_button.setObjectName("mutedButton")
+        self.open_modified_database_button.setEnabled(False)
+        self.open_modified_database_button.clicked.connect(self.open_modified_database)
         self.write_irbis_button = QPushButton("Отправить TXT в ИРБИС")
-        self.write_irbis_button.setObjectName("secondaryButton"); self.write_irbis_button.setEnabled(False); self.write_irbis_button.clicked.connect(self.apply_results_to_irbis)
-        self.clear_all_button = QPushButton("Очистить всё", self.actions_card); self.clear_all_button.hide()
+        self.write_irbis_button.setObjectName("secondaryButton")
+        self.write_irbis_button.setEnabled(False)
+        self.write_irbis_button.clicked.connect(self.apply_results_to_irbis)
+        self.clear_all_button = QPushButton("Очистить всё", self.actions_card)
+        self.clear_all_button.hide()
         action_buttons = [self.open_modified_database_button, self.write_irbis_button]
         for i, button in enumerate(action_buttons):
             self.actions_buttons_layout.addWidget(button, i // 2, i % 2)
-        for column in range(2): self.actions_buttons_layout.setColumnStretch(column, 1)
+        for column in range(2):
+            self.actions_buttons_layout.setColumnStretch(column, 1)
         self.action_buttons = action_buttons
         self.actions_layout.addLayout(self.actions_buttons_layout)
 
-        self.progress = QProgressBar(); self.progress.setObjectName("mainProgress"); self.progress.setRange(0, 100); self.progress.setValue(0)
-        self.progress.setMinimumWidth(0); self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("mainProgress")
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setMinimumWidth(0)
+        self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.progress.hide()
         self.actions_layout.addWidget(self.progress)
-        self.status_row = QHBoxLayout(); self.status_row.setSpacing(4)
-        self.status_dot = QLabel(); self.status_dot.setObjectName("statusDot"); self.status_dot.setProperty("state", "idle"); self.status_dot.setFixedSize(6, 6); self.status_dot.hide()
-        self.status_label = QLabel("Готово к работе"); self.status_label.setObjectName("statusLabel"); self.status_label.setWordWrap(True)
-        self.status_row.addWidget(self.status_dot); self.status_row.addWidget(self.status_label, 1); self.actions_layout.addLayout(self.status_row)
+        self.status_row = QHBoxLayout()
+        self.status_row.setSpacing(4)
+        self.status_dot = QLabel()
+        self.status_dot.setObjectName("statusDot")
+        self.status_dot.setProperty("state", "idle")
+        self.status_dot.setFixedSize(6, 6)
+        self.status_dot.hide()
+        self.status_label = QLabel("Готово к работе")
+        self.status_label.setObjectName("statusLabel")
+        self.status_label.setWordWrap(True)
+        self.status_row.addWidget(self.status_dot)
+        self.status_row.addWidget(self.status_label, 1)
+        self.actions_layout.addLayout(self.status_row)
         results_root.addWidget(self.actions_card)
 
-        log_card = QFrame(); log_card.setObjectName("sectionCard")
-        log_layout = QVBoxLayout(log_card); log_layout.setContentsMargins(4, 3, 4, 4); log_layout.setSpacing(4)
-        log_header = QHBoxLayout(); log_header.setSpacing(6); log_title = QLabel("Журнал"); log_title.setObjectName("cardTitle"); log_header.addWidget(log_title); log_header.addStretch()
+        log_card = QFrame()
+        log_card.setObjectName("sectionCard")
+        log_layout = QVBoxLayout(log_card)
+        log_layout.setContentsMargins(4, 3, 4, 4)
+        log_layout.setSpacing(4)
+        log_header = QHBoxLayout()
+        log_header.setSpacing(6)
+        log_title = QLabel("Журнал")
+        log_title.setObjectName("cardTitle")
+        log_header.addWidget(log_title)
+        log_header.addStretch()
         self.export_journal_button = QPushButton("Сохранить журнал")
         self.export_journal_button.setObjectName("mutedButton")
         self.export_journal_button.setToolTip("Сохранить отображаемые строки журнала в TXT-файл")
         self.export_journal_button.clicked.connect(self.export_run_journal)
         log_header.addWidget(self.export_journal_button)
         log_layout.addLayout(log_header)
-        log_filters = QHBoxLayout(); log_filters.setSpacing(4)
+        log_filters = QHBoxLayout()
+        log_filters.setSpacing(4)
         self.journal_filter_combo = QComboBox()
         self.journal_filter_combo.addItem("Все записи", "all")
         self.journal_filter_combo.addItem("Ошибки", "errors")
@@ -4121,10 +2419,15 @@ class MainWindow(QMainWindow):
         log_filters.addWidget(self.journal_filter_combo)
         log_filters.addWidget(self.journal_search_edit, 1)
         log_layout.addLayout(log_filters)
-        self.run_log = QTextEdit(); self.run_log.setObjectName("logEdit"); self.run_log.setReadOnly(True); self.run_log.setMinimumHeight(100); self.run_log.setPlaceholderText("Здесь будет отображаться ход подключения, загрузки и сравнения…")
+        self.run_log = QTextEdit()
+        self.run_log.setObjectName("logEdit")
+        self.run_log.setReadOnly(True)
+        self.run_log.setMinimumHeight(100)
+        self.run_log.setPlaceholderText("Здесь будет отображаться ход подключения, загрузки и сравнения…")
         self.run_log.document().setMaximumBlockCount(self.RUN_JOURNAL_MAX_LINES)
         self._load_run_journal()
-        log_layout.addWidget(self.run_log, 1); results_root.addWidget(log_card, 1)
+        log_layout.addWidget(self.run_log, 1)
+        results_root.addWidget(log_card, 1)
         self.workflow_tabs.addTab(self.results_tab, "Запуск")
         self.application_settings_page = ApplicationSettingsPage(self.app_settings, self)
         self.application_settings_page.saved.connect(self._save_application_settings)
@@ -4133,54 +2436,7 @@ class MainWindow(QMainWindow):
         self.workflow_tabs.setTabVisible(settings_index, False)
         self._settings_return_page = self.workflow_tabs.currentWidget()
         self.workflow_tabs.currentChanged.connect(self._settings_navigation_changed)
-        self.workflow_tabs.currentChanged.connect(
-            lambda _index: QTimer.singleShot(0, self._fit_scroll_content)
-        )
-
-        # Служебные элементы для совместимости с прежней логикой.
-        self.table = QTableWidget(0, 6, self); self.table.hide()
-        self.file_action_buttons = [self.database_button, self.clear_database_button, self.foreign_agents_button, self.clear_foreign_agents_button, self.add_excel_button, self.clear_excel_button]
-        self.section_cards = [self.database_card, self.foreign_agents_card, self.excel_card, match_settings_card, compare_card, report_lists_card, report_create_card, marker_card]
-        self.tools_card = compare_card
-        self.left_panel = self.files_tab; self.right_panel = self.results_tab
-        self.content_host = self.workflow_tabs
-        self.content_grid = QGridLayout(); self.left_layout = files_root; self.right_layout = run_root
-        self.tools_controls = QGridLayout()
-        self._responsive_mode = None
-
-        self._restore_irbis_config()
-        self.irbis_host_edit.textChanged.connect(self._invalidate_irbis_connection_status)
-        self.irbis_port_spin.valueChanged.connect(self._invalidate_irbis_connection_status)
-        self.irbis_login_edit.textChanged.connect(self._invalidate_irbis_connection_status)
-        self.irbis_password_edit.textChanged.connect(self._invalidate_irbis_connection_status)
-        self._apply_marker_settings_to_ui()
-        for checkbox in (
-            self.create_excel_report_check,
-            self.report_only_check,
-            *self.report_list_checks,
-            self.report_deduplicate_check,
-        ):
-            checkbox.toggled.connect(self._queue_report_settings_autosave)
-        self.report_sort_combo.currentIndexChanged.connect(self._queue_report_settings_autosave)
-        self._marker_autosave_timer = QTimer(self)
-        self._marker_autosave_timer.setSingleShot(True)
-        self._marker_autosave_timer.timeout.connect(self._autosave_marker_settings)
-        self.match_rules_editor.changed.connect(self._queue_marker_settings_autosave)
-        for widget in (
-            self.substance_marker_edit,
-            self.foreign_marker_edit,
-            self.age_marker_edit,
-            self.substance_field_spin,
-            self.foreign_field_spin,
-            self.age_field_spin,
-        ):
-            if isinstance(widget, QLineEdit):
-                widget.textChanged.connect(self._queue_marker_settings_autosave)
-            else:
-                widget.valueChanged.connect(self._queue_marker_settings_autosave)
-        self._update_database_summary(); self._update_foreign_agents_summary(); self._update_excel_summary()
-        self._set_default_outputs(force=False)
-        self._apply_responsive_layout(force=True)
+        self.workflow_tabs.currentChanged.connect(lambda _index: QTimer.singleShot(0, self._fit_scroll_content))
 
     @staticmethod
     def _take_all(layout) -> None:
@@ -4234,7 +2490,12 @@ class MainWindow(QMainWindow):
     def _reflow_source_controls(self, narrow: bool, very_narrow: bool) -> None:
         groups = (
             (self.database_controls, self.database_list, self.database_button, self.clear_database_button),
-            (self.foreign_agents_controls, self.foreign_agents_list, self.foreign_agents_button, self.clear_foreign_agents_button),
+            (
+                self.foreign_agents_controls,
+                self.foreign_agents_list,
+                self.foreign_agents_button,
+                self.clear_foreign_agents_button,
+            ),
             (self.excel_controls, self.excel_list, self.add_excel_button, self.clear_excel_button),
         )
         for layout, list_widget, primary, clear in groups:
@@ -4290,22 +2551,11 @@ class MainWindow(QMainWindow):
         for column in range(columns):
             self.report_lists_grid.setColumnStretch(column, 1)
 
-    def _reflow_main_grid(self) -> None:
-        self._take_all(self.content_grid)
-        for column in range(3):
-            self.content_grid.setColumnStretch(column, 0)
-        for row in range(5):
-            self.content_grid.setRowStretch(row, 0)
-        self.content_grid.addWidget(self.left_panel, 0, 0)
-        self.content_grid.addWidget(self.right_panel, 1, 0)
-        self.content_grid.addWidget(self.actions_card, 2, 0)
-        self.content_grid.setColumnStretch(0, 1)
-
     def _apply_responsive_layout(self, force: bool = False) -> None:
         if not hasattr(self, "scroll_area"):
             return
         width = max(1, self.scroll_area.viewport().width())
-        mode = tuple(width < breakpoint for breakpoint in (1500, 720, 900, 820, 800, 760, 700))
+        mode = tuple(width < breakpoint for breakpoint in (1500, 720, 900, 800, 760, 700))
         if not force and mode == self._responsive_mode:
             QTimer.singleShot(0, self._fit_scroll_content)
             return
@@ -4314,7 +2564,6 @@ class MainWindow(QMainWindow):
             compact_header,
             stack_irbis,
             compact,
-            compact_tabs,
             short_start,
             very_compact,
             hide_logo,
@@ -4329,7 +2578,9 @@ class MainWindow(QMainWindow):
         logo_size = 22 if compact else 26
         self.header_logo.setVisible(not hide_logo)
         if self.header_logo.isVisible():
-            self.header_logo.setPixmap(QIcon(resource_path("assets", "irbis64_control_icon.png")).pixmap(logo_size, logo_size))
+            self.header_logo.setPixmap(
+                QIcon(resource_path("assets", "irbis64_control_icon.png")).pixmap(logo_size, logo_size)
+            )
             self.header_logo.setFixedSize(logo_size + 2, logo_size + 2)
         title_font = self.main_title.font()
         title_font.setPointSize(10 if compact else 11)
@@ -4340,9 +2591,7 @@ class MainWindow(QMainWindow):
         self.start_button.setText("Запуск" if short_start else "Запустить проверку")
         self.start_button.setMinimumWidth(0)
         self.marker_settings_button.setText("Настройки")
-        self.marker_settings_button.setToolTip(
-            "Открыть настройки приложения"
-        )
+        self.marker_settings_button.setToolTip("Открыть настройки приложения")
         self.marker_settings_button.setMinimumWidth(0)
         self.marker_settings_button.setMaximumWidth(16777215)
         header_buttons = (
@@ -4356,17 +2605,16 @@ class MainWindow(QMainWindow):
             button.setMinimumWidth(32 if compact_header else 0)
             button.setMaximumWidth(32 if compact_header else 16777215)
 
-        tab_titles = (
-            ("Подключение", "Подключение к ИРБИС"),
-            ("Источники", "Источники данных"),
-            ("Списки", "Списки для проверки"),
-            ("Метки", "Метки"),
-            ("Запуск", "Запуск и журнал"),
-        )
-        for index, (short_title, full_title) in enumerate(tab_titles):
-            self.workflow_tabs.setTabText(index, short_title)
+        for index, title in enumerate(("Подключение", "Источники", "Списки", "Метки", "Запуск")):
+            self.workflow_tabs.setTabText(index, title)
 
-        for intro_label in (self.irbis_intro, self.files_intro, self.lists_intro, self.markers_intro, self.results_intro):
+        for intro_label in (
+            self.irbis_intro,
+            self.files_intro,
+            self.lists_intro,
+            self.markers_intro,
+            self.results_intro,
+        ):
             intro_label.hide()
 
         # Блоки подключения располагаются рядом только когда для обоих хватает
@@ -4442,8 +2690,8 @@ class MainWindow(QMainWindow):
         available_height = screen.availableGeometry().height() if screen is not None else desired_height
         minimum_height = min(desired_height, available_height)
 
-        # The content defines only the minimum size. The user can freely enlarge
-        # the workspace in both directions, and the chosen size is restored later.
+        # Содержимое задаёт только минимальный размер. Пользователь может увеличить
+        # окно, а выбранный размер восстановится при следующем запуске.
         self.setMaximumHeight(16777215)
         if self.minimumHeight() != minimum_height:
             self.setMinimumHeight(0)
@@ -4741,7 +2989,6 @@ class MainWindow(QMainWindow):
         self.modified_database_edit.clear()
         self.progress.setValue(0)
         self._set_status("Готово к работе", "idle")
-        self.table.setRowCount(0)
         self.progress_dialog.clear()
         self.open_button.setEnabled(False)
         self.open_modified_database_button.setEnabled(False)
@@ -4808,7 +3055,11 @@ class MainWindow(QMainWindow):
         create_report = bool(self.marker_settings["create_excel_report"])
         report_only = bool(self.marker_settings["report_only"])
         output_path = (self.output_edit.text().strip() or self._default_output_path()) if create_report else ""
-        modified_database_path = "" if report_only else (self.modified_database_edit.text().strip() or self._default_modified_database_path())
+        modified_database_path = (
+            ""
+            if report_only
+            else (self.modified_database_edit.text().strip() or self._default_modified_database_path())
+        )
 
         if not database_paths:
             QMessageBox.warning(self, APP_TITLE, "Выберите хотя бы одну TXT-базу данных.")
@@ -4849,7 +3100,9 @@ class MainWindow(QMainWindow):
         if not report_only and not modified_database_path.lower().endswith(".txt"):
             modified_database_path += ".txt"
             self.modified_database_edit.setText(modified_database_path)
-        if not report_only and Path(modified_database_path).resolve() in {Path(path).resolve() for path in database_paths}:
+        if not report_only and Path(modified_database_path).resolve() in {
+            Path(path).resolve() for path in database_paths
+        }:
             QMessageBox.warning(
                 self,
                 APP_TITLE,
@@ -4940,7 +3193,6 @@ class MainWindow(QMainWindow):
 
         self.last_run_direct = direct_mode
         self.last_run_report_only = bool(self.marker_settings.get("report_only", False))
-        self.table.setRowCount(0)
         selected_sources = []
         if excel_paths:
             selected_sources.append(f"реестр по наркотическим веществам ({len(excel_paths)} файл.)")
@@ -4985,9 +3237,7 @@ class MainWindow(QMainWindow):
         self._append_progress(f"Будут проверены источники: {sources_text}")
         self._append_progress(f"Файлов реестра по наркотическим веществам: {len(excel_paths)}")
         self._append_progress(f"Реестр иностранных агентов: {foreign_agents_path or 'не выбран'}")
-        self._append_progress(
-            f"Excel-отчёт: {output_path}" if output_path else "Excel-отчёт: не создаётся"
-        )
+        self._append_progress(f"Excel-отчёт: {output_path}" if output_path else "Excel-отчёт: не создаётся")
         self._append_progress(
             f"Метки: вещества #{int(self.marker_settings['substance_marker_field']):03d} — "
             f"{self.marker_settings['substance_marker'] or 'отключена'}; "
@@ -5096,9 +3346,7 @@ class MainWindow(QMainWindow):
             if repaired:
                 actions.append(f"исправится дублей: {repaired}")
             action_text = ", ".join(actions) or "нормализация записи"
-            preview_lines.append(
-                f"MFN {int(item.get('mfn', 0))}: {action_text}\n  {marker_text}"
-            )
+            preview_lines.append(f"MFN {int(item.get('mfn', 0))}: {action_text}\n  {marker_text}")
         remaining = max(0, len(records) - len(preview_lines))
         if remaining:
             preview_lines.append(f"…и ещё записей: {remaining}")
@@ -5107,8 +3355,7 @@ class MainWindow(QMainWindow):
         message.setWindowTitle(APP_TITLE)
         message.setIcon(QMessageBox.Icon.Question)
         message.setText(
-            f"Подготовлено к записи в базу {data.get('database', '')}: "
-            f"{int(data.get('record_count', 0))} записей."
+            f"Подготовлено к записи в базу {data.get('database', '')}: {int(data.get('record_count', 0))} записей."
         )
         message.setInformativeText(
             f"Новых меток: {int(data.get('markers_added', 0))}\n"
@@ -5124,9 +3371,7 @@ class MainWindow(QMainWindow):
             + "\n".join(preview_lines)
             + "\n\nЗаписать эти изменения в ИРБИС?"
         )
-        message.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
+        message.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         message.setDefaultButton(QMessageBox.StandardButton.No)
         approved = message.exec() == QMessageBox.StandardButton.Yes
         worker.confirm_preview(approved)
@@ -5150,7 +3395,7 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.last_results = results
         self.last_summary = summary
-        self._fill_preview(results)
+        self._log_match_summary(results)
         self.open_button.setEnabled(Path(self.last_output_path).is_file())
         self._save_irbis_config()
 
@@ -5171,8 +3416,7 @@ class MainWindow(QMainWindow):
             self.write_irbis_button.setEnabled(False)
             target_name = "ИРБИС" if self.last_run_direct else "TXT-базы"
             self._set_status(
-                f"Готово. Отчёт создан; {target_name} не изменялись; "
-                f"проверить вручную: {summary.review_rows}",
+                f"Готово. Отчёт создан; {target_name} не изменялись; проверить вручную: {summary.review_rows}",
                 "idle",
             )
             self._append_progress(
@@ -5207,7 +3451,11 @@ class MainWindow(QMainWindow):
             modified_paths = [path.strip() for path in self.last_modified_database_path.split(";") if path.strip()]
             self.open_modified_database_button.setEnabled(any(Path(path).is_file() for path in modified_paths))
             self.write_irbis_button.setEnabled(
-                bool(len(modified_paths) == 1 and Path(modified_paths[0]).is_file() and Path(self.irbis_manifest_edit.text().strip()).is_file())
+                bool(
+                    len(modified_paths) == 1
+                    and Path(modified_paths[0]).is_file()
+                    and Path(self.irbis_manifest_edit.text().strip()).is_file()
+                )
             )
             self._set_status(
                 f"Готово. Вещества: {summary.substance_matched_records}; "
@@ -5234,7 +3482,9 @@ class MainWindow(QMainWindow):
         self.progress_dialog.finish("Готово.", 100)
 
         substance_marker = self.marker_settings["substance_marker"] or "не добавляется"
-        foreign_marker = self.marker_settings["foreign_agent_marker_template"].replace("{name}", "АВТОР") or "не добавляется"
+        foreign_marker = (
+            self.marker_settings["foreign_agent_marker_template"].replace("{name}", "АВТОР") or "не добавляется"
+        )
         age_marker = self.marker_settings["age_marker"] or "не добавляется"
         substance_field = int(self.marker_settings["substance_marker_field"])
         foreign_field = int(self.marker_settings["foreign_agent_marker_field"])
@@ -5320,33 +3570,16 @@ class MainWindow(QMainWindow):
             self.cleanup_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
-    def _fill_preview(self, results: list[MatchResult]) -> None:
+    def _log_match_summary(self, results: list[MatchResult]) -> None:
         unique_records = {
             result.database.record_number
             for result in results
             if result.status == "Совпадение" and result.database is not None
         }
-        self.table.setRowCount(0)
         self._append_progress(f"Подтверждённых записей TXT для отчёта: {len(unique_records)}")
         review_rows = sum(1 for result in results if result.status == "Возможное совпадение")
         if review_rows:
             self._append_progress(f"Пограничных совпадений для ручной проверки: {review_rows}")
-
-    @staticmethod
-    def _publication_text(database) -> str:
-        parts = []
-        for item in database.publication:
-            city_match = re.search(r"\^A([^\^]*)", item)
-            publisher_match = re.search(r"\^C([^\^]*)", item)
-            year_match = re.search(r"\^D([^\^]*)", item)
-            values = [
-                match.group(1).strip()
-                for match in (city_match, publisher_match, year_match)
-                if match and match.group(1).strip()
-            ]
-            if values:
-                parts.append(", ".join(values))
-        return " | ".join(dict.fromkeys(parts))
 
     def _append_progress(self, text: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -5359,17 +3592,11 @@ class MainWindow(QMainWindow):
 
     def _journal_line_matches(self, line: str) -> bool:
         normalized = line.casefold()
-        search = (
-            self.journal_search_edit.text().strip().casefold()
-            if hasattr(self, "journal_search_edit")
-            else ""
-        )
+        search = self.journal_search_edit.text().strip().casefold() if hasattr(self, "journal_search_edit") else ""
         if search and search not in normalized:
             return False
         category = (
-            str(self.journal_filter_combo.currentData() or "all")
-            if hasattr(self, "journal_filter_combo")
-            else "all"
+            str(self.journal_filter_combo.currentData() or "all") if hasattr(self, "journal_filter_combo") else "all"
         )
         keywords = {
             "errors": ("ошиб", "не выполн", "отмен", "конфликт"),
@@ -5394,7 +3621,7 @@ class MainWindow(QMainWindow):
             lines = run_journal_path().read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError):
             lines = []
-        self._journal_lines.extend(lines[-self.RUN_JOURNAL_MAX_LINES:])
+        self._journal_lines.extend(lines[-self.RUN_JOURNAL_MAX_LINES :])
         self._refresh_run_log_view()
 
     def _save_run_journal(self) -> None:
@@ -5449,11 +3676,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, APP_TITLE, "TXT-копия не найдена.")
 
     def closeEvent(self, event) -> None:
-        if (
-            self.update_thread
-            and self.update_thread.isRunning()
-            and not self._installing_update
-        ):
+        if self.update_thread and self.update_thread.isRunning() and not self._installing_update:
             QMessageBox.warning(
                 self,
                 APP_TITLE,

@@ -3,57 +3,28 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import re
 import socket
 import time
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from threading import Lock
 
 from irbis_control.infrastructure.atomic_io import atomic_write_bytes, atomic_write_text
+from irbis_control.infrastructure.irbis_models import (
+    IrbisError,
+    IrbisField,
+    IrbisRecord,
+    SnapshotEntry,
+    SnapshotManifest,
+)
 
 RECORD_SEPARATOR = "\x1f\x1e"
 TXT_SEPARATOR = "*****"
 ALL_RECORD_FORMAT = "!&uf('+0')"
-
-
-class IrbisError(RuntimeError):
-    pass
-
-
-@dataclass
-class IrbisField:
-    tag: int
-    value: str
-
-
-@dataclass
-class IrbisRecord:
-    mfn: int
-    status: int = 0
-    version: int = 0
-    fields: list[IrbisField] = field(default_factory=list)
-
-
-@dataclass
-class SnapshotEntry:
-    index: int
-    mfn: int
-    version: int
-    sha256: str
-
-
-@dataclass
-class SnapshotManifest:
-    created_at: str
-    host: str
-    port: int
-    database: str
-    query: str
-    snapshot_file: str
-    records: list[SnapshotEntry]
 
 
 ProgressCallback = Callable[[int, str], None]
@@ -69,9 +40,8 @@ def record_hash(fields: Iterable[IrbisField]) -> str:
 
 
 def parse_txt_records(text: str) -> list[list[IrbisField]]:
-    raw_records = [part for part in __import__("re").split(r"\r?\n\*{5}\s*(?:\r?\n|$)", text) if part.strip()]
+    raw_records = [part for part in re.split(r"\r?\n\*{5}\s*(?:\r?\n|$)", text) if part.strip()]
     result: list[list[IrbisField]] = []
-    import re
 
     for raw in raw_records:
         fields: list[IrbisField] = []
@@ -86,8 +56,6 @@ def parse_txt_records(text: str) -> list[list[IrbisField]]:
                 fields.append(IrbisField(int(match.group(1)), match.group(2)))
         result.append(fields)
     return result
-
-
 
 
 def parse_all_format_record(payload: str, fallback_mfn: int = 0) -> IrbisRecord:
@@ -180,6 +148,7 @@ def save_manifest(manifest: SnapshotManifest, path: str | Path) -> Path:
     return path
 
 
+# Управляет сеансом ИРБИС и преобразует ответы протокола в записи.
 class IrbisClient:
     """Small IRBIS64 TCP client for the commands needed by IRBIS64 Control.
 
@@ -210,7 +179,7 @@ class IrbisClient:
         self.command_number = 1
         self.registered = False
 
-    def clone(self) -> "IrbisClient":
+    def clone(self) -> IrbisClient:
         """Create an independent logical IRBIS client for parallel reads."""
         return IrbisClient(
             self.host,
@@ -249,7 +218,7 @@ class IrbisClient:
                 while True:
                     try:
                         block = sock.recv(65536)
-                    except socket.timeout:
+                    except TimeoutError:
                         break
                     if not block:
                         break
@@ -305,8 +274,7 @@ class IrbisClient:
                     time.sleep(self.retry_delay * attempt)
         if last_error is not None:
             raise IrbisError(
-                f"Не удалось подключиться к ИРБИС после {self.connection_attempts} попыток: "
-                f"{last_error}"
+                f"Не удалось подключиться к ИРБИС после {self.connection_attempts} попыток: {last_error}"
             ) from last_error
 
     def unregister(self) -> None:
@@ -318,7 +286,7 @@ class IrbisClient:
         finally:
             self.registered = False
 
-    def __enter__(self) -> "IrbisClient":
+    def __enter__(self) -> IrbisClient:
         self.register()
         return self
 
@@ -350,18 +318,14 @@ class IrbisClient:
         """Read a text resource from the IRBIS server (command L)."""
         if not specification.strip():
             return ""
-        payload = self._payload_text(
-            self._send(self._packet("L", [specification.strip()])), ansi=True
-        )
+        payload = self._payload_text(self._send(self._packet("L", [specification.strip()])), ansi=True)
         return payload.replace("\x1f\x1e", "\r\n").replace("\x1f", "\r\n")
 
     def list_files(self, specification: str) -> list[str]:
         """List server files matching an IRBIS file specification (command !)."""
         if not specification.strip():
             return []
-        payload = self._payload_text(
-            self._send(self._packet("!", [specification.strip()])), ansi=True
-        )
+        payload = self._payload_text(self._send(self._packet("!", [specification.strip()])), ansi=True)
         payload = payload.replace("\x1f\x1e", "\r\n").replace("\x1f", "\r\n")
         result: list[str] = []
         for line in payload.replace("\x00", "").splitlines():
@@ -423,7 +387,9 @@ class IrbisClient:
                 names.append(name)
         return [{"name": name, "description": ""} for name in sorted(names)]
 
-    def search(self, database: str, expression: str, number: int, first: int, format_pft: str = "@brief") -> tuple[int, list[int]]:
+    def search(
+        self, database: str, expression: str, number: int, first: int, format_pft: str = "@brief"
+    ) -> tuple[int, list[int]]:
         packet = self._packet(
             "K",
             [database, expression, str(number), str(first), format_pft, "", "", ""],
@@ -538,9 +504,7 @@ class IrbisClient:
         while total is None or len(records) < total:
             if cancel_cb and cancel_cb():
                 raise IrbisError("Операция отменена пользователем.")
-            current_total, page = self.search_read_page(
-                database, expression, number=page_size, first=first
-            )
+            current_total, page = self.search_read_page(database, expression, number=page_size, first=first)
             if total is None:
                 total = current_total
                 if total <= 0:
@@ -581,9 +545,7 @@ class IrbisClient:
                     f"Проверка пакета чтения: {size} записей…",
                 )
             try:
-                current_total, page = self.search_read_page(
-                    database, expression or "I=$", number=size, first=1
-                )
+                current_total, page = self.search_read_page(database, expression or "I=$", number=size, first=1)
             except IrbisError:
                 if safe_size == 0:
                     raise
@@ -631,8 +593,8 @@ class IrbisClient:
 
     def write_record(self, database: str, record: IrbisRecord, *, lock: int = 0, actualize: int = 1) -> int:
         record_text = f"{record.mfn}#{record.status}{RECORD_SEPARATOR}0#{record.version}"
-        for field in record.fields:
-            record_text += f"{RECORD_SEPARATOR}{field.tag}#{field.value}"
+        for record_field in record.fields:
+            record_text += f"{RECORD_SEPARATOR}{record_field.tag}#{record_field.value}"
         record_text += RECORD_SEPARATOR
         lines = self._decode(
             self._send(
@@ -729,6 +691,7 @@ def read_records_parallel(
     return [record for record in results if record is not None]
 
 
+# Читает записи по запросу и сохраняет TXT с манифестом для последующей проверки версий.
 def create_irbis_snapshot(
     client: IrbisClient,
     database: str,
@@ -741,9 +704,7 @@ def create_irbis_snapshot(
 ) -> SnapshotManifest:
     mfns = client.search_all_mfns(database, query, progress_cb=progress_cb)
     if not mfns:
-        raise IrbisError(
-            "По заданному запросу не найдено ни одной записи. Проверьте имя базы и запрос выборки."
-        )
+        raise IrbisError("По заданному запросу не найдено ни одной записи. Проверьте имя базы и запрос выборки.")
     records = read_records_parallel(
         client,
         database,
@@ -779,6 +740,7 @@ def _records_to_dicts(records: Iterable[IrbisRecord]) -> list[dict]:
     ]
 
 
+# Применяет изменённый снимок с проверкой исходных версий и сохраняет сведения для восстановления.
 def apply_modified_snapshot(
     client: IrbisClient,
     manifest_path: str | Path,
@@ -859,8 +821,7 @@ def apply_modified_snapshot(
         except Exception as exc:
             rollback_hint = f" Rollback-копия: {backup_path}." if backup_path else ""
             raise IrbisError(
-                f"Запись прервана на MFN {live.mfn}; до сбоя записано: {written}."
-                f"{rollback_hint} Причина: {exc}"
+                f"Запись прервана на MFN {live.mfn}; до сбоя записано: {written}.{rollback_hint} Причина: {exc}"
             ) from exc
         written += 1
         if progress_cb:

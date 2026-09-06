@@ -82,9 +82,12 @@ class UpdaterTests(unittest.TestCase):
         )
         progress: list[int] = []
 
-        with tempfile.TemporaryDirectory() as temp_dir, patch(
-            "irbis_control.application.updater.urllib.request.urlopen",
-            return_value=FakeResponse(payload),
+        with (
+            tempfile.TemporaryDirectory() as temp_dir,
+            patch(
+                "irbis_control.application.updater.urllib.request.urlopen",
+                return_value=FakeResponse(payload),
+            ),
         ):
             downloaded = download_asset(asset, temp_dir, progress_cb=progress.append)
             self.assertEqual(payload, downloaded.read_bytes())

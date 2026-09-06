@@ -8,43 +8,65 @@ from unittest.mock import patch
 from openpyxl import Workbook, load_workbook
 
 from irbis_control.core.matcher import (
-    SOURCE_FOREIGN_AGENTS,
-    SOURCE_SUBSTANCES,
     EXTRA_MATCH_RULES,
-    parse_match_rule,
+    SOURCE_SUBSTANCES,
     ComparisonSummary,
     DatabaseIndex,
     DatabaseRecord,
     ExcelEntry,
     ForeignAgentEntry,
     MatchResult,
-    build_markers_by_record,
-    compare_foreign_agents,
-    compare_database_records,
-    compare_files,
-    compare_and_export,
-    database_record_from_tag_values,
+    _deduplicate_cross_sheet_entries,
     _detect_header,
     _make_entry,
-    _deduplicate_cross_sheet_entries,
     _read_xlsx_entries,
+    build_markers_by_record,
+    compare_and_export,
+    compare_database_records,
+    compare_files,
+    compare_foreign_agents,
+    database_record_from_tag_values,
     export_results,
+    normalize_publication_year,
+    normalize_title,
+    parse_match_rule,
 )
 
 
 class BoundaryMatchTests(unittest.TestCase):
     def test_new_rules_match_independently_and_can_be_disabled(self) -> None:
-        record = database_record_from_tag_values(1, [
-            (10, "^A9780306406157"), (200, "^AТестовая книга"), (700, "^AИванов^BИ.И."), (210, "^CАСТ^D2024"),
-        ])
-        entry = ExcelEntry(1, "books.xlsx", "Книги", 2, author="Иванов И.И.",
-                           title="Тестовая книга", isbn="9780306406157", publisher="«АСТ»", year="2024 г.")
+        record = database_record_from_tag_values(
+            1,
+            [
+                (10, "^A9780306406157"),
+                (200, "^AТестовая книга"),
+                (700, "^AИванов^BИ.И."),
+                (210, "^CАСТ^D2024"),
+            ],
+        )
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            author="Иванов И.И.",
+            title="Тестовая книга",
+            isbn="9780306406157",
+            publisher="«АСТ»",
+            year="2024 г.",
+        )
         index = DatabaseIndex([record])
         for key, (label, required) in EXTRA_MATCH_RULES.items():
             with self.subTest(rule=key):
                 result = index.match(entry, False, False, False, 90, {key: True})[0]
                 self.assertEqual(label, result.method)
-                weak = key in {"title_year", "title_publisher", "author_year", "author_publisher", "author_publisher_year"}
+                weak = key in {
+                    "title_year",
+                    "title_publisher",
+                    "author_year",
+                    "author_publisher",
+                    "author_publisher_year",
+                }
                 self.assertEqual("Возможное совпадение" if weak else "Совпадение", result.status)
                 self.assertEqual(not weak, 1 in build_markers_by_record([result]))
                 disabled = index.match(entry, False, False, False, 90, {key: False})
@@ -64,7 +86,16 @@ class BoundaryMatchTests(unittest.TestCase):
             ("Автор + издательство + год", "author_publisher_year"),
         ):
             self.assertEqual(expected, parse_match_rule(label))
-        for invalid in ("", "Название +", "Издательство + год", "Автор", "Название", "Название + Название", "ISBN + ИСБН", "Название + цена"):
+        for invalid in (
+            "",
+            "Название +",
+            "Издательство + год",
+            "Автор",
+            "Название",
+            "Название + Название",
+            "ISBN + ИСБН",
+            "Название + цена",
+        ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_match_rule(invalid)
         for key, (label, _fields) in EXTRA_MATCH_RULES.items():
@@ -100,25 +131,34 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual([1], [result.database.record_number for result in results])
         self.assertEqual("Возможное совпадение", results[0].status)
         self.assertEqual({}, build_markers_by_record(results))
-        with patch("irbis_control.core.matcher.read_excel_entries", return_value=([entry], [])), patch(
-            "irbis_control.core.matcher.read_foreign_agent_entries", return_value=([], [])
+        with (
+            patch("irbis_control.core.matcher.read_excel_entries", return_value=([entry], [])),
+            patch("irbis_control.core.matcher.read_foreign_agent_entries", return_value=([], [])),
         ):
-            _, summary = compare_database_records(records, ["books.xlsx"], use_isbn_matching=False,
-                                                  use_title_fallback=False, match_rules=rules)
+            _, summary = compare_database_records(
+                records, ["books.xlsx"], use_isbn_matching=False, use_title_fallback=False, match_rules=rules
+            )
         self.assertEqual(1, summary.review_rows)
         self.assertEqual(0, summary.matched_excel_rows)
 
     def test_confirmed_rule_wins_over_author_review(self) -> None:
         record = DatabaseRecord(1, titles=["Книга"], authors=["Иванов И.И."], publication=["^CАСТ^D2024"])
-        entry = ExcelEntry(1, "books.xlsx", "Книги", 2, title="Книга", author="Иванов И.И.", publisher="АСТ", year="2024")
-        results = DatabaseIndex([record]).match(entry, False, False, False, 90,
-                                               {"author_publisher_year": True, "title_publisher_year": True})
+        entry = ExcelEntry(
+            1, "books.xlsx", "Книги", 2, title="Книга", author="Иванов И.И.", publisher="АСТ", year="2024"
+        )
+        results = DatabaseIndex([record]).match(
+            entry, False, False, False, 90, {"author_publisher_year": True, "title_publisher_year": True}
+        )
         self.assertEqual("Название + издательство + год", results[0].method)
         self.assertIn(1, build_markers_by_record(results))
 
     def test_strong_rule_wins_over_review_and_no_duplicate_record(self) -> None:
-        record = DatabaseRecord(1, titles=["Тестовая книга", "Тестовая книга"], authors=["Иванов И.И."], publication=["^CАСТ^D2024"])
-        entry = ExcelEntry(1, "books.xlsx", "Книги", 2, title=record.main_title, author="Иванов И.И.", publisher="АСТ", year="2024")
+        record = DatabaseRecord(
+            1, titles=["Тестовая книга", "Тестовая книга"], authors=["Иванов И.И."], publication=["^CАСТ^D2024"]
+        )
+        entry = ExcelEntry(
+            1, "books.xlsx", "Книги", 2, title=record.main_title, author="Иванов И.И.", publisher="АСТ", year="2024"
+        )
         rules = {"title_year": True, "title_author_publisher_year": True}
         results = DatabaseIndex([record]).match(entry, False, False, False, 90, rules)
         self.assertEqual(1, len(results))
@@ -141,8 +181,9 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual([1], [result.database.record_number for result in results])
 
     def test_new_rules_reject_missing_database_fields_and_conflicting_author(self) -> None:
-        entry = ExcelEntry(1, "books.xlsx", "Книги", 2, title="Тестовая книга", author="Иванов И.И.",
-                           publisher="АСТ", year="2024")
+        entry = ExcelEntry(
+            1, "books.xlsx", "Книги", 2, title="Тестовая книга", author="Иванов И.И.", publisher="АСТ", year="2024"
+        )
         for publication, authors in [("^CАСТ", []), ("^D2024", []), ("^CАСТ^D2024", ["Петров П.П."])]:
             with self.subTest(publication=publication, authors=authors):
                 record = DatabaseRecord(1, titles=[entry.title], authors=authors, publication=[publication])
@@ -176,9 +217,11 @@ class BoundaryMatchTests(unittest.TestCase):
         options = dict(use_isbn_matching=False, use_title_fallback=False, match_rules={"title_publisher_year": True})
         for with_foreign in (False, True):
             foreign = [self._foreign_entry(1, "Петров Петр Петрович")] if with_foreign else []
-            with patch("irbis_control.core.matcher.read_excel_entries", return_value=([entry], [])), patch(
-                "irbis_control.core.matcher.read_foreign_agent_entries", return_value=(foreign, [])
-            ), patch("irbis_control.core.matcher.parse_database", return_value=[record]):
+            with (
+                patch("irbis_control.core.matcher.read_excel_entries", return_value=([entry], [])),
+                patch("irbis_control.core.matcher.read_foreign_agent_entries", return_value=(foreign, [])),
+                patch("irbis_control.core.matcher.parse_database", return_value=[record]),
+            ):
                 for results, summary in (
                     compare_database_records([record], ["books.xlsx"], **options),
                     compare_files(["database.txt"], ["books.xlsx"], **options),
@@ -196,18 +239,124 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertFalse(warnings)
         self.assertEqual(("АСТ", "2024"), (entries[0].publisher, entries[0].year))
 
+    def test_real_source_publisher_header_and_year_prefixes_are_supported(self) -> None:
+        rows = [
+            ("Автор", "Заглавие", "Изд-во", "Год выпуска"),
+            (
+                "Кучерская, Майя Александровна",
+                "Тётя Мотя : роман : [16+]",
+                "АСТ, Редакция Елены Шубиной",
+                "cop. 2023",
+            ),
+        ]
+        _, mapping, headers = _detect_header(rows)
+        entry = _make_entry(1, Path("books.xlsx"), "Книги", 2, rows[1], mapping, headers)
+
+        self.assertEqual("АСТ, Редакция Елены Шубиной", entry.publisher)
+        self.assertEqual("2023", normalize_publication_year(entry.year))
+        self.assertEqual("2026", normalize_publication_year("печ. 2026"))
+        self.assertEqual("2023", normalize_publication_year("сор. 2023"))
+        for ambiguous in ("2023–2024", "2024?", "2026-"):
+            self.assertEqual("", normalize_publication_year(ambiguous))
+
+        record = DatabaseRecord(
+            1,
+            titles=["Тетя Мотя"],
+            authors=["Кучерская М.А."],
+            publication=["^CРедакция Елены Шубиной^D2023"],
+        )
+        result = DatabaseIndex([record]).match(
+            entry,
+            False,
+            False,
+            False,
+            90,
+            {"title_author_publisher_year": True},
+        )[0]
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual("Название + автор + издательство + год", result.method)
+
+    def test_title_that_is_also_a_bibliographic_word_remains_searchable(self) -> None:
+        self.assertEqual("текст", normalize_title("Текст : роман : [18+]"))
+        self.assertEqual("рассказы", normalize_title("Рассказы"))
+        self.assertNotEqual(normalize_title("Я (не) робот"), normalize_title("Я робот"))
+
+    def test_incomplete_author_initials_require_review(self) -> None:
+        record = DatabaseRecord(1, titles=["Общее название"], authors=["Иванов И."])
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            author="Иванов Иван Петрович",
+            title="Общее название",
+        )
+
+        result = DatabaseIndex([record]).match(entry, False, True, False, 90)[0]
+
+        self.assertEqual("Возможное совпадение", result.status)
+        self.assertEqual("Название и неполные данные автора", result.method)
+        self.assertEqual({}, build_markers_by_record([result]))
+
+    def test_substance_report_contains_match_reason_and_source_location(self) -> None:
+        result = MatchResult(
+            status="Совпадение",
+            method="Название и автор",
+            confidence=100.0,
+            excel=ExcelEntry(1, "source.xlsx", "Книги", 2703, title="Тётя Мотя"),
+            database=DatabaseRecord(record_number=40, titles=["Тетя Мотя"]),
+            source_type=SOURCE_SUBSTANCES,
+            matched_value="Тётя Мотя",
+        )
+        summary = ComparisonSummary(
+            database_file="Тест",
+            excel_files=["source.xlsx"],
+            database_records=1,
+            database_records_with_isbn=0,
+            excel_rows=1,
+            matched_excel_rows=1,
+            unmatched_excel_rows=0,
+            result_rows=1,
+            exact_isbn_rows=0,
+            exact_title_rows=1,
+            probable_rows=0,
+        )
+
+        output = BytesIO()
+        with patch(
+            "irbis_control.core.matcher.atomic_write_via_path", side_effect=lambda _path, writer: writer(output)
+        ):
+            export_results("report.xlsx", [result], summary, report_options={"substances": True})
+        output.seek(0)
+        workbook = load_workbook(output, read_only=True)
+        try:
+            sheet = workbook["Вещества"]
+            self.assertEqual("Почему добавлено", sheet["H1"].value)
+            self.assertEqual("Название и автор — Тётя Мотя", sheet["H2"].value)
+            self.assertEqual("source.xlsx", sheet["I2"].value)
+            self.assertEqual("Книги", sheet["J2"].value)
+            self.assertEqual("2703", sheet["K2"].value)
+        finally:
+            workbook.close()
+
     def test_new_rule_reaches_report_only_export_without_writing_files(self) -> None:
         record = DatabaseRecord(1, titles=["Тестовая книга"], publication=["^CАСТ^D2024"])
         entry = ExcelEntry(1, "books.xlsx", "Книги", 2, title=record.main_title, publisher="АСТ", year="2024")
         output = BytesIO()
-        with patch("irbis_control.core.matcher.read_excel_entries", return_value=([entry], [])), patch(
-            "irbis_control.core.matcher.read_foreign_agent_entries", return_value=([], [])
-        ), patch("irbis_control.core.matcher.parse_database", return_value=[record]), patch(
-            "irbis_control.core.matcher.atomic_write_via_path", side_effect=lambda _path, writer: writer(output)
-        ), patch("irbis_control.core.matcher.Path.mkdir"):
+        with (
+            patch("irbis_control.core.matcher.read_excel_entries", return_value=([entry], [])),
+            patch("irbis_control.core.matcher.read_foreign_agent_entries", return_value=([], [])),
+            patch("irbis_control.core.matcher.parse_database", return_value=[record]),
+            patch("irbis_control.core.matcher.atomic_write_via_path", side_effect=lambda _path, writer: writer(output)),
+            patch("irbis_control.core.matcher.Path.mkdir"),
+        ):
             results, summary = compare_and_export(
-                "database.txt", ["books.xlsx"], "report.xlsx", "modified.txt",
-                use_isbn_matching=False, use_title_fallback=False,
+                "database.txt",
+                ["books.xlsx"],
+                "report.xlsx",
+                "modified.txt",
+                use_isbn_matching=False,
+                use_title_fallback=False,
                 match_rules={"title_publisher_year": True},
                 report_options={"enabled": True, "substances": True, "report_only": True},
             )
@@ -215,10 +364,12 @@ class BoundaryMatchTests(unittest.TestCase):
         workbook = load_workbook(output, read_only=True)
         try:
             cells = [value for sheet in workbook for row in sheet.iter_rows(values_only=True) for value in row]
-            self.assertTrue(any(
-                isinstance(value, str) and value.startswith(EXTRA_MATCH_RULES["title_publisher_year"][0])
-                for value in cells
-            ))
+            self.assertTrue(
+                any(
+                    isinstance(value, str) and value.startswith(EXTRA_MATCH_RULES["title_publisher_year"][0])
+                    for value in cells
+                )
+            )
             self.assertEqual(1, summary.matched_excel_rows)
             self.assertEqual(0, summary.modified_database_records)
         finally:
@@ -253,9 +404,7 @@ class BoundaryMatchTests(unittest.TestCase):
     def test_single_initial_is_not_automatic_even_for_one_candidate(self) -> None:
         record = DatabaseRecord(record_number=11, authors=["Иванов И."])
 
-        results = compare_foreign_agents(
-            [record], [self._foreign_entry(1, "Иванов Иван Петрович")]
-        )
+        results = compare_foreign_agents([record], [self._foreign_entry(1, "Иванов Иван Петрович")])
 
         self.assertEqual("Возможное совпадение", results[0].status)
         self.assertEqual({}, build_markers_by_record(results))

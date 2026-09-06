@@ -5,12 +5,12 @@ from pathlib import Path
 
 
 def project_root() -> Path:
-    """Return the source checkout root when the application is not frozen."""
+    """Возвращает корень исходников для запуска без сборки EXE."""
     return Path(__file__).resolve().parent.parent
 
 
 def runtime_root() -> Path:
-    """Return the directory containing bundled resources or source assets."""
+    """Возвращает каталог ресурсов с учётом распаковки сборки PyInstaller."""
     bundled = getattr(sys, "_MEIPASS", None)
     return Path(bundled) if bundled else project_root()
 

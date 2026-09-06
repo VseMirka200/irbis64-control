@@ -1,6 +1,6 @@
 [project]
 name = "irbis64-control"
-version = "1.0.0"
+version = "1.0.1"
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6,<7",
@@ -14,8 +14,8 @@ target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
-# На первом этапе блокируем только ошибки, способные сломать выполнение.
-select = ["E9", "F63", "F7", "F82"]
+# Проверяем неиспользуемый код, порядок импортов и синтаксис Python 3.11.
+select = ["E9", "F", "I", "UP"]
 
 [tool.coverage.run]
 branch = true

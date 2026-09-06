@@ -2,56 +2,15 @@ from __future__ import annotations
 
 import re
 import unicodedata
-import warnings
-from dataclasses import dataclass, field
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+from irbis_control.core.text import safe_text as _text
 from irbis_control.infrastructure.atomic_io import atomic_write_text, atomic_write_via_path
-
-
-@dataclass
-class ResultDiffRow:
-    change_type: str
-    key: str
-    values: dict[str, str]
-    changed_fields: list[str] = field(default_factory=list)
-    previous_values: dict[str, str] = field(default_factory=dict)
-
-
-@dataclass
-class ResultDiffSummary:
-    old_file: str
-    new_file: str
-    output_file: str
-    added: int
-    removed: int
-    changed: int
-    unchanged: int
-    total_changes: int
-    warnings: list[str] = field(default_factory=list)
-
-
-@dataclass
-class TextDiffRow:
-    change_type: str
-    record_number: int
-    old_text: str = ""
-    new_text: str = ""
-
-
-@dataclass
-class TextDiffSummary:
-    old_file: str
-    new_file: str
-    output_file: str
-    added: int
-    removed: int
-    changed: int
-    unchanged: int
-    total_changes: int
-
+from irbis_control.infrastructure.excel_io import load_workbook_quiet as _load_workbook_quiet
+from irbis_control.reporting.models import ResultDiffRow, ResultDiffSummary, TextDiffRow, TextDiffSummary
 
 CANONICAL_HEADERS = [
     "Раздел отчёта",
@@ -82,27 +41,6 @@ HEADER_ALIASES = {
 }
 
 
-def _load_workbook_quiet(path: str | Path, **kwargs):
-    from openpyxl import load_workbook
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Workbook contains no default style, apply openpyxl's default",
-            category=UserWarning,
-            module=r"openpyxl\.styles\.stylesheet",
-        )
-        return load_workbook(path, **kwargs)
-
-
-def _text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
-
-
 def _normalize_header(value: Any) -> str:
     text = unicodedata.normalize("NFKC", _text(value)).lower().replace("ё", "е")
     text = re.sub(r"[^0-9a-zа-я]+", " ", text)
@@ -124,25 +62,32 @@ def _normalize_general(value: Any) -> str:
     return text.strip()
 
 
+# Выбирает рабочие листы отчёта, сохраняя поддержку прежнего формата с одним листом.
+def _report_sheet_names(names: list[str]) -> list[str]:
+    preferred = [name for name in ("Вещества", "Иностранные агенты") if name in names]
+    if preferred:
+        return preferred
+    legacy = "Совпадения из TXT"
+    return [legacy] if legacy in names else names[:1]
+
+
 def _iter_xlsx_rows(path: Path) -> list[tuple[list[str], list[list[Any]], str]]:
     workbook = _load_workbook_quiet(path, read_only=True, data_only=True)
-    preferred = ["Вещества", "Иностранные агенты"]
-    selected = [name for name in preferred if name in workbook.sheetnames]
-    if not selected:
-        legacy = "Совпадения из TXT"
-        selected = [legacy] if legacy in workbook.sheetnames else [workbook.sheetnames[0]]
+    try:
+        selected = _report_sheet_names(workbook.sheetnames)
 
-    sheets: list[tuple[list[str], list[list[Any]], str]] = []
-    for sheet_name in selected:
-        worksheet = workbook[sheet_name]
-        iterator = worksheet.iter_rows(values_only=True)
-        try:
-            headers = [_text(value) for value in next(iterator)]
-        except StopIteration:
-            headers = []
-        rows = [list(row) for row in iterator]
-        sheets.append((headers, rows, worksheet.title))
-    workbook.close()
+        sheets: list[tuple[list[str], list[list[Any]], str]] = []
+        for sheet_name in selected:
+            worksheet = workbook[sheet_name]
+            iterator = worksheet.iter_rows(values_only=True)
+            try:
+                headers = [_text(value) for value in next(iterator)]
+            except StopIteration:
+                headers = []
+            rows = [list(row) for row in iterator]
+            sheets.append((headers, rows, worksheet.title))
+    finally:
+        workbook.close()
     return sheets
 
 
@@ -150,11 +95,7 @@ def _iter_xls_rows(path: Path) -> list[tuple[list[str], list[list[Any]], str]]:
     import xlrd
 
     workbook = xlrd.open_workbook(path)
-    preferred = ["Вещества", "Иностранные агенты"]
-    selected = [name for name in preferred if name in workbook.sheet_names()]
-    if not selected:
-        legacy = "Совпадения из TXT"
-        selected = [legacy] if legacy in workbook.sheet_names() else [workbook.sheet_names()[0]]
+    selected = _report_sheet_names(workbook.sheet_names())
 
     sheets: list[tuple[list[str], list[list[Any]], str]] = []
     for sheet_name in selected:
@@ -193,8 +134,7 @@ def _read_report(path: str | Path) -> tuple[list[dict[str, str]], list[str]]:
                 rows.append(row)
 
         missing = [
-            header for header in CANONICAL_HEADERS
-            if header != "Раздел отчёта" and header not in canonical_headers
+            header for header in CANONICAL_HEADERS if header != "Раздел отчёта" and header not in canonical_headers
         ]
         if missing:
             warnings.append(
@@ -205,6 +145,7 @@ def _read_report(path: str | Path) -> tuple[list[dict[str, str]], list[str]]:
     if not rows and not any(headers for headers, _, _ in sheets):
         raise ValueError(f"В файле «{source.name}» нет данных для сравнения.")
     return rows, warnings
+
 
 def _row_key(row: dict[str, str]) -> str:
     section = _normalize_general(row.get("Раздел отчёта", "")) or "общий"
@@ -220,6 +161,7 @@ def _row_key(row: dict[str, str]) -> str:
     author = _normalize_general(row.get("Автор", ""))
     inventory = _normalize_general(row.get("Инвентарные номера", ""))
     return f"section:{section}|text:{title}|{author}|{inventory}"
+
 
 def _comparison_fields(old_rows: Iterable[dict[str, str]], new_rows: Iterable[dict[str, str]]) -> list[str]:
     available = set()
@@ -239,9 +181,7 @@ def _index_rows(rows: list[dict[str, str]]) -> tuple[dict[str, dict[str, str]], 
         counts[base_key] = counts.get(base_key, 0) + 1
         key = base_key if counts[base_key] == 1 else f"{base_key}#duplicate-{counts[base_key]}"
         if counts[base_key] > 1:
-            warnings.append(
-                "Найдены повторяющиеся строки с одинаковым ключом; они сравнены по порядку появления."
-            )
+            warnings.append("Найдены повторяющиеся строки с одинаковым ключом; они сравнены по порядку появления.")
         indexed[key] = row
     return indexed, list(dict.fromkeys(warnings))
 
@@ -312,10 +252,10 @@ def _previous_text(diff: ResultDiffRow) -> str:
     if not diff.changed_fields:
         return ""
     lines = []
-    for field in diff.changed_fields:
-        before = diff.previous_values.get(field, "") or "(пусто)"
-        after = diff.values.get(field, "") or "(пусто)"
-        lines.append(f"{field}: {before} → {after}")
+    for field_name in diff.changed_fields:
+        before = diff.previous_values.get(field_name, "") or "(пусто)"
+        after = diff.values.get(field_name, "") or "(пусто)"
+        lines.append(f"{field_name}: {before} → {after}")
     return "\n".join(lines)
 
 
@@ -435,6 +375,7 @@ def export_result_differences(
     return output
 
 
+# Читает два отчёта по переданным путям, сохраняет различия и возвращает строки изменений со сводкой.
 def compare_result_files(
     old_path: str | Path,
     new_path: str | Path,
@@ -542,11 +483,13 @@ def export_text_differences(
         "",
     ]
     for diff in differences:
-        lines.extend([
-            "=" * 80,
-            f"{diff.change_type}. Запись {diff.record_number}",
-            "-" * 80,
-        ])
+        lines.extend(
+            [
+                "=" * 80,
+                f"{diff.change_type}. Запись {diff.record_number}",
+                "-" * 80,
+            ]
+        )
         if diff.old_text:
             lines.extend(["Было:", diff.old_text, ""])
         if diff.new_text:
@@ -555,6 +498,7 @@ def export_text_differences(
     return output
 
 
+# Сравнивает записи двух TXT-файлов, сохраняет отчёт и возвращает различия со сводкой.
 def compare_text_files(
     old_path: str | Path,
     new_path: str | Path,

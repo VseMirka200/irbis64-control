@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 def atomic_write_bytes(path: str | Path, payload: bytes) -> Path:
-    """Replace *path* only after the complete payload is durable on disk."""
+    """Принимает путь и байты, возвращает путь после полной записи и атомарной замены файла."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -41,7 +41,7 @@ def atomic_write_text(
 
 
 def atomic_write_via_path(path: str | Path, writer: Callable[[Path], None]) -> Path:
-    """Atomically replace a file produced by a library that requires a path."""
+    """Принимает путь и функцию записи; возвращает путь после атомарной замены готовым файлом."""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -53,7 +53,7 @@ def atomic_write_via_path(path: str | Path, writer: Callable[[Path], None]) -> P
     temporary = Path(temporary_name)
     try:
         writer(temporary)
-        # Windows requires a writable descriptor for ``fsync``.
+        # Для fsync в Windows файл должен быть открыт с разрешением на запись.
         with temporary.open("r+b") as stream:
             os.fsync(stream.fileno())
         os.replace(temporary, target)
