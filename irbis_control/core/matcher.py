@@ -128,7 +128,7 @@ def match_rule_needs_review(fields: tuple[str, ...]) -> bool:
 
 
 def parse_match_rule(value: str) -> str:
-    """Parse a field combination; never interpret input as executable code."""
+    """Разбирает сочетание полей, не выполняя полученную строку как код."""
     parts = re.split(r"[+,]", unicodedata.normalize("NFKC", value).strip())
     if not value.strip() or any(not part.strip() for part in parts):
         raise ValueError("Введите поля через +, например: Название + издательство + год.")
@@ -1671,7 +1671,7 @@ def _report_records(
     deduplicate: bool = False,
     sort_by: str = "record",
 ) -> tuple[list[DatabaseRecord], dict[int, list[MatchResult]]]:
-    """Prepares report rows without changing matching or marker behavior."""
+    """Готовит строки отчёта, не изменяя правила сопоставления и установки меток."""
     records = _matched_database_records(results, source_type)
     grouped = _confirmed_results_by_record(results, source_type)
 
@@ -2260,7 +2260,7 @@ def _result_is_eligible_for_txt_marker(result: MatchResult) -> bool:
 
 def _normalized_marker_text(value: str) -> str:
     # ИРБИС/Excel иногда приносят визуально невидимые Unicode-символы
-    # (WORD JOINER, zero-width, soft hyphen и т. п.). На экране две метки
+    # (соединитель слов, символы нулевой ширины, мягкий перенос и т. п.). На экране две метки
     # выглядят одинаково, но простое сравнение строк считает их разными.
     # Для дедупликации убираем все форматирующие/управляющие символы и
     # приводим любые Unicode-разделители к обычному пробелу.
@@ -2832,7 +2832,7 @@ def apply_markers_to_tag_values(
             matching_indices.append(index)
 
         # Если одинаковая метка записана отдельными повторениями одного поля,
-        # оставляем первое. Удаляем только marker-only повторения, чтобы не
+        # оставляем первое. Удаляем только повторения, состоящие из одной метки, чтобы не
         # потерять дополнительное содержимое служебного поля.
         if len(matching_indices) > 1:
             for index in reversed(matching_indices[1:]):

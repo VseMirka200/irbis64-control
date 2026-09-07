@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import QApplication
 
 
 def apply_light_palette(app: QApplication) -> None:
-    """Apply the application's single supported light color scheme."""
+    """Применяет единственную поддерживаемую светлую цветовую схему приложения."""
     try:
         app.styleHints().setColorScheme(Qt.ColorScheme.Light)
     except Exception:

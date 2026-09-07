@@ -46,5 +46,5 @@ def install_russian_ui(app: QApplication) -> None:
     fallback_translator = _RussianButtonTranslator(app)
     app.installTranslator(fallback_translator)
 
-    # Retain the Python wrappers for the whole application lifetime.
+    # Сохраняем Python-обёртки на всё время работы приложения.
     app._russian_ui_translators = (qt_translator, fallback_translator)  # type: ignore[attr-defined]

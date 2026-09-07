@@ -164,7 +164,7 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual(1, len(results))
         self.assertEqual("Название + автор + издательство + год", results[0].method)
         self.assertEqual(100.0, results[0].confidence)
-        # An enabled legacy author rule must not be weakened by a review-only rule.
+        # Включённое прежнее правило по автору не должно ослабляться правилом ручной проверки.
         result = DatabaseIndex([record]).match(entry, False, True, False, 90, {"title_year": True})[0]
         self.assertEqual("Название и автор", result.method)
         self.assertEqual("Совпадение", result.status)

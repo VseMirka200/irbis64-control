@@ -1,4 +1,4 @@
-# Auto detect text files and keep source files consistent across platforms.
+# Автоматически определяем текстовые файлы и сохраняем единые окончания строк на всех платформах.
 * text=auto
 *.py text eol=lf
 *.toml text eol=lf

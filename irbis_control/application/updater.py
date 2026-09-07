@@ -179,7 +179,7 @@ def download_asset(
 
 
 def schedule_install(downloaded: str | Path, current_executable: str | Path) -> Path:
-    """Schedule replacement after the frozen application exits."""
+    """Запускает замену файлов после закрытия собранного приложения."""
     if not getattr(sys, "frozen", False):
         raise UpdateError("Автоустановка доступна только в собранной EXE-версии.")
 

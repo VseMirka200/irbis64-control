@@ -436,7 +436,7 @@ class DirectIrbisComparisonWorker(QObject):
                 backup = self._save_rollback(rollback_records)
                 written = 0
                 readback_repairs = 0
-                # После создания rollback-копии запись выполняется до конца: остановка
+                # После создания резервной копии запись выполняется до конца: остановка
                 # посередине оставила бы базу частично изменённой.
                 # Важно: после каждой записи перечитываем MFN с сервера. Это защищает
                 # от ситуации, когда визуально одинаковые повторения 333 появились уже
@@ -470,7 +470,7 @@ class DirectIrbisComparisonWorker(QObject):
                         connected.write_record(self.database, repaired, actualize=1)
                         readback_repairs += 1
 
-                        # Контрольный read-back: молча оставлять дубль нельзя.
+                        # Контрольное чтение после записи: молча оставлять дубль нельзя.
                         final_record = connected.read_record(self.database, record.mfn)
                         _final_values, still_needs_repair = apply_markers_to_tag_values(
                             ((field.tag, field.value) for field in final_record.fields),
@@ -721,7 +721,7 @@ class IrbisOperationWorker(QObject):
                         )
 
                     written = 0
-                    # Сначала создана rollback-копия, затем меняем живую базу.
+                    # Сначала создаём резервную копию, затем меняем рабочую базу.
                     for index, record in enumerate(pending, start=1):
                         connected.write_record(database, record, actualize=1)
                         written += 1

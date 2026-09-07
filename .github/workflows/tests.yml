@@ -28,7 +28,7 @@ jobs:
       - name: Check formatting
         run: python -m ruff format --check .
       - name: Compile sources
-        run: python -m compileall -q irbis_control main.py db_connector.py matcher.py irbis_bridge.py result_diff.py atomic_io.py ui_locale.py
+        run: python -m compileall -q irbis_control main.py db_connector.py
       - name: Run tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"

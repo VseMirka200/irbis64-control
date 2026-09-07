@@ -51,18 +51,18 @@ if errorlevel 1 goto error
 if exist "build" rmdir /s /q "build"
 if exist "dist" rmdir /s /q "dist"
 
-rem Main application.
+rem Основное приложение.
 "%VENV_PY%" -m PyInstaller --noconfirm --clean --onefile --windowed ^
   --name "IRBIS64Control" ^
-  --icon "assets\irbis64_control.ico" ^
+  --icon "assets\icons\irbis64_control.ico" ^
   --add-data "assets;assets" ^
   "main.py"
 if errorlevel 1 goto error
 
-rem Separate direct database connector. It stays next to the main EXE and is launched from the Tools button.
+rem Отдельный модуль прямого подключения к базе. Он лежит рядом с основным EXE и запускается кнопкой инструментов.
 "%VENV_PY%" -m PyInstaller --noconfirm --clean --onefile --windowed ^
   --name "IRBIS64ControlDB" ^
-  --icon "assets\irbis64_control.ico" ^
+  --icon "assets\icons\irbis64_control.ico" ^
   --add-data "assets;assets" ^
   "db_connector.py"
 if errorlevel 1 goto error

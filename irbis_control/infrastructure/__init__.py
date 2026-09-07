@@ -1,1 +1,1 @@
-"""File-system and IRBIS integration adapters."""
+"""Адаптеры для работы с файловой системой и ИРБИС."""

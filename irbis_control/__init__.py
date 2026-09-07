@@ -1,4 +1,4 @@
-"""IRBIS64 Control application package."""
+"""Пакет приложения ИРБИС64 Контроль."""
 
 __version__ = "1.0.1"
 

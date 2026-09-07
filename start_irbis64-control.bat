@@ -24,18 +24,18 @@ exit /b 1
 :python_found
 set "VENV_PY=.venv\Scripts\python.exe"
 
-rem Reuse a complete virtual environment, but do not trust a half-created one.
+rem Используем готовое виртуальное окружение, но проверяем, что оно создано полностью.
 if exist "%VENV_PY%" (
   "%VENV_PY%" -c "import PyQt6, openpyxl, xlrd, rapidfuzz" >nul 2>nul
   if not errorlevel 1 goto run_venv
 )
 
-rem If the selected system Python already has everything, start immediately.
+rem Если в выбранном системном Python уже есть все зависимости, запускаем приложение сразу.
 %PYTHON_CMD% -c "import PyQt6, openpyxl, xlrd, rapidfuzz" >nul 2>nul
 if not errorlevel 1 goto run_system
 
-rem Some Windows installations deny ensurepip access to the global TEMP folder.
-rem A private temporary folder next to the program avoids that failure.
+rem В некоторых установках Windows у ensurepip нет доступа к общей папке TEMP.
+rem Собственная временная папка рядом с программой позволяет избежать этой ошибки.
 set "BOOTSTRAP_TMP=%~dp0.venv\.tmp"
 if not exist "%BOOTSTRAP_TMP%" (
   mkdir "%BOOTSTRAP_TMP%"

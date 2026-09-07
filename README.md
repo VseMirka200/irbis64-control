@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/irbis64_control_icon.png" alt="Иконка ИРБИС64 Контроль" width="128">
+  <img src="assets/icons/irbis64_control_icon.png" alt="Иконка ИРБИС64 Контроль" width="128">
   <h1>ИРБИС64 Контроль</h1>
   <p>Настольное приложение для проверки библиотечных записей ИРБИС64 по перечням из Excel.</p>
   <p>
