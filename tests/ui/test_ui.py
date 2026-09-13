@@ -14,6 +14,7 @@ from irbis_control.application.settings import ApplicationSettings
 from irbis_control.ui import db_connector_window, main_window
 from irbis_control.ui.components import dialogs, widgets
 from irbis_control.ui.services import workers
+from irbis_control.ui.windows.connection_dialog import IrbisConnectionDialog
 
 
 # Проверяем сборку окон и сигналы Qt без сети и без доступа к настройкам пользователя.
@@ -54,9 +55,13 @@ class UiTests(unittest.TestCase):
         self.addCleanup(window.close)
         window.show()
         self.app.processEvents()
-        self.assertEqual(window.workflow_tabs.count(), 6)
+        self.assertEqual(window.workflow_tabs.count(), 4)
         self.assertEqual(len(window.section_cards), 8)
-        for index in range(5):
+        self.assertEqual(
+            [window.workflow_tabs.tabText(index) for index in range(3)],
+            ["1  Данные", "2  Параметры", "3  Результат"],
+        )
+        for index in range(3):
             window.workflow_tabs.setCurrentIndex(index)
             window.resize(800, 600)
             self.app.processEvents()
@@ -65,6 +70,74 @@ class UiTests(unittest.TestCase):
         self.assertIs(window.workflow_tabs.currentWidget(), window.application_settings_page)
         window._close_application_settings()
         self.assertIs(window.workflow_tabs.currentWidget(), window.results_tab)
+
+    def test_simplified_workflow_controls_existing_settings(self) -> None:
+        window = main_window.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+
+        window.source_mode_combo.setCurrentIndex(window.source_mode_combo.findData("txt"))
+        self.assertFalse(window.direct_irbis_checkbox.isChecked())
+        self.assertIn("TXT", window.source_mode_hint.text())
+
+        window.output_mode_combo.setCurrentIndex(window.output_mode_combo.findData("report"))
+        self.assertTrue(window.create_excel_report_check.isChecked())
+        self.assertTrue(window.report_only_check.isChecked())
+
+        self.assertFalse(window.advanced_options_toggle.isCheckable())
+        self.assertFalse(window.advanced_settings_dialog.isVisible())
+
+        self.assertFalse(window.connection_settings_button.isCheckable())
+        self.assertTrue(window.connection_card.isHidden())
+        self.assertTrue(window.base_card.isHidden())
+
+    def test_connection_dialog_returns_edited_values(self) -> None:
+        dialog = IrbisConnectionDialog(
+            {
+                "host": "127.0.0.1",
+                "port": 6666,
+                "login": "reader",
+                "password": "secret",
+                "database": "IBIS",
+                "query": "I=$",
+                "page_size": 500,
+            },
+            [("IBIS — Основной каталог", "IBIS")],
+        )
+        self.addCleanup(dialog.deleteLater)
+        dialog.host_edit.setText("10.0.0.5")
+        dialog.database_combo.setEditText("BOOKS")
+        dialog.page_size_spin.setValue(800)
+
+        values = dialog.values()
+        self.assertEqual(values["host"], "10.0.0.5")
+        self.assertEqual(values["database"], "BOOKS")
+        self.assertEqual(values["page_size"], 800)
+
+    def test_irbis_connection_settings_persist_between_windows(self) -> None:
+        first = main_window.MainWindow()
+        self.addCleanup(first.deleteLater)
+        self.addCleanup(first.close)
+        first.irbis_host_edit.setText("10.20.30.40")
+        first.irbis_port_spin.setValue(7777)
+        first.irbis_login_edit.setText("cataloger")
+        first.irbis_password_edit.setText("saved-password")
+        first.irbis_db_combo.addItem("BOOKS", "BOOKS")
+        first.irbis_db_combo.setCurrentIndex(first.irbis_db_combo.findData("BOOKS"))
+        first.irbis_query_edit.setText("A=SMITH$")
+        first.irbis_page_size_spin.setValue(900)
+        first._save_irbis_config()
+
+        second = main_window.MainWindow()
+        self.addCleanup(second.deleteLater)
+        self.addCleanup(second.close)
+        self.assertEqual(second.irbis_host_edit.text(), "10.20.30.40")
+        self.assertEqual(second.irbis_port_spin.value(), 7777)
+        self.assertEqual(second.irbis_login_edit.text(), "cataloger")
+        self.assertEqual(second.irbis_password_edit.text(), "saved-password")
+        self.assertEqual(second._current_irbis_database(), "BOOKS")
+        self.assertEqual(second.irbis_query_edit.text(), "A=SMITH$")
+        self.assertEqual(second.irbis_page_size_spin.value(), 900)
 
     def test_auxiliary_windows_construct(self) -> None:
         for factory in (
