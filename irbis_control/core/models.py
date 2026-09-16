@@ -68,6 +68,20 @@ class ForeignAgentEntry:
         return not bool(self.exclusion_date.strip())
 
 
+# Хранит все переключатели алгоритма и передаётся между этапами сравнения как одно значение.
+@dataclass(frozen=True, slots=True)
+class ComparisonOptions:
+    use_isbn_matching: bool = True
+    use_title_fallback: bool = True
+    use_fuzzy: bool = False
+    fuzzy_threshold: int = 90
+    match_rules: dict[str, bool] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "fuzzy_threshold", max(0, min(100, int(self.fuzzy_threshold))))
+        object.__setattr__(self, "match_rules", dict(self.match_rules))
+
+
 # Связывает строку источника с записью базы и основанием совпадения.
 @dataclass
 class MatchResult:
@@ -80,6 +94,9 @@ class MatchResult:
     source_type: str = "Вещества"
     matched_value: str = ""
     foreign_agent: ForeignAgentEntry | None = None
+    # Точное значение поля ИРБИС, которое породило совпадение. Нужное для
+    # безопасной группировки одинаковых авторов в ручной проверке и памяти решений.
+    database_matched_value: str = ""
 
 
 # Собирает статистику запуска для интерфейса и экспортируемого отчёта.

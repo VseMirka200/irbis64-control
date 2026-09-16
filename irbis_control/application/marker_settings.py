@@ -8,6 +8,8 @@ from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     DEFAULT_SUBSTANCE_MARKER,
     DEFAULT_SUBSTANCE_MARKER_FIELD,
     EXTRA_MATCH_RULES,
@@ -32,10 +34,16 @@ DEFAULT_MARKER_SETTINGS: dict[str, MarkerSetting] = {
     "report_only": False,
     "substance_marker": DEFAULT_SUBSTANCE_MARKER,
     "foreign_agent_marker_template": DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    "foreign_organization_marker_template": DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     "age_marker": DEFAULT_AGE_MARKER,
     "substance_marker_field": DEFAULT_SUBSTANCE_MARKER_FIELD,
     "foreign_agent_marker_field": DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    "foreign_organization_marker_field": DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     "age_marker_field": DEFAULT_AGE_MARKER_FIELD,
+    "substance_marker_enabled": True,
+    "foreign_agent_marker_enabled": True,
+    "foreign_organization_marker_enabled": True,
+    "age_marker_enabled": True,
 }
 
 

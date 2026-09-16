@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt6.QtCore import QEvent, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QFrame,
     QHBoxLayout,
@@ -30,6 +33,71 @@ from irbis_control.core.matcher import (
 from irbis_control.paths import icon_path
 
 
+class FileDropListWidget(QListWidget):
+    """Список файлов, принимающий локальные файлы перетаскиванием из Проводника."""
+
+    filesDropped = pyqtSignal(list)
+
+    def __init__(
+        self,
+        *,
+        extensions: tuple[str, ...] = (),
+        allow_multiple: bool = True,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._drop_extensions = {ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in extensions}
+        self._allow_multiple = allow_multiple
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
+        self.setDefaultDropAction(Qt.DropAction.CopyAction)
+
+    def _dropped_paths(self, mime_data) -> list[str]:
+        if not mime_data or not mime_data.hasUrls():
+            return []
+        paths: list[str] = []
+        seen: set[str] = set()
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if not path.is_file():
+                continue
+            if self._drop_extensions and path.suffix.lower() not in self._drop_extensions:
+                continue
+            value = str(path)
+            key = value.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(value)
+            if not self._allow_multiple:
+                break
+        return paths
+
+    def dragEnterEvent(self, event) -> None:
+        if self._dropped_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if self._dropped_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        paths = self._dropped_paths(event.mimeData())
+        if not paths:
+            event.ignore()
+            return
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        self.filesDropped.emit(paths)
+
+
 # Оставляет выбор базы и обновление списка доступными в одном поле.
 class DatabaseComboBox(QComboBox):
     """Поле базы данных с кнопками выбора и обновления справа."""
@@ -52,7 +120,7 @@ class DatabaseComboBox(QComboBox):
         for button in (self.dropdown_button, self.refresh_button):
             button.setAutoRaise(True)
             button.setIconSize(QSize(16, 16))
-            button.setStyleSheet("QToolButton { border: none; padding: 0; background: transparent; }")
+            button.setObjectName("embeddedToolButton")
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -139,9 +207,7 @@ class SectionCard(QFrame):
         self.outer_layout.addLayout(self.body)
 
     def set_compact(self, compact: bool, very_compact: bool = False) -> None:
-        horizontal = 3 if very_compact else 4
-        vertical = 3 if compact else 4
-        self.outer_layout.setContentsMargins(horizontal, vertical, horizontal, vertical)
+        self.outer_layout.setContentsMargins(4, 4, 4, 4)
         self.outer_layout.setSpacing(4)
         self.body.setSpacing(4)
 
@@ -220,28 +286,41 @@ class MatchFieldsComboBox(QComboBox):
 
 # Позволяет менять высоту списка мышью и клавиатурой.
 class ListResizeHandle(QFrame):
-    def __init__(self, target: QListWidget) -> None:
+    heightChanged = pyqtSignal(int)
+
+    def __init__(
+        self,
+        target: QListWidget,
+        *,
+        minimum_height: int = 76,
+        maximum_height: int = 600,
+        accessible_name: str = "Изменить высоту списка правил",
+    ) -> None:
         super().__init__()
         self.target = target
+        self.minimum_height = minimum_height
+        self.maximum_height = maximum_height
         self._drag_y: float | None = None
         self._start_height = target.height()
         self.setFixedHeight(10)
         self.setCursor(Qt.CursorShape.SizeVerCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName("Изменить высоту списка правил")
+        self.setAccessibleName(accessible_name)
         self.setToolTip(
             "Потяните вверх или вниз, чтобы изменить высоту списка. Также можно использовать стрелки ↑ и ↓."
         )
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 3, 0, 3)
         grip = QFrame()
+        grip.setObjectName("listResizeGrip")
         grip.setFixedSize(32, 3)
-        grip.setStyleSheet("background: #aebdcd; border-radius: 1px;")
         grip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignCenter)
 
     def _set_height(self, height: int) -> None:
-        self.target.setFixedHeight(max(76, min(600, height)))
+        bounded_height = max(self.minimum_height, min(self.maximum_height, height))
+        self.target.setFixedHeight(bounded_height)
+        self.heightChanged.emit(bounded_height)
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -301,8 +380,8 @@ class MatchRulesEditor(QWidget):
         self.resize_handle = ListResizeHandle(self.rules)
         root.addWidget(self.resize_handle)
         self.error = QLabel()
+        self.error.setObjectName("errorLabel")
         self.error.setWordWrap(True)
-        self.error.setStyleSheet("color: #b52f2f;")
         self.error.hide()
         root.addWidget(self.error)
         footer = QHBoxLayout()

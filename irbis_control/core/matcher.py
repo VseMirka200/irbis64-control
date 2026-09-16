@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from irbis_control.core.models import (
+    ComparisonOptions,
     ComparisonSummary,
     DatabaseRecord,
     ExcelEntry,
@@ -157,9 +158,11 @@ def parse_match_rule(value: str) -> str:
 SOURCE_FOREIGN_AGENTS = "Иностранные агенты"
 DEFAULT_SUBSTANCE_MARKER = "^AIII"
 DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE = "^AI^@{name}"
+DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE = "^AO^@{name}"
 DEFAULT_AGE_MARKER = "^Z18+"
 DEFAULT_SUBSTANCE_MARKER_FIELD = 333
 DEFAULT_FOREIGN_AGENT_MARKER_FIELD = 333
+DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD = 333
 DEFAULT_AGE_MARKER_FIELD = 900
 
 TITLE_STOP_WORDS = {
@@ -897,6 +900,67 @@ def export_modified_databases(*args: Any, **kwargs: Any) -> list[Path]:
     from irbis_control.core.marker_updates import export_modified_databases as implementation
 
     return implementation(*args, **kwargs)
+
+
+
+def apply_manual_review_decisions(
+    results: list[MatchResult],
+    summary: ComparisonSummary,
+    decisions: dict[int, bool],
+    *,
+    confirmation_note: str = "Подтверждено оператором вручную",
+) -> None:
+    """Применяет решения оператора к пограничным совпадениям.
+
+    ``True`` превращает строку в подтверждённое совпадение с точностью 100%,
+    ``False`` помечает её как отклонённую вручную. Индексы относятся к
+    исходному списку ``results``. После применения пересчитываются основные
+    показатели сводки, чтобы отчёт и последующая постановка меток использовали
+    уже ручное решение оператора.
+    """
+    for result_index, approved in decisions.items():
+        if result_index < 0 or result_index >= len(results):
+            continue
+        result = results[result_index]
+        if result.status != "Возможное совпадение":
+            continue
+        if approved:
+            result.status = "Совпадение"
+            result.confidence = 100.0
+            suffix = confirmation_note
+        else:
+            result.status = "Отклонено вручную"
+            suffix = "Отклонено оператором вручную"
+        result.note = f"{result.note}; {suffix}" if result.note else suffix
+
+    confirmed_substances = [
+        result
+        for result in results
+        if result.status == "Совпадение" and result.source_type == SOURCE_SUBSTANCES
+    ]
+    confirmed_foreign = [
+        result
+        for result in results
+        if result.status == "Совпадение" and result.source_type == SOURCE_FOREIGN_AGENTS
+    ]
+    matched_substance_ids = {result.excel.entry_id for result in confirmed_substances}
+    matched_foreign_ids = {
+        result.foreign_agent.entry_id
+        for result in confirmed_foreign
+        if result.foreign_agent is not None
+    }
+    summary.matched_excel_rows = len(matched_substance_ids)
+    summary.unmatched_excel_rows = max(0, summary.excel_rows - len(matched_substance_ids))
+    summary.matched_foreign_agent_rows = len(matched_foreign_ids)
+    summary.substance_matched_records = len(
+        {result.database.record_number for result in confirmed_substances if result.database is not None}
+    )
+    summary.foreign_agent_matched_records = len(
+        {result.database.record_number for result in confirmed_foreign if result.database is not None}
+    )
+    summary.review_rows = sum(1 for result in results if result.status == "Возможное совпадение")
+
+
 def compare_and_export(
     database_path: str | Path | list[str | Path],
     excel_paths: list[str | Path],
@@ -909,26 +973,32 @@ def compare_and_export(
     match_rules: dict[str, bool] | None = None,
     use_fuzzy: bool = False,
     fuzzy_threshold: int = 90,
+    options: ComparisonOptions | None = None,
     report_options: dict[str, Any] | None = None,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     age_marker: str = DEFAULT_AGE_MARKER,
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
     progress_cb: ProgressCallback | None = None,
     cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[MatchResult], ComparisonSummary]:
     database_paths = database_path if isinstance(database_path, list) else [database_path]
+    comparison_options = options or ComparisonOptions(
+        use_isbn_matching=use_isbn_matching,
+        use_title_fallback=use_title_fallback,
+        use_fuzzy=use_fuzzy,
+        fuzzy_threshold=fuzzy_threshold,
+        match_rules=match_rules or {},
+    )
     results, summary = compare_files(
         database_paths,
         excel_paths,
         foreign_agents_path=foreign_agents_path,
-        use_isbn_matching=use_isbn_matching,
-        use_title_fallback=use_title_fallback,
-        match_rules=match_rules,
-        use_fuzzy=use_fuzzy,
-        fuzzy_threshold=fuzzy_threshold,
+        options=comparison_options,
         progress_cb=progress_cb,
         cancel_cb=cancel_cb,
     )
@@ -951,9 +1021,11 @@ def compare_and_export(
             cancel_cb,
             substance_marker=substance_marker,
             foreign_agent_marker_template=foreign_agent_marker_template,
+            foreign_organization_marker_template=foreign_organization_marker_template,
             age_marker=age_marker,
             substance_marker_field=substance_marker_field,
             foreign_agent_marker_field=foreign_agent_marker_field,
+            foreign_organization_marker_field=foreign_organization_marker_field,
             age_marker_field=age_marker_field,
         )
     return results, summary

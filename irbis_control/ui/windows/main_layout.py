@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QEvent, Qt, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QApplication,
@@ -19,10 +19,28 @@ from PyQt6.QtWidgets import (
 
 from irbis_control.paths import icon_path
 from irbis_control.ui.components.widgets import SectionCard
-from irbis_control.ui.theme import common_button_stylesheet
+from irbis_control.ui.theme import apply_main_title_font, main_window_stylesheet
 
 
 class MainWindowLayoutMixin:
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            hasattr(self, "scroll_area")
+            and watched is self.scroll_area.viewport()
+            and event.type() == QEvent.Type.Wheel
+            and hasattr(self, "workflow_tabs")
+            and self.workflow_tabs.currentWidget()
+            in (
+                getattr(self, "data_tab", None),
+                getattr(self, "parameters_tab", None),
+                getattr(self, "results_tab", None),
+            )
+            and self.scroll_area.verticalScrollBar().maximum() == 0
+        ):
+            self.scroll_area.verticalScrollBar().setValue(0)
+            return True
+        return super().eventFilter(watched, event)
+
     def _compose_simplified_workflow(self) -> None:
         """Перекомпоновывает рабочие элементы в короткий сценарий из трёх шагов."""
         self._simplified_workflow = True
@@ -51,7 +69,9 @@ class MainWindowLayoutMixin:
         # Шаг 1. Источник и проверочные реестры находятся на одной странице.
         data_layout = self.irbis_tab.layout()
         self._take_all(data_layout)
-        data_layout.setContentsMargins(8, 8, 8, 8)
+        # Снизу достаточно компактного зазора: после сжатия списков до одной
+        # строки большой внешний отступ выглядит как пустая полоса у края окна.
+        data_layout.setContentsMargins(8, 8, 8, 4)
         data_layout.setSpacing(8)
 
         mode_card = SectionCard("Где находятся записи", "")
@@ -66,6 +86,10 @@ class MainWindowLayoutMixin:
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.source_mode_combo)
         mode_row.addStretch()
+        self.source_useful_links_button = QPushButton("Полезные ссылки")
+        self.source_useful_links_button.setObjectName("mutedButton")
+        self.source_useful_links_button.setToolTip("Открыть ссылки для скачивания данных")
+        self.source_useful_links_button.clicked.connect(self.open_useful_links)
         mode_card.body.addLayout(mode_row)
         self.source_mode_hint = QLabel()
         self.source_mode_hint.setObjectName("cardDescription")
@@ -77,8 +101,8 @@ class MainWindowLayoutMixin:
         self.connection_overview = connection_overview
         connection_overview.setObjectName("sectionCard")
         overview_layout = QHBoxLayout(connection_overview)
-        overview_layout.setContentsMargins(8, 7, 8, 8)
-        overview_layout.setSpacing(6)
+        overview_layout.setContentsMargins(4, 4, 4, 4)
+        overview_layout.setSpacing(4)
         overview_text = QVBoxLayout()
         overview_text.setContentsMargins(0, 0, 0, 0)
         overview_text.setSpacing(6)
@@ -107,9 +131,14 @@ class MainWindowLayoutMixin:
         self.irbis_local_hint.hide()
         data_layout.addWidget(connection_overview)
 
+        records_header = QHBoxLayout()
+        records_header.setSpacing(7)
         records_title = QLabel("Данные для проверки")
         records_title.setObjectName("pageSectionTitle")
-        data_layout.addWidget(records_title)
+        records_header.addWidget(records_title)
+        records_header.addStretch()
+        records_header.addWidget(self.source_useful_links_button)
+        data_layout.addLayout(records_header)
         data_layout.addWidget(self.database_card)
         self.sources_grid = QGridLayout()
         self.sources_grid.setHorizontalSpacing(7)
@@ -123,11 +152,11 @@ class MainWindowLayoutMixin:
             (self.excel_card, self.excel_list),
         ):
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-            list_widget.setMaximumHeight(58)
+            list_widget.setFixedHeight(84)
         data_layout.addLayout(self.sources_grid)
         data_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.data_tab = self.irbis_tab
-        self.workflow_tabs.addTab(self.data_tab, "1  Данные")
+        self.workflow_tabs.addTab(self.data_tab, "Данные")
 
         self.source_mode_combo.currentIndexChanged.connect(self._source_mode_changed)
         self.direct_irbis_checkbox.toggled.connect(self._sync_source_mode)
@@ -167,6 +196,24 @@ class MainWindowLayoutMixin:
         defaults_note.setWordWrap(True)
         parameters_layout.addWidget(defaults_note)
 
+        confirmation_memory_card = SectionCard("Память подтверждений", "")
+        confirmation_memory_row = QHBoxLayout()
+        confirmation_memory_row.setSpacing(8)
+        confirmation_memory_hint = QLabel(
+            "Сохранённые ручные подтверждения автоматически применяются к таким же совпадениям. "
+            "Здесь их можно просмотреть и удалить."
+        )
+        confirmation_memory_hint.setObjectName("cardDescription")
+        confirmation_memory_hint.setWordWrap(True)
+        confirmation_memory_row.addWidget(confirmation_memory_hint, 1)
+        self.confirmation_memory_button = QPushButton("Открыть память")
+        self.confirmation_memory_button.setObjectName("mutedButton")
+        self.confirmation_memory_button.setToolTip("Просмотреть или удалить сохранённые подтверждения")
+        self.confirmation_memory_button.clicked.connect(self.open_confirmation_memory)
+        confirmation_memory_row.addWidget(self.confirmation_memory_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        confirmation_memory_card.body.addLayout(confirmation_memory_row)
+        parameters_layout.addWidget(confirmation_memory_card)
+
         self.advanced_options_toggle = QPushButton("Открыть дополнительные настройки")
         self.advanced_options_toggle.setObjectName("mutedButton")
         self.advanced_options_toggle.setCheckable(False)
@@ -189,7 +236,7 @@ class MainWindowLayoutMixin:
         advanced_layout = QVBoxLayout(self.advanced_options)
         advanced_layout.setContentsMargins(0, 0, 4, 0)
         advanced_layout.setSpacing(7)
-        self.match_settings_card.title_label.setText("Правила совпадения")
+        self.match_settings_card.title_label.setText("Порядок сравнения")
         advanced_layout.addWidget(self.match_settings_card)
         self.report_lists_card.title_label.setText("Состав Excel-отчёта")
         advanced_layout.addWidget(self.report_lists_card)
@@ -204,15 +251,19 @@ class MainWindowLayoutMixin:
         dialog_layout.addWidget(advanced_scroll, 1)
         dialog_buttons = QHBoxLayout()
         dialog_buttons.addStretch()
-        close_advanced_button = QPushButton("Закрыть")
-        close_advanced_button.setObjectName("mutedButton")
-        close_advanced_button.clicked.connect(self.advanced_settings_dialog.accept)
-        dialog_buttons.addWidget(close_advanced_button)
+        cancel_advanced_button = QPushButton("Отмена")
+        cancel_advanced_button.setObjectName("mutedButton")
+        cancel_advanced_button.clicked.connect(self.advanced_settings_dialog.reject)
+        save_advanced_button = QPushButton("Сохранить")
+        save_advanced_button.setObjectName("primaryButton")
+        save_advanced_button.clicked.connect(self._save_advanced_settings)
+        dialog_buttons.addWidget(save_advanced_button)
+        dialog_buttons.addWidget(cancel_advanced_button)
         dialog_layout.addLayout(dialog_buttons)
         self.advanced_options_toggle.clicked.connect(self.open_advanced_settings)
         parameters_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.parameters_tab = self.lists_tab
-        self.workflow_tabs.addTab(self.parameters_tab, "2  Параметры")
+        self.workflow_tabs.addTab(self.parameters_tab, "Параметры")
         self.output_mode_combo.currentIndexChanged.connect(self._output_mode_changed)
 
         # Шаг 3. Один основной запуск, краткий итог и раскрываемый технический журнал.
@@ -221,7 +272,7 @@ class MainWindowLayoutMixin:
         results_layout.setContentsMargins(8, 8, 8, 8)
         results_layout.setSpacing(8)
         self._take_all(self.actions_layout)
-        self.actions_layout.setContentsMargins(10, 9, 10, 10)
+        self.actions_layout.setContentsMargins(4, 4, 4, 4)
         self.actions_layout.setSpacing(7)
         self.actions_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.actions_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -247,15 +298,17 @@ class MainWindowLayoutMixin:
         self.actions_layout.addWidget(self.progress)
         self.actions_layout.addLayout(self.status_row)
         result_files = QGridLayout()
+        self.result_files_layout = result_files
         result_files.setHorizontalSpacing(6)
         result_files.setVerticalSpacing(6)
         self.open_button.show()
-        result_files.addWidget(self.open_button, 0, 0)
-        result_files.addWidget(self.open_modified_database_button, 0, 1)
-        result_files.addWidget(self.write_irbis_button, 1, 0)
-        result_files.addWidget(self.compare_reports_button, 1, 1)
-        result_files.setColumnStretch(0, 1)
-        result_files.setColumnStretch(1, 1)
+        self.result_file_buttons = (
+            self.open_button,
+            self.open_modified_database_button,
+            self.write_irbis_button,
+            self.compare_reports_button,
+        )
+        self._reflow_result_files()
         self.actions_layout.addLayout(result_files)
         results_layout.addWidget(self.actions_card)
 
@@ -269,13 +322,12 @@ class MainWindowLayoutMixin:
         log_dialog_layout = QVBoxLayout(self.log_dialog)
         log_dialog_layout.setContentsMargins(8, 8, 8, 8)
         log_dialog_layout.setSpacing(7)
+        self.log_header.removeWidget(self.export_journal_button)
         log_dialog_layout.addWidget(self.log_card, 1)
         log_dialog_buttons = QHBoxLayout()
         log_dialog_buttons.addStretch()
-        close_log_button = QPushButton("Закрыть")
-        close_log_button.setObjectName("mutedButton")
-        close_log_button.clicked.connect(self.log_dialog.accept)
-        log_dialog_buttons.addWidget(close_log_button)
+        self.export_journal_button.setObjectName("primaryButton")
+        log_dialog_buttons.addWidget(self.export_journal_button)
         log_dialog_layout.addLayout(log_dialog_buttons)
         self.log_toggle.clicked.connect(self.open_log_window)
 
@@ -285,14 +337,15 @@ class MainWindowLayoutMixin:
         self.maintenance_panel = QFrame()
         self.maintenance_panel.setObjectName("dangerCard")
         maintenance_layout = QVBoxLayout(self.maintenance_panel)
-        maintenance_layout.setContentsMargins(8, 7, 8, 8)
+        maintenance_layout.setContentsMargins(4, 4, 4, 4)
         maintenance_hint = QLabel(
-            "Удаление ранее добавленных меток — отдельная операция, не связанная с текущей проверкой."
+            "Если метки уже есть, повторная проверка не добавит их второй раз. "
+            "Здесь можно отдельно удалить стандартные и настроенные метки программы; "
+            "другие значения в тех же полях сохраняются."
         )
         maintenance_hint.setObjectName("cardDescription")
         maintenance_hint.setWordWrap(True)
         maintenance_layout.addWidget(maintenance_hint)
-        maintenance_layout.addWidget(self.cleanup_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.maintenance_dialog = QDialog(self)
         self.maintenance_dialog.setWindowTitle("Обслуживание базы")
         self.maintenance_dialog.setModal(True)
@@ -302,6 +355,9 @@ class MainWindowLayoutMixin:
         maintenance_dialog_layout.setSpacing(7)
         maintenance_dialog_layout.addWidget(self.maintenance_panel, 1)
         maintenance_dialog_buttons = QHBoxLayout()
+        self.cleanup_button.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.cleanup_button.setMinimumWidth(190)
+        maintenance_dialog_buttons.addWidget(self.cleanup_button)
         maintenance_dialog_buttons.addStretch()
         close_maintenance_button = QPushButton("Закрыть")
         close_maintenance_button.setObjectName("mutedButton")
@@ -316,7 +372,7 @@ class MainWindowLayoutMixin:
         secondary_actions.addWidget(self.maintenance_toggle, 1)
         results_layout.addLayout(secondary_actions)
         results_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.workflow_tabs.addTab(self.results_tab, "3  Результат")
+        self.workflow_tabs.addTab(self.results_tab, "Результат")
 
         self.application_settings_page = self.settings_page_class(self.app_settings, self)
         self.application_settings_page.saved.connect(self._save_application_settings)
@@ -328,21 +384,7 @@ class MainWindowLayoutMixin:
         self.workflow_tabs.currentChanged.connect(self._workflow_page_changed)
         self.workflow_tabs.currentChanged.connect(lambda _index: QTimer.singleShot(0, self._fit_scroll_content))
 
-        self.workflow_footer = QFrame()
-        self.workflow_footer.setObjectName("workflowFooter")
-        footer_layout = QHBoxLayout(self.workflow_footer)
-        footer_layout.setContentsMargins(8, 4, 8, 8)
-        footer_layout.setSpacing(6)
-        self.back_step_button = QPushButton("← Назад")
-        self.back_step_button.setObjectName("mutedButton")
-        self.back_step_button.clicked.connect(lambda: self._move_workflow(-1))
-        footer_layout.addWidget(self.back_step_button)
-        footer_layout.addStretch()
-        self.next_step_button = QPushButton("Далее →")
-        self.next_step_button.setObjectName("primaryButton")
-        self.next_step_button.clicked.connect(lambda: self._move_workflow(1))
-        footer_layout.addWidget(self.next_step_button)
-        self.root_layout.addWidget(self.workflow_footer)
+        self.root_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._workflow_page_changed(self.workflow_tabs.currentIndex())
 
     def _set_disclosure(
@@ -363,13 +405,18 @@ class MainWindowLayoutMixin:
             scroll_content.updateGeometry()
         QTimer.singleShot(0, self._fit_scroll_content)
 
-    def _move_workflow(self, offset: int) -> None:
-        index = self.workflow_tabs.currentIndex()
-        if 0 <= index <= 2:
-            self.workflow_tabs.setCurrentIndex(max(0, min(2, index + offset)))
-
     def open_advanced_settings(self) -> None:
-        self.advanced_settings_dialog.exec()
+        saved_settings = dict(self.marker_settings)
+        self._advanced_settings_editing = True
+        result = self.advanced_settings_dialog.exec()
+        if result != QDialog.DialogCode.Accepted:
+            self.marker_settings = saved_settings
+            self._apply_marker_settings_to_ui()
+        self._advanced_settings_editing = False
+
+    def _save_advanced_settings(self) -> None:
+        if self._sync_marker_settings_from_ui(save=True, show_message=True):
+            self.advanced_settings_dialog.accept()
 
     def open_log_window(self) -> None:
         self.log_dialog.exec()
@@ -378,19 +425,7 @@ class MainWindowLayoutMixin:
         self.maintenance_dialog.exec()
 
     def _workflow_page_changed(self, _index: int) -> None:
-        current = self.workflow_tabs.currentWidget()
         QTimer.singleShot(0, lambda: self.scroll_area.verticalScrollBar().setValue(0))
-        in_workflow = current in (self.data_tab, self.parameters_tab, self.results_tab)
-        self.workflow_footer.setVisible(in_workflow)
-        if not in_workflow:
-            return
-        step = (self.data_tab, self.parameters_tab, self.results_tab).index(current)
-        self.back_step_button.setVisible(step > 0)
-        self.next_step_button.setVisible(step < 2)
-        if step == 0:
-            self.next_step_button.setText("Далее: параметры →")
-        elif step == 1:
-            self.next_step_button.setText("Далее: результат →")
 
     def _source_mode_changed(self, _index: int) -> None:
         direct = self.source_mode_combo.currentData() == "irbis"
@@ -508,6 +543,18 @@ class MainWindowLayoutMixin:
         for column in range(columns):
             self.actions_buttons_layout.setColumnStretch(column, 1)
 
+    def _reflow_result_files(self) -> None:
+        if not hasattr(self, "result_files_layout"):
+            return
+        self._take_all(self.result_files_layout)
+        for column in range(2):
+            self.result_files_layout.setColumnStretch(column, 0)
+        visible_buttons = [button for button in self.result_file_buttons if not button.isHidden()]
+        for index, button in enumerate(visible_buttons):
+            self.result_files_layout.addWidget(button, index // 2, index % 2)
+        for column in range(min(2, len(visible_buttons))):
+            self.result_files_layout.setColumnStretch(column, 1)
+
     def _reflow_source_controls(self, narrow: bool, very_narrow: bool) -> None:
         groups = (
             (self.database_controls, self.database_list, self.database_button, self.clear_database_button),
@@ -593,7 +640,6 @@ class MainWindowLayoutMixin:
         width = max(1, self.scroll_area.viewport().width())
         mode = tuple(width < breakpoint for breakpoint in (1500, 720, 900, 800, 760, 700))
         if not force and mode == self._responsive_mode:
-            QTimer.singleShot(0, self._fit_scroll_content)
             return
         self._responsive_mode = mode
         (
@@ -609,17 +655,14 @@ class MainWindowLayoutMixin:
             self._reflow_irbis_connection_form(very_compact)
 
         self.root_layout.setContentsMargins(0, 0, 0, 0)
-        self.root_layout.setSpacing(4 if very_compact else (6 if compact else 8))
+        self.root_layout.setSpacing(0)
 
         logo_size = 22 if compact else 26
         self.header_logo.setVisible(not hide_logo)
         if self.header_logo.isVisible():
             self.header_logo.setPixmap(QIcon(icon_path("irbis64_control_icon.png")).pixmap(logo_size, logo_size))
             self.header_logo.setFixedSize(logo_size + 2, logo_size + 2)
-        title_font = self.main_title.font()
-        title_font.setPointSize(10 if compact else 11)
-        title_font.setBold(True)
-        self.main_title.setFont(title_font)
+        apply_main_title_font(self.main_title, compact)
         self.subtitle_primary.setVisible(width >= 900)
 
         self.start_button.setText("Запуск" if short_start else "Запустить проверку")
@@ -640,7 +683,7 @@ class MainWindowLayoutMixin:
             button.setMaximumWidth(32 if compact_header else 16777215)
 
         tab_titles = (
-            ("1  Данные", "2  Параметры", "3  Результат")
+            ("Данные", "Параметры", "Результат")
             if getattr(self, "_simplified_workflow", False)
             else ("Подключение", "Источники", "Списки", "Метки", "Запуск")
         )
@@ -723,158 +766,61 @@ class MainWindowLayoutMixin:
     def _fit_scroll_content(self) -> None:
         if not hasattr(self, "scroll_area") or self.scroll_area.widget() is None:
             return
-        if self.workflow_tabs.currentWidget() is self.data_tab:
-            lists = (self.foreign_agents_list, self.excel_list)
-            for list_widget in lists:
-                list_widget.setMaximumHeight(58)
-            data_layout = self.data_tab.layout()
-            if data_layout is not None:
-                data_layout.activate()
-                footer_height = self.workflow_footer.sizeHint().height() if self.workflow_footer.isVisible() else 0
-                available_page_height = max(
-                    0,
-                    self.scroll_area.viewport().height()
-                    - self.workflow_tabs.tabBar().sizeHint().height()
-                    - footer_height
-                    - self.root_layout.spacing()
-                    - 6,
-                )
-                free_height = max(0, available_page_height - data_layout.sizeHint().height())
-                list_height = min(120, 58 + free_height // len(lists))
-                for list_widget in lists:
-                    list_widget.setMaximumHeight(list_height)
-                data_layout.activate()
         content = self.scroll_area.widget()
         content.setMinimumHeight(0)
         content.setMaximumHeight(16777215)
+        current_page = self.workflow_tabs.currentWidget()
+        if current_page is not None and current_page.layout() is not None:
+            current_page.layout().invalidate()
+            current_page.layout().activate()
+            current_page.updateGeometry()
         if content.layout() is not None:
+            content.layout().invalidate()
             content.layout().activate()
-        desired_height = max(240, content.sizeHint().height())
-        viewport = self.scroll_area.viewport()
-        content.setMinimumHeight(max(viewport.height(), desired_height))
+        content.updateGeometry()
+        content.adjustSize()
+
+    def _resize_height_to_current_page(self, *, force: bool = False) -> None:
+        """Подгоняет только высоту окна, не запрещая последующее ручное изменение."""
+        self._fit_scroll_content()
+        if self._window_manually_resized and not force:
+            return
+        content = self.scroll_area.widget()
+        if content is None:
+            return
+        current_page = self.workflow_tabs.currentWidget()
+        target_height = content.sizeHint().height()
+        if current_page is not None and self.isVisible():
+            # QTabWidget.sizeHint() учитывает самую высокую вкладку, даже если она
+            # сейчас скрыта. Берём высоту открытой страницы и добавляем только
+            # фактическую высоту панели вкладок.
+            tab_chrome = max(0, self.workflow_tabs.height() - current_page.height())
+            target_height = current_page.sizeHint().height() + tab_chrome
+        target_height = max(240, target_height)
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            target_height = min(target_height, screen.availableGeometry().height())
+        self._programmatic_window_resize = True
+        try:
+            self.resize(self.width(), target_height)
+        finally:
+            self._programmatic_window_resize = False
+        content.adjustSize()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if self._window_resize_tracking and not self._programmatic_window_resize:
+            self._window_manually_resized = True
         if hasattr(self, "section_cards"):
             self._apply_responsive_layout()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         QTimer.singleShot(0, lambda: self._apply_responsive_layout(force=True))
+        QTimer.singleShot(0, self._enable_window_resize_tracking)
+
+    def _enable_window_resize_tracking(self) -> None:
+        self._window_resize_tracking = True
 
     def _apply_style(self) -> None:
-        # Основные элементы оставляем системному стилю Qt/Windows.
-        # Здесь только небольшие типографические настройки, без карточек,
-        # скруглений, цветных рамок и нестандартных кнопок.
-        base_style = common_button_stylesheet() + """
-            QMainWindow, QDialog, QWidget#centralPage, QWidget#tabPage { background: #f8fafc; color: #202020; }
-            QScrollArea#mainScroll { border: none; background: #f8fafc; }
-            QFrame#headerCard, QFrame#irbisActions { border: none; background: transparent; }
-            QFrame#sectionCard, QFrame#actionCard {
-                border: 1px solid #cbd6e2;
-                border-radius: 5px;
-                background: #ffffff;
-            }
-            QFrame#dangerCard { border: 1px solid #dfcaca; border-radius: 5px; background: #ffffff; }
-            QLabel { color: #202020; }
-            QLabel#mainTitle { font-weight: 600; color: #151515; }
-            QLabel#cardTitle { font-size: 13px; font-weight: 600; color: #006bd6; }
-            QLabel#pageSectionTitle { font-size: 14px; font-weight: 600; color: #202020; margin-top: 4px; }
-            QLabel#irbisStateDot { background: #d94a4a; border-radius: 5px; }
-            QLabel#irbisStateDot[state="success"] { background: #35b85f; }
-            QLabel#irbisStateDot[state="running"], QLabel#irbisStateDot[state="warning"] { background: #e4a11b; }
-            QLabel#irbisStateDot[state="error"] { background: #d94a4a; }
-            QLabel#directSourceDot { background: #d94a4a; border-radius: 4px; }
-            QLabel#directSourceDot[state="success"] { background: #35b85f; }
-            QLabel#directSourceDot[state="running"], QLabel#directSourceDot[state="warning"] { background: #e4a11b; }
-            QLabel#directSourceDot[state="error"] { background: #d94a4a; }
-            QLabel#directSourceDot[state="local"] { background: #6f7f8f; }
-            QLabel#sourceStatusTitle { color: #202020; font-weight: 600; }
-            QLabel#sourceStateLabel { color: #d94a4a; }
-            QLabel#sourceStateLabel[state="success"] { color: #218b45; }
-            QLabel#sourceStateLabel[state="running"], QLabel#sourceStateLabel[state="warning"] { color: #9a6800; }
-            QLabel#sourceStateLabel[state="error"] { color: #b52f2f; }
-            QLabel#sourceStateLabel[state="local"] { color: #5a5a5a; }
-            QLabel#fieldLabel { color: #202020; }
-            QLabel#tabIntro, QLabel#cardDescription, QLabel#statusLabel { color: #5a5a5a; }
-            QLabel:disabled { color: #6b6b6b; }
-            QTextEdit#logEdit, QTextEdit#plainLogEdit { font-family: Consolas, monospace; }
-            QLineEdit, QComboBox, QSpinBox { min-height: 23px; }
-            QComboBox#databaseCombo::drop-down { width: 0; border: none; }
-            QComboBox#databaseCombo::down-arrow { image: none; }
-            QPushButton#primaryButton[compact="true"] { margin: 1px; }
-            QFrame#workflowFooter { border-top: 1px solid #d9e1e8; background: #f8fafc; }
-            QListWidget#compactList::item { min-height: 21px; }
-            QListWidget#matchRulesList::item {
-                padding: 0px 8px;
-                border-left: 2px solid transparent;
-                color: #202020;
-            }
-            QListWidget#matchRulesList::item:selected {
-                border-left-color: #0878e3;
-                background: #eef6ff;
-                color: #202020;
-            }
-            QProgressBar { min-height: 12px; max-height: 12px; }
-            QProgressBar#mainProgress {
-                min-height: 4px;
-                max-height: 4px;
-                border: none;
-                border-radius: 2px;
-                background: #c4c9cf;
-                padding: 0;
-                margin: 0;
-                text-align: center;
-            }
-            QProgressBar#mainProgress::chunk {
-                border: none;
-                border-radius: 2px;
-                background: #0078d4;
-                margin: 0;
-            }
-
-            /* Вкладки и их содержимое образуют одну общую поверхность. */
-            QTabWidget#workflowTabs::pane {
-                border: none;
-                background: palette(window);
-                top: 0px;
-            }
-            QTabWidget#workflowTabs QTabBar {
-                background: transparent;
-                qproperty-drawBase: 0;
-            }
-            QTabWidget#workflowTabs QTabBar::tab {
-                background: transparent;
-                border: none;
-                border-bottom: 2px solid transparent;
-                padding: 5px 10px;
-                margin: 0px;
-            }
-            QTabWidget#workflowTabs QTabBar::tab:selected {
-                color: palette(highlight);
-                border: none;
-                border-bottom: 2px solid palette(highlight);
-            }
-            QTabWidget#workflowTabs QTabBar::tab:hover:!selected {
-                background: palette(alternate-base);
-                border: none;
-                border-bottom: 2px solid transparent;
-            }
-            QPushButton#settingsTab {
-                background: transparent;
-                border: none;
-                border-bottom: 2px solid transparent;
-                border-radius: 0;
-                padding: 5px 10px;
-                margin: 0;
-                min-height: 0;
-            }
-            QPushButton#settingsTab:checked {
-                color: palette(highlight);
-                border-bottom: 2px solid palette(highlight);
-            }
-            QPushButton#settingsTab:hover:!checked {
-                background: palette(alternate-base);
-            }
-            """
-        self.setStyleSheet(base_style)
+        self.setStyleSheet(main_window_stylesheet())

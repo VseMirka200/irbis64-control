@@ -6,12 +6,18 @@ from pathlib import Path
 
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 
+THEME_SYSTEM = "system"
+THEME_LIGHT = "light"
+THEME_DARK = "dark"
+VALID_THEMES = {THEME_SYSTEM, THEME_LIGHT, THEME_DARK}
+
 
 # Хранит общие настройки с безопасными значениями для первого запуска.
 @dataclass
 class ApplicationSettings:
     create_database_backup: bool = True
     check_updates_on_start: bool = True
+    theme: str = THEME_SYSTEM
 
 
 # Читает настройки по пути и возвращает безопасные значения, если файл повреждён или имеет неверную структуру.
@@ -33,16 +39,20 @@ def load_application_settings(path: str | Path) -> ApplicationSettings:
     check_updates = payload.get("check_updates_on_start", True)
     if not isinstance(check_updates, bool):
         check_updates = True
+    theme = payload.get("theme", THEME_SYSTEM)
+    if theme not in VALID_THEMES:
+        theme = THEME_SYSTEM
     return ApplicationSettings(
         create_database_backup=create_backup,
         check_updates_on_start=check_updates,
+        theme=theme,
     )
 
 
 # Принимает путь и настройки, сохраняет их целиком и возвращает путь к готовому файлу.
 def save_application_settings(path: str | Path, settings: ApplicationSettings) -> Path:
     payload = asdict(settings)
-    payload["schema_version"] = 1
+    payload["schema_version"] = 2
     return atomic_write_text(
         path,
         json.dumps(payload, ensure_ascii=False, indent=2),

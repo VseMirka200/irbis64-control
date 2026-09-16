@@ -3,18 +3,40 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMessageBox
 
 from irbis_control import APP_TITLE
-from irbis_control.core.matcher import EXTRA_MATCH_RULES
-from irbis_control.core.models import ComparisonSummary, MatchResult
+from irbis_control.core.models import ComparisonOptions, ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
+from irbis_control.ui.components.dialogs import ManualMatchReviewDialog
 from irbis_control.ui.services.workers import ComparisonWorker, DirectIrbisComparisonWorker
 
 
 class MainWindowRunMixin:
+    def _adjust_source_list_height(self, list_widget) -> None:
+        if list_widget.property("sourceHeightManuallySet"):
+            return
+        selected_count = sum(
+            bool(list_widget.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(list_widget.count())
+        )
+        if list_widget.property("resizableSourceList"):
+            target_height = 84
+        else:
+            target_height = 58 if selected_count > 1 else 27
+        if list_widget.height() == target_height:
+            return
+        list_widget.setFixedHeight(target_height)
+        list_widget.updateGeometry()
+        QTimer.singleShot(0, self._resize_height_to_current_page)
+
+    def _source_list_resized(self, list_widget, _height: int) -> None:
+        list_widget.setProperty("sourceHeightManuallySet", True)
+        list_widget.updateGeometry()
+        QTimer.singleShot(0, self._resize_height_to_current_page)
+
     def _set_irbis_status(self, text: str, state: str = "success") -> None:
         self.irbis_status.setText(text)
         visual_state = state if state in {"success", "running", "warning", "error"} else "error"
@@ -38,13 +60,14 @@ class MainWindowRunMixin:
         paths = self._excel_paths()
         if not paths:
             self.excel_list.clear()
-            placeholder = QListWidgetItem("Файлы не выбраны")
+            placeholder = QListWidgetItem("Перетащите Excel сюда или нажмите «Добавить Excel»")
             placeholder.setData(Qt.ItemDataRole.UserRole, False)
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.excel_list.addItem(placeholder)
             self.excel_summary_edit.clear()
             self.excel_summary_edit.setPlaceholderText("Файлы не выбраны")
-            self.excel_summary_edit.setToolTip("Файлы не выбраны")
+            self.excel_summary_edit.setToolTip("Перетащите Excel сюда или нажмите «Добавить Excel»")
+            self._adjust_source_list_height(self.excel_list)
             return
         names = [Path(path).name for path in paths]
         if len(names) == 1:
@@ -53,6 +76,7 @@ class MainWindowRunMixin:
             summary = f"Выбрано файлов: {len(names)} — {names[0]}"
         self.excel_summary_edit.setText(summary)
         self.excel_summary_edit.setToolTip("\n".join(paths))
+        self._adjust_source_list_height(self.excel_list)
 
     def _update_foreign_agents_summary(self) -> None:
         self.foreign_agents_list.clear()
@@ -63,11 +87,12 @@ class MainWindowRunMixin:
             self.foreign_agents_list.addItem(item)
             self.foreign_agents_list.setToolTip(path)
         else:
-            placeholder = QListWidgetItem("Файлы не выбраны")
+            placeholder = QListWidgetItem("Перетащите реестр Excel сюда")
             placeholder.setData(Qt.ItemDataRole.UserRole, False)
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.foreign_agents_list.addItem(placeholder)
-            self.foreign_agents_list.setToolTip("Файлы не выбраны")
+            self.foreign_agents_list.setToolTip("Перетащите сюда реестр .xlsx/.xlsm или нажмите «Добавить Excel»")
+        self._adjust_source_list_height(self.foreign_agents_list)
 
     def _update_database_summary(self) -> None:
         paths = self._database_paths()
@@ -78,8 +103,10 @@ class MainWindowRunMixin:
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.database_list.addItem(placeholder)
             self.database_list.setToolTip("Файлы не выбраны")
+            self._adjust_source_list_height(self.database_list)
             return
         self.database_list.setToolTip("\n".join(paths))
+        self._adjust_source_list_height(self.database_list)
 
     def _clear_excel_files(self) -> None:
         self.excel_list.clear()
@@ -116,6 +143,35 @@ class MainWindowRunMixin:
         if paths:
             self.database_edit.setText(paths[0])
             self._update_database_summary()
+            self._set_default_outputs(force=True)
+
+    def _drop_foreign_agents_files(self, paths: list[str]) -> None:
+        """Принимает реестр иноагентов, перетащенный из Проводника."""
+        if not paths:
+            return
+        self.foreign_agents_edit.setText(paths[0])
+        self._update_foreign_agents_summary()
+        self._set_default_outputs(force=True)
+
+    def _drop_excel_files(self, paths: list[str]) -> None:
+        """Добавляет перетащенные Excel-файлы в реестр по веществам без дублей."""
+        if not paths:
+            return
+        if self.excel_list.count() == 1 and not self.excel_list.item(0).data(Qt.ItemDataRole.UserRole):
+            self.excel_list.clear()
+        existing = {str(Path(path).resolve()).casefold() for path in self._excel_paths()}
+        added = False
+        for path in paths:
+            key = str(Path(path).resolve()).casefold()
+            if key in existing:
+                continue
+            item = QListWidgetItem(path)
+            item.setData(Qt.ItemDataRole.UserRole, True)
+            self.excel_list.addItem(item)
+            existing.add(key)
+            added = True
+        if added:
+            self._update_excel_summary()
             self._set_default_outputs(force=True)
 
     def select_foreign_agents(self) -> None:
@@ -420,13 +476,31 @@ class MainWindowRunMixin:
         self._append_progress(f"Файлов реестра по наркотическим веществам: {len(excel_paths)}")
         self._append_progress(f"Реестр иностранных агентов: {foreign_agents_path or 'не выбран'}")
         self._append_progress(f"Excel-отчёт: {output_path}" if output_path else "Excel-отчёт: не создаётся")
+        substance_marker = (
+            str(self.marker_settings["substance_marker"])
+            if self.marker_settings["substance_marker_enabled"]
+            else ""
+        )
+        foreign_marker = (
+            str(self.marker_settings["foreign_agent_marker_template"])
+            if self.marker_settings["foreign_agent_marker_enabled"]
+            else ""
+        )
+        organization_marker = (
+            str(self.marker_settings["foreign_organization_marker_template"])
+            if self.marker_settings["foreign_organization_marker_enabled"]
+            else ""
+        )
+        age_marker = str(self.marker_settings["age_marker"]) if self.marker_settings["age_marker_enabled"] else ""
         self._append_progress(
             f"Метки: вещества #{int(self.marker_settings['substance_marker_field']):03d} — "
-            f"{self.marker_settings['substance_marker'] or 'отключена'}; "
-            f"иноагенты #{int(self.marker_settings['foreign_agent_marker_field']):03d} — "
-            f"{self.marker_settings['foreign_agent_marker_template'] or 'отключена'}; "
+            f"{substance_marker or 'отключена'}; "
+            f"иноагенты-авторы #{int(self.marker_settings['foreign_agent_marker_field']):03d} — "
+            f"{foreign_marker or 'отключена'}; "
+            f"иноагенты-организации #{int(self.marker_settings['foreign_organization_marker_field']):03d} — "
+            f"{organization_marker or 'отключена'}; "
             f"#{int(self.marker_settings['age_marker_field']):03d} — "
-            f"{self.marker_settings['age_marker'] or 'отключена'}."
+            f"{age_marker or 'отключена'}."
         )
 
         report_options = {
@@ -439,6 +513,12 @@ class MainWindowRunMixin:
             "sort": str(self.marker_settings["report_sort"]),
             "report_only": bool(self.marker_settings["report_only"]),
         }
+        comparison_options = ComparisonOptions(
+            use_isbn_matching=True,
+            use_title_fallback=True,
+            use_fuzzy=False,
+            fuzzy_threshold=90,
+        )
 
         self.thread = QThread(self)
         if direct_mode:
@@ -453,20 +533,20 @@ class MainWindowRunMixin:
                 foreign_agents_path=foreign_agents_path,
                 excel_paths=excel_paths,
                 output_path=output_path,
-                use_isbn_matching=bool(self.marker_settings["use_isbn_matching"]),
-                use_title_fallback=bool(self.marker_settings["use_title_fallback"]),
-                use_fuzzy=False,
-                fuzzy_threshold=90,
+                comparison_options=comparison_options,
                 report_options=report_options,
-                substance_marker=self.marker_settings["substance_marker"],
-                foreign_agent_marker_template=self.marker_settings["foreign_agent_marker_template"],
-                age_marker=self.marker_settings["age_marker"],
+                substance_marker=substance_marker,
+                foreign_agent_marker_template=foreign_marker,
+                foreign_organization_marker_template=organization_marker,
+                age_marker=age_marker,
                 substance_marker_field=int(self.marker_settings["substance_marker_field"]),
                 foreign_agent_marker_field=int(self.marker_settings["foreign_agent_marker_field"]),
+                foreign_organization_marker_field=int(
+                    self.marker_settings["foreign_organization_marker_field"]
+                ),
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
                 backup_dir=str(self._app_data_dir() / "backups"),
                 create_backup=self.app_settings.create_database_backup,
-                match_rules={key: bool(self.marker_settings.get(key, False)) for key in EXTRA_MATCH_RULES},
             )
         else:
             self.worker = ComparisonWorker(
@@ -475,23 +555,22 @@ class MainWindowRunMixin:
                 excel_paths,
                 output_path,
                 modified_database_path,
-                bool(self.marker_settings["use_isbn_matching"]),
-                bool(self.marker_settings["use_title_fallback"]),
-                False,
-                90,
+                comparison_options,
                 report_options,
-                self.marker_settings["substance_marker"],
-                self.marker_settings["foreign_agent_marker_template"],
-                self.marker_settings["age_marker"],
+                substance_marker,
+                foreign_marker,
+                age_marker,
                 int(self.marker_settings["substance_marker_field"]),
                 int(self.marker_settings["foreign_agent_marker_field"]),
                 int(self.marker_settings["age_marker_field"]),
-                match_rules={key: bool(self.marker_settings.get(key, False)) for key in EXTRA_MATCH_RULES},
+                organization_marker,
+                int(self.marker_settings["foreign_organization_marker_field"]),
             )
         self._save_irbis_config()
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
+        self.worker.review_requested.connect(self._review_suspicious_matches)
         if isinstance(self.worker, DirectIrbisComparisonWorker):
             self.worker.preview_requested.connect(self._confirm_direct_changes)
         self.worker.finished.connect(self.thread.quit)
@@ -503,6 +582,39 @@ class MainWindowRunMixin:
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self._cleanup_worker)
         self.thread.start()
+
+    @pyqtSlot(object)
+    def _review_suspicious_matches(self, payload: object) -> None:
+        worker = self.worker
+        if not isinstance(worker, (ComparisonWorker, DirectIrbisComparisonWorker)):
+            return
+        rows = payload if isinstance(payload, list) else []
+        valid_rows = [
+            item
+            for item in rows
+            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], int)
+        ]
+        if not valid_rows:
+            worker.confirm_review({})
+            return
+
+        self._set_status(f"Ручная проверка: {len(valid_rows):,} подозрительных совпадений", "warning")
+        self._append_progress(
+            f"Автоматическое решение невозможно для {len(valid_rows):,} совпадений — открыта ручная проверка."
+        )
+        dialog = ManualMatchReviewDialog(valid_rows, self)
+        accepted = dialog.exec() == dialog.DialogCode.Accepted
+        if accepted:
+            decisions = dialog.decisions()
+            approved = sum(decisions.values())
+            removed = len(decisions) - approved
+            self._append_progress(
+                f"Ручная проверка: подтверждено {approved:,}, убрано {removed:,}."
+            )
+            worker.confirm_review(decisions)
+        else:
+            self._append_progress("Ручная проверка отменена пользователем.")
+            worker.confirm_review(None)
 
     @pyqtSlot(object)
     def _confirm_direct_changes(self, payload: object) -> None:
@@ -903,5 +1015,3 @@ class MainWindowRunMixin:
             pass
         self._save_run_journal()
         event.accept()
-
-

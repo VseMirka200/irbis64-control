@@ -42,6 +42,9 @@ from irbis_control.application.marker_settings import (
 )
 from irbis_control.application.settings import (
     ApplicationSettings,
+    THEME_DARK,
+    THEME_LIGHT,
+    THEME_SYSTEM,
     load_application_settings,
     save_application_settings,
 )
@@ -54,6 +57,8 @@ from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     DEFAULT_SUBSTANCE_MARKER,
     DEFAULT_SUBSTANCE_MARKER_FIELD,
     EXTRA_MATCH_RULES,
@@ -63,6 +68,9 @@ from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.paths import icon_path, project_root
 from irbis_control.ui.components.dialogs import (
     DEFAULT_USEFUL_LINKS as DEFAULT_USEFUL_LINKS,
+)
+from irbis_control.ui.components.dialogs import (
+    ConfirmationMemoryDialog as ConfirmationMemoryDialog,
 )
 from irbis_control.ui.components.dialogs import (
     ProgressDialog as ProgressDialog,
@@ -113,7 +121,13 @@ from irbis_control.ui.services.workers import (
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
 from irbis_control.ui.storage_paths import application_settings_path
 from irbis_control.ui.storage_paths import database_connector_config_path as database_connector_config_path
-from irbis_control.ui.theme import apply_light_palette
+from irbis_control.ui.storage_paths import manual_review_memory_path
+from irbis_control.ui.theme import (
+    about_document_stylesheet,
+    about_page_stylesheet,
+    apply_application_theme,
+    apply_about_title_font,
+)
 from irbis_control.ui.windows.main_build import MainWindowBuildMixin
 from irbis_control.ui.windows.main_layout import MainWindowLayoutMixin
 from irbis_control.ui.windows.main_operations import MainWindowOperationsMixin
@@ -204,45 +218,55 @@ class MarkerSettingsDialog(QDialog):
         form.addWidget(field_header, 0, 1)
         form.addWidget(marker_header, 0, 2)
 
-        substance_label = QLabel("Вещества:")
-        substance_label.setObjectName("fieldLabel")
+        self.substance_enabled_check = QCheckBox("Вещества")
+        self.substance_enabled_check.setChecked(bool(settings["substance_marker_enabled"]))
         self.substance_field_spin = self._field_spin(int(settings["substance_marker_field"]))
         self.substance_edit = QLineEdit(str(settings["substance_marker"]))
         self.substance_edit.setObjectName("settingsField")
         self.substance_edit.setPlaceholderText(DEFAULT_SUBSTANCE_MARKER)
-        form.addWidget(substance_label, 1, 0)
+        form.addWidget(self.substance_enabled_check, 1, 0)
         form.addWidget(self.substance_field_spin, 1, 1)
         form.addWidget(self.substance_edit, 1, 2)
 
-        foreign_label = QLabel("Иноагенты:")
-        foreign_label.setObjectName("fieldLabel")
+        self.foreign_enabled_check = QCheckBox("Иноагенты — авторы")
+        self.foreign_enabled_check.setChecked(bool(settings["foreign_agent_marker_enabled"]))
         self.foreign_field_spin = self._field_spin(int(settings["foreign_agent_marker_field"]))
         self.foreign_edit = QLineEdit(str(settings["foreign_agent_marker_template"]))
         self.foreign_edit.setObjectName("settingsField")
         self.foreign_edit.setPlaceholderText(DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
         self.foreign_edit.setToolTip(
-            "{name} будет заменено на совпавшего автора. Организации и проекты в эту метку не записываются"
+            "{name} будет заменено на совпавшего автора"
         )
-        form.addWidget(foreign_label, 2, 0)
+        form.addWidget(self.foreign_enabled_check, 2, 0)
         form.addWidget(self.foreign_field_spin, 2, 1)
         form.addWidget(self.foreign_edit, 2, 2)
 
+        self.organization_enabled_check = QCheckBox("Иноагенты — организации")
+        self.organization_enabled_check.setChecked(bool(settings["foreign_organization_marker_enabled"]))
+        self.organization_field_spin = self._field_spin(int(settings["foreign_organization_marker_field"]))
+        self.organization_edit = QLineEdit(str(settings["foreign_organization_marker_template"]))
+        self.organization_edit.setObjectName("settingsField")
+        self.organization_edit.setPlaceholderText(DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE)
+        form.addWidget(self.organization_enabled_check, 3, 0)
+        form.addWidget(self.organization_field_spin, 3, 1)
+        form.addWidget(self.organization_edit, 3, 2)
+
         foreign_hint = QLabel(
-            "Используйте {name}, чтобы подставить совпавшего автора. Если у автора есть псевдоним, он будет оформлен как «ФИО (ПСЕВДОНИМ: ...)»."
+            "Используйте {name}, чтобы подставить совпавшего автора или название организации."
         )
         foreign_hint.setObjectName("cardDescription")
         foreign_hint.setWordWrap(True)
-        form.addWidget(foreign_hint, 3, 2)
+        form.addWidget(foreign_hint, 4, 2)
 
-        age_label = QLabel("Все совпадения:")
-        age_label.setObjectName("fieldLabel")
+        self.age_enabled_check = QCheckBox("Все найденные записи")
+        self.age_enabled_check.setChecked(bool(settings["age_marker_enabled"]))
         self.age_field_spin = self._field_spin(int(settings["age_marker_field"]))
         self.age_edit = QLineEdit(str(settings["age_marker"]))
         self.age_edit.setObjectName("settingsField")
         self.age_edit.setPlaceholderText(DEFAULT_AGE_MARKER)
-        form.addWidget(age_label, 4, 0)
-        form.addWidget(self.age_field_spin, 4, 1)
-        form.addWidget(self.age_edit, 4, 2)
+        form.addWidget(self.age_enabled_check, 5, 0)
+        form.addWidget(self.age_field_spin, 5, 1)
+        form.addWidget(self.age_edit, 5, 2)
         form.setColumnStretch(2, 1)
         layout.addLayout(form)
 
@@ -250,10 +274,24 @@ class MarkerSettingsDialog(QDialog):
         self.preview.setObjectName("cardDescription")
         self.preview.setWordWrap(True)
         layout.addWidget(self.preview)
-        for edit in (self.substance_edit, self.foreign_edit, self.age_edit):
+        for edit in (self.substance_edit, self.foreign_edit, self.organization_edit, self.age_edit):
             edit.textChanged.connect(self._update_preview)
-        for spin in (self.substance_field_spin, self.foreign_field_spin, self.age_field_spin):
+        for spin in (
+            self.substance_field_spin,
+            self.foreign_field_spin,
+            self.organization_field_spin,
+            self.age_field_spin,
+        ):
             spin.valueChanged.connect(self._update_preview)
+        for check in (
+            self.substance_enabled_check,
+            self.foreign_enabled_check,
+            self.organization_enabled_check,
+            self.age_enabled_check,
+        ):
+            check.toggled.connect(self._update_preview)
+            check.toggled.connect(self._update_control_states)
+        self._update_control_states()
         self._update_preview()
 
         layout.addStretch()
@@ -267,12 +305,12 @@ class MarkerSettingsDialog(QDialog):
         cancel_button = QPushButton("Отмена")
         cancel_button.setObjectName("mutedButton")
         cancel_button.clicked.connect(self.reject)
-        buttons.addWidget(cancel_button)
 
         save_button = QPushButton("Сохранить")
         save_button.setObjectName("primaryButton")
         save_button.clicked.connect(self._save)
         buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
         layout.addLayout(buttons)
 
     @staticmethod
@@ -302,33 +340,61 @@ class MarkerSettingsDialog(QDialog):
             "report_only": bool(self.settings.get("report_only", False)),
             "substance_marker": self.substance_edit.text().strip(),
             "foreign_agent_marker_template": self.foreign_edit.text().strip(),
+            "foreign_organization_marker_template": self.organization_edit.text().strip(),
             "age_marker": self.age_edit.text().strip(),
             "substance_marker_field": self.substance_field_spin.value(),
             "foreign_agent_marker_field": self.foreign_field_spin.value(),
+            "foreign_organization_marker_field": self.organization_field_spin.value(),
             "age_marker_field": self.age_field_spin.value(),
+            "substance_marker_enabled": self.substance_enabled_check.isChecked(),
+            "foreign_agent_marker_enabled": self.foreign_enabled_check.isChecked(),
+            "foreign_organization_marker_enabled": self.organization_enabled_check.isChecked(),
+            "age_marker_enabled": self.age_enabled_check.isChecked(),
         }
 
     def _update_preview(self) -> None:
         values = self._values()
         foreign_preview = str(values["foreign_agent_marker_template"]).replace("{name}", "ИВАНОВ ИВАН ИВАНОВИЧ")
+        organization_preview = str(values["foreign_organization_marker_template"]).replace(
+            "{name}", "НАЗВАНИЕ ОРГАНИЗАЦИИ"
+        )
         self.preview.setText(
             f"Пример: #{int(values['substance_marker_field']):03d}: "
-            f"{values['substance_marker'] or 'не добавляется'}; "
+            f"{values['substance_marker'] if values['substance_marker_enabled'] else 'отключена'}; "
             f"для иноагента — #{int(values['foreign_agent_marker_field']):03d}: "
-            f"{foreign_preview or 'не добавляется'}; "
+            f"{foreign_preview if values['foreign_agent_marker_enabled'] else 'отключена'}; "
+            f"организация — #{int(values['foreign_organization_marker_field']):03d}: "
+            f"{organization_preview if values['foreign_organization_marker_enabled'] else 'отключена'}; "
             f"#{int(values['age_marker_field']):03d}: "
-            f"{values['age_marker'] or 'не добавляется'}."
+            f"{values['age_marker'] if values['age_marker_enabled'] else 'отключена'}."
         )
+
+    def _update_control_states(self, *_args) -> None:
+        groups = (
+            (self.substance_enabled_check, self.substance_field_spin, self.substance_edit),
+            (self.foreign_enabled_check, self.foreign_field_spin, self.foreign_edit),
+            (self.organization_enabled_check, self.organization_field_spin, self.organization_edit),
+            (self.age_enabled_check, self.age_field_spin, self.age_edit),
+        )
+        for check, field, edit in groups:
+            field.setEnabled(check.isChecked())
+            edit.setEnabled(check.isChecked())
 
     def _reset_defaults(self) -> None:
         self.isbn_match_check.setChecked(True)
         self.title_fallback_check.setChecked(True)
         self.substance_edit.setText(DEFAULT_SUBSTANCE_MARKER)
         self.foreign_edit.setText(DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
+        self.organization_edit.setText(DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE)
         self.age_edit.setText(DEFAULT_AGE_MARKER)
         self.substance_field_spin.setValue(DEFAULT_SUBSTANCE_MARKER_FIELD)
         self.foreign_field_spin.setValue(DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
+        self.organization_field_spin.setValue(DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD)
         self.age_field_spin.setValue(DEFAULT_AGE_MARKER_FIELD)
+        self.substance_enabled_check.setChecked(True)
+        self.foreign_enabled_check.setChecked(True)
+        self.organization_enabled_check.setChecked(True)
+        self.age_enabled_check.setChecked(True)
 
     def _save(self) -> None:
         values = self._values()
@@ -379,12 +445,28 @@ class ApplicationSettingsPage(QWidget):
         )
         safety_card.body.addWidget(self.backup_check)
 
+        appearance_card = SectionCard("Оформление", "")
+        layout.addWidget(appearance_card)
+        theme_row = QHBoxLayout()
+        theme_row.setSpacing(7)
+        theme_label = QLabel("Тема")
+        theme_label.setObjectName("fieldLabel")
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItem("Как в системе", THEME_SYSTEM)
+        self.theme_combo.addItem("Светлая", THEME_LIGHT)
+        self.theme_combo.addItem("Тёмная", THEME_DARK)
+        theme_index = self.theme_combo.findData(settings.theme)
+        self.theme_combo.setCurrentIndex(max(0, theme_index))
+        theme_row.addWidget(theme_label)
+        theme_row.addWidget(self.theme_combo, 1)
+        appearance_card.body.addLayout(theme_row)
+
         updates_card = SectionCard("Обновления", "")
         layout.addWidget(updates_card)
         self.auto_updates_check = QCheckBox("Проверять обновления на GitHub при запуске")
         self.auto_updates_check.setChecked(settings.check_updates_on_start)
         updates_card.body.addWidget(self.auto_updates_check)
-        check_button = QPushButton("Проверить обновление сейчас")
+        check_button = QPushButton("Проверить обновления")
         check_button.setObjectName("mutedButton")
         if parent is not None:
             check_button.clicked.connect(lambda: parent.check_updates(manual=True))
@@ -401,15 +483,26 @@ class ApplicationSettingsPage(QWidget):
         layout.addStretch()
 
         buttons = QHBoxLayout()
+        self.reset_settings_button = QPushButton("По умолчанию")
+        self.reset_settings_button.setObjectName("mutedButton")
+        self.reset_settings_button.setToolTip("Вернуть рекомендуемые настройки; изменения применятся после сохранения")
+        self.reset_settings_button.clicked.connect(self._reset_defaults)
+        buttons.addWidget(self.reset_settings_button)
         buttons.addStretch()
         cancel_button = QPushButton("Отмена")
         cancel_button.clicked.connect(self.cancelled.emit)
-        buttons.addWidget(cancel_button)
         save_button = QPushButton("Сохранить")
         save_button.setObjectName("primaryButton")
         save_button.clicked.connect(self._save)
         buttons.addWidget(save_button)
+        buttons.addWidget(cancel_button)
         root.addLayout(buttons)
+
+    def _reset_defaults(self) -> None:
+        defaults = ApplicationSettings()
+        self.backup_check.setChecked(defaults.create_database_backup)
+        self.auto_updates_check.setChecked(defaults.check_updates_on_start)
+        self.theme_combo.setCurrentIndex(self.theme_combo.findData(defaults.theme))
 
     def _show_about(self) -> None:
         dialog = QDialog(self)
@@ -429,22 +522,15 @@ class ApplicationSettingsPage(QWidget):
         title = QLabel(APP_TITLE)
         title.setObjectName("mainTitle")
         title.setWordWrap(True)
-        title_font = title.font()
-        title_font.setPointSize(12)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        apply_about_title_font(title)
         header.addWidget(title, 1)
         root.addLayout(header)
         about_page = QTextBrowser()
         about_page.setObjectName("aboutPage")
         about_page.setFrameShape(QFrame.Shape.NoFrame)
-        about_page.setStyleSheet("QTextBrowser#aboutPage { border: none; background: #f8fafc; color: #202020; }")
+        about_page.setStyleSheet(about_page_stylesheet())
         about_page.document().setDocumentMargin(0)
-        about_page.document().setDefaultStyleSheet(
-            "h3 { font-size: 13px; font-weight: 600; color: #006bd6; margin-top: 12px; margin-bottom: 3px; }"
-            "p { margin-top: 0; margin-bottom: 7px; }"
-            "a { color: #006bd6; }"
-        )
+        about_page.document().setDefaultStyleSheet(about_document_stylesheet())
         about_page.setOpenExternalLinks(True)
         about_page.setHtml(f"""
             <p>Версия {APP_VERSION} · Разработчик: VseMirka200</p>
@@ -489,6 +575,7 @@ class ApplicationSettingsPage(QWidget):
         settings = ApplicationSettings(
             create_database_backup=self.backup_check.isChecked(),
             check_updates_on_start=self.auto_updates_check.isChecked(),
+            theme=str(self.theme_combo.currentData()),
         )
         self.saved.emit(settings)
 
@@ -507,10 +594,15 @@ class MainWindow(
 
     def __init__(self) -> None:
         super().__init__()
+        self._window_resize_tracking = False
+        self._programmatic_window_resize = False
+        self._window_manually_resized = False
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
-        # Компактный размер един для всех запусков; длинные страницы прокручиваются.
-        self.setFixedSize(560, 600)
+        # Размер окна подстраивается под текущую страницу. Если содержимое не
+        # помещается на экране, оно остаётся прокручиваемым.
+        self.setMinimumSize(520, 360)
+        self.resize(560, 520)
 
         self.thread: QThread | None = None
         self.worker: QObject | None = None
@@ -526,6 +618,9 @@ class MainWindow(
         self.last_run_direct = False
         self.last_run_report_only = False
         self.app_settings = load_application_settings(application_settings_path())
+        app = QApplication.instance()
+        if app is not None:
+            apply_application_theme(app, self.app_settings.theme)
         self.marker_settings = load_marker_settings()
         self.update_thread: QThread | None = None
         self.update_worker: UpdateWorker | None = None
@@ -595,13 +690,23 @@ class MainWindow(
         except Exception:
             data = {}
 
+        try:
+            saved_width = int(data["width"])
+            saved_height = int(data["height"])
+            has_saved_geometry = saved_width > 0 and saved_height > 0
+        except (KeyError, TypeError, ValueError):
+            saved_width = self.width()
+            saved_height = self.height()
+            has_saved_geometry = False
+        self._window_manually_resized = has_saved_geometry
+
         screens = QApplication.screens()
         primary = QApplication.primaryScreen()
         default_area = primary.availableGeometry() if primary is not None else QRect(0, 0, 1280, 720)
 
-        width = max(self.minimumWidth(), int(data.get("width", self.width())))
+        width = max(self.minimumWidth(), saved_width)
         width = min(width, max(self.minimumWidth(), default_area.width()))
-        height = max(240, int(data.get("height", self.height())))
+        height = max(self.minimumHeight(), saved_height)
         height = min(height, max(240, default_area.height()))
         self.resize(width, height)
 
@@ -622,17 +727,27 @@ class MainWindow(
                 area.y() + max(0, (area.height() - height) // 2),
             )
 
-        QTimer.singleShot(0, self._fit_scroll_content)
+        if has_saved_geometry and bool(data.get("maximized", False)):
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+        elif not has_saved_geometry:
+            QTimer.singleShot(0, lambda: self._resize_height_to_current_page(force=True))
+        else:
+            QTimer.singleShot(0, self._fit_scroll_content)
 
     def _save_window_state(self) -> None:
-        frame_position = self.frameGeometry().topLeft()
-        normal_size = self.normalGeometry().size() if self.isMaximized() else self.size()
+        if self.isMaximized():
+            normal_geometry = self.normalGeometry()
+            position = normal_geometry.topLeft()
+            normal_size = normal_geometry.size()
+        else:
+            position = self.frameGeometry().topLeft()
+            normal_size = self.size()
         payload = {
-            "x": frame_position.x(),
-            "y": frame_position.y(),
+            "x": position.x(),
+            "y": position.y(),
             "width": normal_size.width(),
             "height": normal_size.height(),
-            "maximized": False,
+            "maximized": self.isMaximized(),
         }
         path = window_state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -644,6 +759,10 @@ class MainWindow(
 
     def open_useful_links(self) -> None:
         UsefulLinksDialog(self).exec()
+
+    def open_confirmation_memory(self) -> None:
+        """Открывает сохранённые решения ручной проверки для просмотра и удаления."""
+        ConfirmationMemoryDialog(manual_review_memory_path(), self).exec()
 
     def open_marker_settings(self) -> None:
         dialog = MarkerSettingsDialog(self.marker_settings, self)
@@ -672,6 +791,10 @@ class MainWindow(
             )
             return
         self.app_settings = settings
+        app = QApplication.instance()
+        if app is not None:
+            apply_application_theme(app, settings.theme)
+        self._apply_style()
         self._set_status("Настройки приложения сохранены", "idle")
         self._close_application_settings()
 
@@ -679,6 +802,7 @@ class MainWindow(
         page = self.application_settings_page
         page.backup_check.setChecked(self.app_settings.create_database_backup)
         page.auto_updates_check.setChecked(self.app_settings.check_updates_on_start)
+        page.theme_combo.setCurrentIndex(page.theme_combo.findData(self.app_settings.theme))
         self.workflow_tabs.setCurrentWidget(self._settings_return_page)
 
     def open_database_connector(self) -> None:
@@ -744,15 +868,46 @@ class MainWindow(
         self._update_report_controls(self.create_excel_report_check.isChecked())
         self.substance_marker_edit.setText(str(self.marker_settings["substance_marker"]))
         self.foreign_marker_edit.setText(str(self.marker_settings["foreign_agent_marker_template"]))
+        self.foreign_organization_marker_edit.setText(
+            str(self.marker_settings["foreign_organization_marker_template"])
+        )
         self.age_marker_edit.setText(str(self.marker_settings["age_marker"]))
         self.substance_field_spin.setValue(int(self.marker_settings["substance_marker_field"]))
         self.foreign_field_spin.setValue(int(self.marker_settings["foreign_agent_marker_field"]))
+        self.foreign_organization_field_spin.setValue(
+            int(self.marker_settings["foreign_organization_marker_field"])
+        )
         self.age_field_spin.setValue(int(self.marker_settings["age_marker_field"]))
+        self.substance_marker_check.setChecked(bool(self.marker_settings["substance_marker_enabled"]))
+        self.foreign_marker_check.setChecked(bool(self.marker_settings["foreign_agent_marker_enabled"]))
+        self.foreign_organization_marker_check.setChecked(
+            bool(self.marker_settings["foreign_organization_marker_enabled"])
+        )
+        self.age_marker_check.setChecked(bool(self.marker_settings["age_marker_enabled"]))
+        self._update_marker_control_states()
         self._sync_output_mode_from_checks()
+
+    def _update_marker_control_states(self, *_args) -> None:
+        groups = (
+            (self.substance_marker_check, self.substance_field_spin, self.substance_marker_edit),
+            (self.foreign_marker_check, self.foreign_field_spin, self.foreign_marker_edit),
+            (
+                self.foreign_organization_marker_check,
+                self.foreign_organization_field_spin,
+                self.foreign_organization_marker_edit,
+            ),
+            (self.age_marker_check, self.age_field_spin, self.age_marker_edit),
+        )
+        for check, field, marker in groups:
+            enabled = check.isChecked()
+            field.setEnabled(enabled)
+            marker.setEnabled(enabled)
 
     def _marker_values_from_ui(self) -> dict[str, str | int | bool]:
         return {
             **self.match_rules_editor.values(),
+            "use_isbn_matching": True,
+            "use_title_fallback": True,
             "use_fuzzy": False,
             "fuzzy_threshold": 90,
             "create_excel_report": self.create_excel_report_check.isChecked(),
@@ -765,10 +920,16 @@ class MainWindow(
             "report_only": self.report_only_check.isChecked(),
             "substance_marker": self.substance_marker_edit.text().strip(),
             "foreign_agent_marker_template": self.foreign_marker_edit.text().strip(),
+            "foreign_organization_marker_template": self.foreign_organization_marker_edit.text().strip(),
             "age_marker": self.age_marker_edit.text().strip(),
             "substance_marker_field": self.substance_field_spin.value(),
             "foreign_agent_marker_field": self.foreign_field_spin.value(),
+            "foreign_organization_marker_field": self.foreign_organization_field_spin.value(),
             "age_marker_field": self.age_field_spin.value(),
+            "substance_marker_enabled": self.substance_marker_check.isChecked(),
+            "foreign_agent_marker_enabled": self.foreign_marker_check.isChecked(),
+            "foreign_organization_marker_enabled": self.foreign_organization_marker_check.isChecked(),
+            "age_marker_enabled": self.age_marker_check.isChecked(),
         }
 
     def _sync_marker_settings_from_ui(self, save: bool = True, show_message: bool = True) -> bool:
@@ -810,6 +971,8 @@ class MainWindow(
         return True
 
     def _queue_report_settings_autosave(self, *_args) -> None:
+        if getattr(self, "_advanced_settings_editing", False):
+            return
         if getattr(self, "_report_autosave_pending", False):
             return
         self._report_autosave_pending = True
@@ -817,6 +980,8 @@ class MainWindow(
 
     def _autosave_report_settings(self) -> None:
         self._report_autosave_pending = False
+        if getattr(self, "_advanced_settings_editing", False):
+            return
         values = self._marker_values_from_ui()
         report_keys = (
             "report_substances",
@@ -835,9 +1000,13 @@ class MainWindow(
             QMessageBox.warning(self, APP_TITLE, f"Не удалось автоматически сохранить настройки списков:\n{exc}")
 
     def _queue_marker_settings_autosave(self, *_args) -> None:
+        if getattr(self, "_advanced_settings_editing", False):
+            return
         self._marker_autosave_timer.start(350)
 
     def _autosave_marker_settings(self) -> None:
+        if getattr(self, "_advanced_settings_editing", False):
+            return
         self._sync_marker_settings_from_ui(save=True, show_message=False)
 
     def _update_report_controls(self, enabled: bool) -> None:
@@ -899,7 +1068,8 @@ def main() -> int:
     install_russian_ui(app)
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
-    apply_light_palette(app)
+    startup_settings = load_application_settings(application_settings_path())
+    apply_application_theme(app, startup_settings.theme)
     app.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
     window = MainWindow()
     window.show()

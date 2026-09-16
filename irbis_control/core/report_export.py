@@ -106,6 +106,7 @@ REVIEW_MATCH_HEADERS = [
     "Файл-источник",
     "Лист",
     "Строка",
+    "Решение оператора",
 ]
 
 
@@ -368,7 +369,9 @@ def _add_review_sheet(
 ):
     """Добавляет пограничные результаты, которые запрещено применять автоматически."""
     review_results = [
-        result for result in results if result.status == "Возможное совпадение" and result.database is not None
+        result
+        for result in results
+        if result.status in {"Возможное совпадение", "Отклонено вручную"} and result.database is not None
     ]
     if not review_results:
         return None
@@ -393,6 +396,7 @@ def _add_review_sheet(
                 Path(result.excel.source_file).name,
                 result.excel.sheet_name,
                 result.excel.row_number,
+                result.status,
             ]
         )
 
@@ -412,6 +416,7 @@ def _add_review_sheet(
             "I": 34,
             "J": 22,
             "K": 12,
+            "L": 24,
         },
         "FCE4D6",
     )
