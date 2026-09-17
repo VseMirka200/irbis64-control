@@ -3,9 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-# Отделяет ошибки протокола и сервера от ошибок обработки локальных данных.
 class IrbisError(RuntimeError):
-    pass
+    """Ошибка протокола, соединения или ответа сервера ИРБИС."""
 
 
 # Сохраняет номер и содержимое повторения поля без потери исходного текста.

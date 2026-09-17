@@ -9,6 +9,7 @@ from pathlib import Path
 
 from irbis_control.core import matcher as _matcher
 from irbis_control.core.matcher import (
+    EXTRA_MATCH_RULES,
     SOURCE_FOREIGN_AGENTS,
     SOURCE_SUBSTANCES,
     CancelCallback,
@@ -19,6 +20,7 @@ from irbis_control.core.matcher import (
     author_surname,
     extract_isbns,
     fuzz,
+    match_rule_needs_review,
     normalize_author,
     normalize_publication_year,
     normalize_publisher,
@@ -97,238 +99,76 @@ def _participant_is_person(value: str) -> bool:
     return _ORGANIZATION_HINT_RE.search(_registry_plain_name(value)) is None
 
 
-def _person_identity(value: str) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
-    tokens = re.findall(r"[A-Za-zА-Яа-я]+", _registry_plain_name(value).lower())
-    if len(tokens) < 2:
-        return None
-    surname = tokens[0]
-    full_names = tuple(token for token in tokens[1:] if len(token) > 1)
-    if full_names:
-        initials = tuple(token[0] for token in full_names[:2])
-    else:
-        initials = tuple(token[0] for token in tokens[1:3] if token)
-    if not surname or not initials:
-        return None
-    return surname, full_names, initials
+def _foreign_agent_search_terms(entry: ForeignAgentEntry) -> list[tuple[str, str, bool]]:
+    """Преобразует строку реестра в обычные значения для общего индекса базы."""
+    main_is_person = "физичес" in normalize_author(entry.agent_type)
+    raw_terms = [
+        (variant, "ФИО/наименование", main_is_person)
+        for variant in _registry_name_variants(entry.name, is_person=main_is_person)
+    ]
+    for participant in entry.participants:
+        is_person = _participant_is_person(participant)
+        raw_terms.extend(
+            (variant, "Участник", is_person) for variant in _registry_name_variants(participant, is_person=is_person)
+        )
 
-
-def _person_identity_match_kind(
-    database_identity: tuple[str, tuple[str, ...], tuple[str, ...]],
-    registry_identity: tuple[str, tuple[str, ...], tuple[str, ...]],
-) -> str | None:
-    """Возвращает тип совпадения ФИО или None, если личности не совпадают.
-
-    Точным считается только полное совпадение фамилии, имени и отчества.
-    Сокращённое имя или инициалы дают лишь возможное совпадение для ручной
-    проверки и не должны приводить к автоматической установке метки.
-    """
-    db_surname, db_full_names, db_initials = database_identity
-    reg_surname, reg_full_names, reg_initials = registry_identity
-    if db_surname != reg_surname:
-        return None
-
-    if db_full_names:
-        # Полное имя должно совпасть обязательно: это исключает совпадения
-        # вроде «Петров Александр» и «Петров Алексей».
-        if not reg_full_names or db_full_names[0] != reg_full_names[0]:
-            return None
-
-        # Автоматически подтверждаем личность только по полному ФИО.
-        if len(db_full_names) >= 2 and len(reg_full_names) >= 2:
-            return "full_name" if db_full_names[:2] == reg_full_names[:2] else None
-
-        # Фамилия и имя совпали, но хотя бы с одной стороны нет отчества.
-        return "partial_full_name"
-
-    if len(db_initials) >= 2:
-        return "two_initials" if db_initials[:2] == reg_initials[:2] else None
-
-    if len(db_initials) == 1 and reg_initials:
-        return "single_initial" if db_initials[0] == reg_initials[0] else None
-
-    return None
-
-
-# Связывает вариант имени с записью реестра и полем, в котором его нужно искать.
-@dataclass(frozen=True)
-class ForeignAgentSearchTerm:
-    entry_id: int
-    value: str
-    normalized: str
-    kind: str
-    is_person: bool
-    person_identity: tuple[str, tuple[str, ...], tuple[str, ...]] | None
-
-
-# Подготавливает варианты имён один раз для поиска по всему реестру.
-class ForeignAgentIndex:
-    def __init__(self, entries: list[ForeignAgentEntry]) -> None:
-        self.entries = {entry.entry_id: entry for entry in entries}
-        self.by_exact: dict[str, list[ForeignAgentSearchTerm]] = defaultdict(list)
-        self.by_person_surname: dict[str, list[ForeignAgentSearchTerm]] = defaultdict(list)
-
-        for entry in entries:
-            terms: list[tuple[str, str, bool]] = []
-            main_is_person = "физичес" in normalize_author(entry.agent_type)
-            terms.extend(
-                (variant, "ФИО/наименование", main_is_person)
-                for variant in _registry_name_variants(entry.name, is_person=main_is_person)
-            )
-            for participant in entry.participants:
-                participant_is_person = _participant_is_person(participant)
-                terms.extend(
-                    (variant, "Участник", participant_is_person)
-                    for variant in _registry_name_variants(participant, is_person=participant_is_person)
-                )
-
-            seen: set[tuple[str, str, bool]] = set()
-            for value, kind, is_person in terms:
-                normalized = normalize_author(value)
-                if not normalized or (normalized, kind, is_person) in seen:
-                    continue
-                seen.add((normalized, kind, is_person))
-                identity = _person_identity(value) if is_person else None
-                term = ForeignAgentSearchTerm(
-                    entry_id=entry.entry_id,
-                    value=value,
-                    normalized=normalized,
-                    kind=kind,
-                    is_person=is_person,
-                    person_identity=identity,
-                )
-                self.by_exact[normalized].append(term)
-                if identity is not None:
-                    self.by_person_surname[identity[0]].append(term)
-
-    def match_record(
-        self, record: DatabaseRecord
-    ) -> list[tuple[ForeignAgentEntry, ForeignAgentSearchTerm, str, str, float, str]]:
-        matched: dict[
-            tuple[int, str, str],
-            tuple[ForeignAgentEntry, ForeignAgentSearchTerm, str, str, float, str],
-        ] = {}
-
-        # Проверяем все персональные поля ответственности: #700, #701 и #702.
-        # В parse_database они уже собраны в record.authors.
-        for author in record.authors:
-            author_normalized = normalize_author(author)
-            database_identity = _person_identity(author)
-            candidates: list[tuple[ForeignAgentSearchTerm, str]] = []
-            for term in self.by_exact.get(author_normalized, []):
-                # Даже одинаковая строка вида «Иванов И. И.» не является
-                # полным ФИО и поэтому не должна считаться точной автоматически.
-                if term.is_person and database_identity is not None and term.person_identity is not None:
-                    match_kind = _person_identity_match_kind(database_identity, term.person_identity)
-                    if match_kind is not None:
-                        candidates.append((term, match_kind))
-            if database_identity is not None:
-                for term in self.by_person_surname.get(database_identity[0], []):
-                    if term.person_identity is None:
-                        continue
-                    match_kind = _person_identity_match_kind(database_identity, term.person_identity)
-                    if match_kind is not None:
-                        candidates.append((term, match_kind))
-
-            # Сокращённые библиотечные формы ФИО (#700/#701/#702) можно
-            # подтверждать автоматически, если они однозначно указывают ровно на
-            # одну запись реестра. Один инициал остаётся только для ручной проверки.
-            candidate_entry_ids = {term.entry_id for term, _match_kind in candidates if term.is_person}
-            unique_short_identity = len(candidate_entry_ids) == 1
-
-            for term, match_kind in candidates:
-                if not term.is_person:
-                    continue
-                entry = self.entries[term.entry_id]
-                note = term.kind
-                confidence = 100.0
-                if match_kind == "partial_full_name":
-                    if unique_short_identity:
-                        note = f"{term.kind}; фамилия и имя однозначно совпали с одной записью реестра"
-                    else:
-                        note = f"{term.kind}; совпали фамилия и имя, но найдено несколько кандидатов — проверить вручную"
-                        confidence = 90.0
-                elif match_kind == "two_initials":
-                    if unique_short_identity:
-                        note = f"{term.kind}; фамилия + два инициала однозначно совпали с одной записью реестра"
-                    else:
-                        note = f"{term.kind}; фамилия + два инициала, но найдено несколько кандидатов — проверить вручную"
-                        confidence = 90.0
-                elif match_kind == "single_initial":
-                    note = f"{term.kind}; фамилия + один инициал — проверить вручную"
-                    confidence = 80.0
-                key = (entry.entry_id, term.normalized, "Автор")
-                previous = matched.get(key)
-                candidate = (entry, term, "Автор", note, confidence, author)
-                if previous is None or confidence > previous[4]:
-                    matched[key] = candidate
-
-        for organization in record.organizations:
-            organization_normalized = normalize_author(organization)
-            for term in self.by_exact.get(organization_normalized, []):
-                if term.is_person:
-                    continue
-                entry = self.entries[term.entry_id]
-                key = (entry.entry_id, term.normalized, "Организация")
-                matched[key] = (entry, term, "Организация", term.kind, 100.0, organization)
-
-        for title in record.titles:
-            title_normalized = normalize_author(title)
-            for term in self.by_exact.get(title_normalized, []):
-                # Названия книг сравниваются только с наименованиями организаций/проектов,
-                # а не с ФИО физических лиц или участников.
-                entry = self.entries[term.entry_id]
-                if term.is_person or term.kind == "Участник":
-                    continue
-                if len(term.normalized.split()) < 2:
-                    continue
-                key = (entry.entry_id, term.normalized, "Название")
-                matched[key] = (entry, term, "Название", term.kind, 100.0, title)
-
-        return list(matched.values())
+    seen: set[tuple[str, str, bool]] = set()
+    terms: list[tuple[str, str, bool]] = []
+    for value, kind, is_person in raw_terms:
+        key = (normalize_author(value), kind, is_person)
+        if key[0] and key not in seen:
+            seen.add(key)
+            terms.append((value, kind, is_person))
+    return terms
 
 
 def compare_foreign_agents(
-    records: list[DatabaseRecord],
+    records: DatabaseIndex | list[DatabaseRecord],
     entries: list[ForeignAgentEntry],
     progress_cb: ProgressCallback | None = None,
     cancel_cb: CancelCallback | None = None,
 ) -> list[MatchResult]:
     if not entries:
         return []
-    index = ForeignAgentIndex(entries)
+    index = records if isinstance(records, DatabaseIndex) else DatabaseIndex(records)
     results: list[MatchResult] = []
-    total = max(len(records), 1)
+    total = max(len(entries), 1)
 
-    for position, record in enumerate(records, start=1):
-        if position % 250 == 0:
+    for position, entry in enumerate(entries, start=1):
+        if position % 100 == 0:
             _cancelled(cancel_cb)
             if progress_cb:
                 progress_cb(72 + int(position / total * 8), f"Сверка с иноагентами: {position:,} из {total:,}")
-        for entry, term, database_field, match_note, confidence, database_matched_value in index.match_record(record):
-            synthetic_entry = ExcelEntry(
-                entry_id=entry.entry_id,
-                source_file=entry.source_file,
-                sheet_name=entry.sheet_name,
-                row_number=entry.row_number,
-                author=entry.name,
-                title=term.value,
-                registration_number=entry.registry_number,
-                raw_data=entry.raw_data,
-            )
-            results.append(
-                MatchResult(
-                    status="Совпадение" if confidence >= 100.0 else "Возможное совпадение",
-                    method=f"Реестр иностранных агентов: {database_field}",
-                    confidence=confidence,
-                    excel=synthetic_entry,
-                    database=record,
-                    note=match_note,
-                    source_type=SOURCE_FOREIGN_AGENTS,
-                    matched_value=term.value,
-                    foreign_agent=entry,
-                    database_matched_value=database_matched_value,
+        for value, kind, is_person in _foreign_agent_search_terms(entry):
+            matches = index.match_author_value(value) if is_person else index.match_name_value(value)
+            for record, database_field, confidence, database_matched_value in matches:
+                # Участники-организации не сравниваются с названиями произведений.
+                if kind == "Участник" and database_field == "Название":
+                    continue
+                synthetic_entry = ExcelEntry(
+                    entry_id=entry.entry_id,
+                    source_file=entry.source_file,
+                    sheet_name=entry.sheet_name,
+                    row_number=entry.row_number,
+                    author=entry.name,
+                    title=value,
+                    registration_number=entry.registry_number,
+                    raw_data=entry.raw_data,
                 )
-            )
+                results.append(
+                    MatchResult(
+                        status="Совпадение" if confidence >= 100.0 else "Возможное совпадение",
+                        method=f"Реестр иностранных агентов: {database_field}",
+                        confidence=confidence,
+                        excel=synthetic_entry,
+                        database=record,
+                        note=(kind if confidence >= 100.0 else f"{kind}; неполные данные автора"),
+                        source_type=SOURCE_FOREIGN_AGENTS,
+                        matched_value=value,
+                        foreign_agent=entry,
+                        database_matched_value=database_matched_value,
+                    )
+                )
     return results
 
 
@@ -395,9 +235,18 @@ class DatabaseIndex:
         self.records = records
         self.by_isbn: dict[str, list[DatabaseRecord]] = defaultdict(list)
         self.by_title: dict[str, list[DatabaseRecord]] = defaultdict(list)
+        self.by_author_surname: dict[str, list[DatabaseRecord]] = defaultdict(list)
+        self.by_organization: dict[str, list[tuple[DatabaseRecord, str]]] = defaultdict(list)
+        self.by_plain_title: dict[str, list[tuple[DatabaseRecord, str]]] = defaultdict(list)
         self.publications: dict[int, list[tuple[str, str]]] = {}
 
         for record in records:
+            for surname in {author_surname(author) for author in record.authors} - {""}:
+                self.by_author_surname[surname].append(record)
+            for organization in record.organizations:
+                normalized = normalize_author(organization)
+                if normalized:
+                    self.by_organization[normalized].append((record, organization))
             self.publications[record.record_number] = [
                 (
                     normalize_publisher(_extract_subfield(item, "C")),
@@ -409,6 +258,9 @@ class DatabaseIndex:
                 for normalized in extract_isbns(isbn):
                     self.by_isbn[normalized].append(record)
             for title in record.titles:
+                plain_title = normalize_author(title)
+                if plain_title:
+                    self.by_plain_title[plain_title].append((record, title))
                 normalized = normalize_title(title)
                 if normalized:
                     self.by_title[normalized].append(record)
@@ -417,6 +269,11 @@ class DatabaseIndex:
 
     @staticmethod
     def _author_match_kind(entry_author: str, record: DatabaseRecord) -> str | None:
+        match = DatabaseIndex._matching_author(entry_author, record)
+        return match[0] if match is not None else None
+
+    @staticmethod
+    def _matching_author(entry_author: str, record: DatabaseRecord) -> tuple[str, str] | None:
         excel_identity = _author_identity(entry_author)
         if not excel_identity or not record.authors:
             return None
@@ -431,15 +288,45 @@ class DatabaseIndex:
             if record_surname != excel_surname:
                 continue
             if normalize_author(author) == entry_normalized:
-                return "exact"
+                return "exact", author
             if excel_initials and record_initials:
                 compare_count = min(len(excel_initials), len(record_initials))
                 if excel_initials[:compare_count] != record_initials[:compare_count]:
                     continue
                 if len(excel_initials) >= 2 and len(record_initials) >= 2:
-                    return "exact"
-            return "partial"
+                    return "exact", author
+            return "partial", author
         return None
+
+    def match_author_value(self, value: str) -> list[tuple[DatabaseRecord, str, float, str]]:
+        """Сопоставляет автора по тем же правилам, что используются для строк веществ."""
+        surname = author_surname(value)
+        if not surname:
+            return []
+        matches: list[tuple[DatabaseRecord, str, float, str]] = []
+        for record in self.by_author_surname.get(surname, []):
+            match = self._matching_author(value, record)
+            if match is None:
+                continue
+            kind, database_value = match
+            matches.append((record, "Автор", 100.0 if kind == "exact" else 90.0, database_value))
+        return matches
+
+    def match_name_value(self, value: str) -> list[tuple[DatabaseRecord, str, float, str]]:
+        """Ищет наименование в проиндексированных организациях и названиях."""
+        normalized = normalize_author(value)
+        if not normalized:
+            return []
+        matches = [
+            (record, "Организация", 100.0, database_value)
+            for record, database_value in self.by_organization.get(normalized, [])
+        ]
+        if len(normalized.split()) >= 2:
+            matches.extend(
+                (record, "Название", 100.0, database_value)
+                for record, database_value in self.by_plain_title.get(normalized, [])
+            )
+        return matches
 
     @staticmethod
     def _author_matches(entry_author: str, record: DatabaseRecord) -> bool:
@@ -525,33 +412,179 @@ class DatabaseIndex:
         if not entry_publishers or not entry_year:
             return False
         return any(
-            entry_year == record_year
-            and bool(entry_publishers & publisher_variants(record_publisher))
+            entry_year == record_year and bool(entry_publishers & publisher_variants(record_publisher))
             for record_publisher, record_year in publications
         )
 
-    def _match_title_rules(self, entry: ExcelEntry, normalized_title: str) -> list[MatchResult]:
-        entry_surname = author_surname(entry.author)
-        entry_authors = [value.strip() for value in re.split(r"[;\n]", entry.author) if value.strip()]
-        single_entry_author = len(entry_authors) == 1
-        results: list[MatchResult] = []
-        for record in self.by_title.get(normalized_title, []):
-            record_authors = [author for author in record.authors if author_surname(author)]
-            if entry_surname and single_entry_author and len(record_authors) == 1:
-                if author_surname(record_authors[0]) != entry_surname:
+    @staticmethod
+    def _publication_fields_match(
+        entry: ExcelEntry,
+        publications: list[tuple[str, str]],
+        fields: tuple[str, ...],
+    ) -> bool:
+        """Проверяет издательство и год в одном повторении поля публикации."""
+        needs_publisher = "publisher" in fields
+        needs_year = "year" in fields
+        if not needs_publisher and not needs_year:
+            return True
+
+        entry_publishers = publisher_variants(entry.publisher)
+        entry_year = normalize_publication_year(entry.year)
+        if needs_publisher and not entry_publishers or needs_year and not entry_year:
+            return False
+
+        return any(
+            (not needs_publisher or bool(entry_publishers & publisher_variants(record_publisher)))
+            and (not needs_year or entry_year == record_year)
+            for record_publisher, record_year in publications
+        )
+
+    def _record_matches_rule(
+        self,
+        entry: ExcelEntry,
+        record: DatabaseRecord,
+        fields: tuple[str, ...],
+        normalized_isbns: set[str],
+        normalized_title: str,
+    ) -> bool:
+        if "isbn" in fields and not any(normalized_isbns.intersection(extract_isbns(value)) for value in record.isbns):
+            return False
+        if "title" in fields and normalized_title not in {normalize_title(value) for value in record.titles}:
+            return False
+
+        author_match = self._author_match_kind(entry.author, record) if entry.author and record.authors else None
+        if "author" in fields and author_match != "exact":
+            return False
+        # Явно указанный несовпадающий автор исключает ложное подтверждение
+        # по названию или данным издания, даже если правило не требует автора.
+        if entry.author and record.authors and author_match is None:
+            return False
+
+        return self._publication_fields_match(entry, self.publications[record.record_number], fields)
+
+    def _rule_candidates(
+        self,
+        entry: ExcelEntry,
+        fields: tuple[str, ...],
+        normalized_isbns: list[str],
+        normalized_title: str,
+    ) -> list[DatabaseRecord]:
+        """Выбирает самый узкий готовый индекс для правила сопоставления."""
+        pools: list[list[DatabaseRecord]] = []
+        if "isbn" in fields:
+            pools.append([record for value in normalized_isbns for record in self.by_isbn.get(value, [])])
+        if "title" in fields:
+            pools.append(list(self.by_title.get(normalized_title, [])))
+        if "author" in fields:
+            pools.append(list(self.by_author_surname.get(author_surname(entry.author), [])))
+        if not pools:
+            return []
+
+        candidates: list[DatabaseRecord] = []
+        seen: set[int] = set()
+        for record in min(pools, key=len):
+            if record.record_number not in seen:
+                seen.add(record.record_number)
+                candidates.append(record)
+        return candidates
+
+    def _match_extra_rules(
+        self,
+        entry: ExcelEntry,
+        match_rules: dict[str, bool],
+        normalized_isbns: list[str],
+        normalized_title: str,
+    ) -> list[MatchResult]:
+        enabled_rules = [
+            (key, *EXTRA_MATCH_RULES[key])
+            for key, enabled in match_rules.items()
+            if enabled and key in EXTRA_MATCH_RULES
+        ]
+        if not enabled_rules:
+            return []
+
+        entry_values = {
+            "isbn": bool(normalized_isbns),
+            "title": bool(normalized_title),
+            "author": bool(entry.author.strip()),
+            "publisher": bool(publisher_variants(entry.publisher)),
+            "year": bool(normalize_publication_year(entry.year)),
+        }
+        normalized_isbn_set = set(normalized_isbns)
+        best_by_record: dict[int, tuple[tuple[int, int], MatchResult]] = {}
+
+        for _key, label, fields in enabled_rules:
+            if not all(entry_values[field] for field in fields):
+                continue
+            needs_review = match_rule_needs_review(fields)
+            confidence = 90.0 if needs_review else 100.0
+            for record in self._rule_candidates(entry, fields, normalized_isbns, normalized_title):
+                if not self._record_matches_rule(
+                    entry,
+                    record,
+                    fields,
+                    normalized_isbn_set,
+                    normalized_title,
+                ):
                     continue
-                method = "Название + фамилия автора"
-            else:
-                if not self._publication_matches(entry, self.publications[record.record_number]):
-                    continue
-                method = "Название + издательство + год"
-            results.append(
-                MatchResult(
-                    status="Совпадение",
-                    method=method,
-                    confidence=100.0,
+                result = MatchResult(
+                    status="Возможное совпадение" if needs_review else "Совпадение",
+                    method=label,
+                    confidence=confidence,
                     excel=entry,
                     database=record,
+                    note="Требуется ручная проверка сочетания полей" if needs_review else "",
+                    source_type=SOURCE_SUBSTANCES,
+                    matched_value=entry.title or entry.author or entry.isbn,
+                )
+                priority = (int(confidence), len(fields))
+                previous = best_by_record.get(record.record_number)
+                if previous is None or priority > previous[0]:
+                    best_by_record[record.record_number] = (priority, result)
+
+        return [item[1] for item in best_by_record.values()]
+
+    def _match_title_rules(self, entry: ExcelEntry, normalized_title: str) -> list[MatchResult]:
+        results: list[MatchResult] = []
+        for record in self.by_title.get(normalized_title, []):
+            record_has_authors = bool(record.authors)
+            author_match_kind = self._author_match_kind(entry.author, record) if entry.author else None
+            if entry.author and record_has_authors:
+                if author_match_kind is None:
+                    continue
+                if author_match_kind == "exact":
+                    status = "Совпадение"
+                    method = "Название и автор"
+                    confidence = 100.0
+                    note = ""
+                else:
+                    status = "Возможное совпадение"
+                    method = "Название и неполные данные автора"
+                    confidence = 90.0
+                    note = "Название совпало, но для надёжной проверки автора недостаточно инициалов"
+            elif self._publication_matches(entry, self.publications[record.record_number]):
+                status = "Совпадение"
+                method = "Название + издательство + год"
+                confidence = 100.0
+                note = ""
+            elif not entry.author:
+                status = "Возможное совпадение"
+                method = "Только название"
+                confidence = 75.0
+                note = "Точно совпало только название; в перечне не указан автор — проверить вручную"
+            else:
+                status = "Возможное совпадение"
+                method = "Название без проверки автора"
+                confidence = 80.0
+                note = "Название совпало, но в записи базы нет автора — проверить вручную"
+            results.append(
+                MatchResult(
+                    status=status,
+                    method=method,
+                    confidence=confidence,
+                    excel=entry,
+                    database=record,
+                    note=note,
                     source_type=SOURCE_SUBSTANCES,
                     matched_value=entry.title,
                 )
@@ -591,6 +624,32 @@ class DatabaseIndex:
             if isbn_results:
                 return isbn_results
 
+        normalized_title = normalize_title(entry.title)
+        extra_results = self._match_extra_rules(
+            entry,
+            options.match_rules,
+            normalized_isbns,
+            normalized_title,
+        )
+
+        exact_results: list[MatchResult] = []
+        if use_title_fallback and normalized_title:
+            exact_results = self._match_title_rules(entry, normalized_title)
+        combined_results = [*extra_results, *exact_results]
+        if combined_results:
+            best_by_record: dict[int, MatchResult] = {}
+            for result in combined_results:
+                if result.database is None:
+                    continue
+                previous = best_by_record.get(result.database.record_number)
+                priority = (result.confidence, result.method.count("+") + 1)
+                previous_priority = (
+                    (previous.confidence, previous.method.count("+") + 1) if previous is not None else (-1.0, 0)
+                )
+                if priority > previous_priority:
+                    best_by_record[result.database.record_number] = result
+            return list(best_by_record.values())
+
         if not use_title_fallback:
             note = (
                 "Поиск по ISBN и названию отключён"
@@ -603,7 +662,6 @@ class DatabaseIndex:
             )
             return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
-        normalized_title = normalize_title(entry.title)
         if not normalized_title:
             note = (
                 "ISBN имеет неверный формат или контрольную цифру; названия для резервного поиска нет"
@@ -612,9 +670,6 @@ class DatabaseIndex:
             )
             return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
-        exact_results = self._match_title_rules(entry, normalized_title)
-        if exact_results:
-            return exact_results
         if use_title_fallback and use_fuzzy:
             fuzzy_results = self._match_fuzzy(entry, normalized_title, fuzzy_threshold)
             if fuzzy_results:
@@ -673,7 +728,7 @@ def compare_database_records(
             )
             foreign_future = executor.submit(
                 compare_foreign_agents,
-                records,
+                index,
                 foreign_entries,
                 progress_cb,
                 cancel_cb,
@@ -688,7 +743,7 @@ def compare_database_records(
             progress_cb,
             cancel_cb,
         )
-        foreign_results = compare_foreign_agents(records, foreign_entries, progress_cb, cancel_cb)
+        foreign_results = compare_foreign_agents(index, foreign_entries, progress_cb, cancel_cb)
 
     results: list[MatchResult] = []
     results.extend(substance.results)

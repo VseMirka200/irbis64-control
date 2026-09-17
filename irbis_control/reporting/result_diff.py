@@ -419,7 +419,7 @@ def _read_plain_text(path: str | Path) -> str:
         try:
             return raw.decode(encoding)
         except UnicodeDecodeError:
-            pass
+            continue
     raise ValueError(f"Не удалось определить кодировку файла {source.name}.")
 
 

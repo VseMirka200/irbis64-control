@@ -2,13 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from irbis_control.core.matcher import SOURCE_FOREIGN_AGENTS, normalize_author, normalize_title
 from irbis_control.core.models import ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
-
 
 SCHEMA_VERSION = 1
 
@@ -189,7 +188,7 @@ def remember_approved_results(
     """Сохраняет только подтверждения оператора; отклонения намеренно не запоминаются."""
     target = Path(path)
     rows = _load_approved_rows(target)
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
     added = 0
     for result_index in approved_indices:
         if result_index < 0 or result_index >= len(results):

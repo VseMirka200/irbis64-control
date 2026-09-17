@@ -407,7 +407,25 @@ class BoundaryMatchTests(unittest.TestCase):
         results = compare_foreign_agents([record], [self._foreign_entry(1, "Иванов Иван Петрович")])
 
         self.assertEqual("Возможное совпадение", results[0].status)
+        self.assertEqual(90.0, results[0].confidence)
         self.assertEqual({}, build_markers_by_record(results))
+
+    def test_foreign_agents_use_the_same_author_comparison_as_substances(self) -> None:
+        record = DatabaseRecord(record_number=12, titles=["Тестовая книга"], authors=["Иванов И."])
+        substance = ExcelEntry(
+            entry_id=1,
+            source_file="substances.xlsx",
+            sheet_name="Книги",
+            row_number=2,
+            author="Иванов Иван Петрович",
+            title="Тестовая книга",
+        )
+
+        substance_result = DatabaseIndex([record]).match(substance, True, True, False, 90)[0]
+        foreign_result = compare_foreign_agents([record], [self._foreign_entry(1, "Иванов Иван Петрович")])[0]
+
+        self.assertEqual(substance_result.status, foreign_result.status)
+        self.assertEqual(substance_result.confidence, foreign_result.confidence)
 
     def test_exact_title_without_author_requires_review(self) -> None:
         record = DatabaseRecord(

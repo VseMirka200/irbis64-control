@@ -32,7 +32,6 @@ from irbis_control.ui.components.widgets import (
     MatchRulesEditor,
     SectionCard,
 )
-from irbis_control.ui.storage_paths import app_data_dir
 
 
 class MainWindowBuildMixin:
@@ -355,9 +354,9 @@ class MainWindowBuildMixin:
 
         # Служебные поля старого режима оставлены скрытыми для совместимости с
         # существующими настройками и ручной отправкой старых снимков.
-        self.irbis_snapshot_edit = QLineEdit(str(app_data_dir() / "direct_database.txt"))
+        self.irbis_snapshot_edit = QLineEdit(str(self._app_data_dir() / "direct_database.txt"))
         self.irbis_snapshot_edit.hide()
-        self.irbis_manifest_edit = QLineEdit(str(app_data_dir() / "direct_database.map.json"))
+        self.irbis_manifest_edit = QLineEdit(str(self._app_data_dir() / "direct_database.map.json"))
         self.irbis_manifest_edit.hide()
         self.base_card = base_card
         irbis_columns.addWidget(base_card, 0, 1)

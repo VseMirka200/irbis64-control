@@ -584,4 +584,3 @@ def export_results(
             f"иноагенты: {len(foreign_agent_records):,}",
         )
     return output_path
-

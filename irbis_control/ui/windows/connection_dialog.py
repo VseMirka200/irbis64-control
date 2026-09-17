@@ -160,7 +160,9 @@ class IrbisConnectionDialog(QDialog):
     def values(self) -> dict[str, object]:
         database_data = self.database_combo.currentData()
         database = str(database_data if database_data is not None else self.database_combo.currentText()).strip()
-        if self.database_combo.currentText().strip() != self.database_combo.itemText(self.database_combo.currentIndex()):
+        if self.database_combo.currentText().strip() != self.database_combo.itemText(
+            self.database_combo.currentIndex()
+        ):
             database = self.database_combo.currentText().strip()
         return {
             "host": self.host_edit.text().strip() or "127.0.0.1",

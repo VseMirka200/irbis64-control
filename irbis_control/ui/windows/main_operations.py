@@ -216,7 +216,7 @@ class MainWindowOperationsMixin:
     def _restore_irbis_config(self) -> None:
         try:
             config = json.loads(self._database_connector_config_path().read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             config = {}
         self.irbis_host_edit.setText(str(config.get("host", "127.0.0.1")))
         try:
@@ -296,9 +296,7 @@ class MainWindowOperationsMixin:
                 self.marker_settings.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
             ),
             "foreign_organization_marker_field": int(
-                self.marker_settings.get(
-                    "foreign_organization_marker_field", DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD
-                )
+                self.marker_settings.get("foreign_organization_marker_field", DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD)
             ),
             "age_marker_field": int(self.marker_settings.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
         }
@@ -794,15 +792,11 @@ class MainWindowOperationsMixin:
                 output_path,
                 substance_marker=str(self.marker_settings["substance_marker"]),
                 foreign_agent_marker_template=str(self.marker_settings["foreign_agent_marker_template"]),
-                foreign_organization_marker_template=str(
-                    self.marker_settings["foreign_organization_marker_template"]
-                ),
+                foreign_organization_marker_template=str(self.marker_settings["foreign_organization_marker_template"]),
                 age_marker=str(self.marker_settings["age_marker"]),
                 substance_marker_field=int(self.marker_settings["substance_marker_field"]),
                 foreign_agent_marker_field=int(self.marker_settings["foreign_agent_marker_field"]),
-                foreign_organization_marker_field=int(
-                    self.marker_settings["foreign_organization_marker_field"]
-                ),
+                foreign_organization_marker_field=int(self.marker_settings["foreign_organization_marker_field"]),
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
             )
         except Exception as exc:

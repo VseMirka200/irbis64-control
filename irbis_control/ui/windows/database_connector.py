@@ -27,6 +27,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from irbis_control.application.settings import load_application_settings
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.infrastructure.irbis_bridge import (
     IrbisClient,
@@ -37,8 +38,8 @@ from irbis_control.infrastructure.irbis_bridge import (
 from irbis_control.paths import icon_path
 from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
-from irbis_control.application.settings import load_application_settings
-from irbis_control.ui.storage_paths import application_settings_path, database_connector_config_path as config_path
+from irbis_control.ui.storage_paths import application_settings_path
+from irbis_control.ui.storage_paths import database_connector_config_path as config_path
 from irbis_control.ui.theme import apply_application_theme, database_connector_stylesheet
 
 APP_TITLE = "ИРБИС64 Контроль — подключение к базе"
@@ -200,8 +201,9 @@ class ConnectorWindow(QMainWindow):
         work_title = QLabel("2. Файлы")
         work_title.setObjectName("cardTitle")
         work_layout.addWidget(work_title)
-        self.snapshot_edit = QLineEdit(str(app_data_dir() / "direct_database.txt"))
-        self.manifest_edit = QLineEdit(str(app_data_dir() / "direct_database.map.json"))
+        data_dir = config_path().parent
+        self.snapshot_edit = QLineEdit(str(data_dir / "direct_database.txt"))
+        self.manifest_edit = QLineEdit(str(data_dir / "direct_database.map.json"))
         self.manifest_edit.setReadOnly(True)
         self.modified_edit = QLineEdit()
         work_layout.addWidget(QLabel("Рабочая TXT-копия"))
@@ -284,7 +286,7 @@ class ConnectorWindow(QMainWindow):
     def _load_config(self) -> dict:
         try:
             return json.loads(config_path().read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return {}
 
     def _current_database(self) -> str:
@@ -502,6 +504,7 @@ class ConnectorWindow(QMainWindow):
         try:
             self._save_config()
         except Exception:
+            # Ошибка сохранения настроек не должна блокировать закрытие окна.
             pass
         event.accept()
 

@@ -196,9 +196,8 @@ TITLE_STOP_WORDS = {
 }
 
 
-# Позволяет отличить отмену пользователем от ошибки чтения или сравнения.
 class ComparisonCancelled(RuntimeError):
-    pass
+    """Операция сравнения отменена пользователем."""
 
 
 def _cancelled(cancel_cb: CancelCallback | None) -> None:
@@ -505,6 +504,13 @@ def _detect_header(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, int], li
     return best_row, best_map, best_headers
 
 
+def _mapped_value(values: list[Any], mapping: dict[str, int], key: str) -> str:
+    column = mapping.get(key)
+    if column is None or column >= len(values):
+        return ""
+    return safe_text(values[column])
+
+
 def _make_entry(
     entry_id: int,
     source_file: Path,
@@ -516,12 +522,6 @@ def _make_entry(
 ) -> ExcelEntry:
     values = list(row)
 
-    def get(key: str) -> str:
-        column = mapping.get(key)
-        if column is None or column >= len(values):
-            return ""
-        return safe_text(values[column])
-
     raw_data: dict[str, Any] = {}
     for index, value in enumerate(values):
         if value is None or safe_text(value) == "":
@@ -529,7 +529,7 @@ def _make_entry(
         header = headers[index] if index < len(headers) else f"Столбец {index + 1}"
         raw_data[header] = safe_text(value)
 
-    raw_isbn = get("isbn")
+    raw_isbn = _mapped_value(values, mapping, "isbn")
     isbn = "" if raw_isbn.strip().lower() in ISBN_PLACEHOLDERS else raw_isbn
 
     return ExcelEntry(
@@ -537,13 +537,13 @@ def _make_entry(
         source_file=str(source_file),
         sheet_name=sheet_name,
         row_number=row_number,
-        author=get("author"),
-        title=get("title"),
+        author=_mapped_value(values, mapping, "author"),
+        title=_mapped_value(values, mapping, "title"),
         isbn=isbn,
-        registration_number=get("registration_number"),
+        registration_number=_mapped_value(values, mapping, "registration_number"),
         raw_data=raw_data,
-        publisher=get("publisher"),
-        year=get("year"),
+        publisher=_mapped_value(values, mapping, "publisher"),
+        year=_mapped_value(values, mapping, "year"),
     )
 
 
@@ -778,13 +778,7 @@ def _read_foreign_agents_xlsx(
                     _cancelled(cancel_cb)
                 values = list(row)
 
-                def get(key: str) -> str:
-                    column = mapping.get(key)
-                    if column is None or column >= len(values):
-                        return ""
-                    return safe_text(values[column])
-
-                name = get("name")
+                name = _mapped_value(values, mapping, "name")
                 if not name:
                     continue
 
@@ -800,12 +794,12 @@ def _read_foreign_agents_xlsx(
                     source_file=str(path),
                     sheet_name=worksheet.title,
                     row_number=row_number,
-                    registry_number=get("registry_number"),
+                    registry_number=_mapped_value(values, mapping, "registry_number"),
                     name=name,
-                    participants=_split_registry_participants(get("participants")),
-                    agent_type=get("agent_type"),
-                    inclusion_date=get("inclusion_date"),
-                    exclusion_date=get("exclusion_date"),
+                    participants=_split_registry_participants(_mapped_value(values, mapping, "participants")),
+                    agent_type=_mapped_value(values, mapping, "agent_type"),
+                    inclusion_date=_mapped_value(values, mapping, "inclusion_date"),
+                    exclusion_date=_mapped_value(values, mapping, "exclusion_date"),
                     raw_data=raw_data,
                 )
                 # Для проверки используются только действующие записи. Исключённые остаются
@@ -839,11 +833,8 @@ def read_foreign_agent_entries(
 
 from irbis_control.core.matching_engine import (  # noqa: F401 - совместимый публичный фасад
     DatabaseIndex,
-    ForeignAgentIndex,
-    ForeignAgentSearchTerm,
+    _foreign_agent_search_terms,
     _name_order_variants,
-    _person_identity,
-    _person_identity_match_kind,
     _registry_name_variants,
     _registry_plain_name,
     compare_database_records,
@@ -902,7 +893,6 @@ def export_modified_databases(*args: Any, **kwargs: Any) -> list[Path]:
     return implementation(*args, **kwargs)
 
 
-
 def apply_manual_review_decisions(
     results: list[MatchResult],
     summary: ComparisonSummary,
@@ -934,20 +924,14 @@ def apply_manual_review_decisions(
         result.note = f"{result.note}; {suffix}" if result.note else suffix
 
     confirmed_substances = [
-        result
-        for result in results
-        if result.status == "Совпадение" and result.source_type == SOURCE_SUBSTANCES
+        result for result in results if result.status == "Совпадение" and result.source_type == SOURCE_SUBSTANCES
     ]
     confirmed_foreign = [
-        result
-        for result in results
-        if result.status == "Совпадение" and result.source_type == SOURCE_FOREIGN_AGENTS
+        result for result in results if result.status == "Совпадение" and result.source_type == SOURCE_FOREIGN_AGENTS
     ]
     matched_substance_ids = {result.excel.entry_id for result in confirmed_substances}
     matched_foreign_ids = {
-        result.foreign_agent.entry_id
-        for result in confirmed_foreign
-        if result.foreign_agent is not None
+        result.foreign_agent.entry_id for result in confirmed_foreign if result.foreign_agent is not None
     }
     summary.matched_excel_rows = len(matched_substance_ids)
     summary.unmatched_excel_rows = max(0, summary.excel_rows - len(matched_substance_ids))
