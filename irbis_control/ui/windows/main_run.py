@@ -15,6 +15,20 @@ from irbis_control.ui.services.workers import ComparisonWorker, DirectIrbisCompa
 
 
 class MainWindowRunMixin:
+    def _hide_progress_for_prompt(self) -> bool:
+        """Временно освобождает модальность для диалога, требующего ответа пользователя."""
+        was_visible = self.progress_dialog.isVisible()
+        if was_visible:
+            self.progress_dialog.hide()
+        return was_visible
+
+    def _restore_progress_after_prompt(self, was_visible: bool) -> None:
+        if not was_visible:
+            return
+        self.progress_dialog.show()
+        self.progress_dialog.raise_()
+        self.progress_dialog.activateWindow()
+
     def _adjust_source_list_height(self, list_widget) -> None:
         if list_widget.property("sourceHeightManuallySet"):
             return
@@ -438,7 +452,8 @@ class MainWindowRunMixin:
         self.result_summary_label.setText(
             "Проверка выполняется. Можно следить за общим состоянием здесь или открыть технический журнал."
         )
-        self.progress_dialog.clear()
+        self.progress_dialog.setWindowTitle("Выполнение проверки")
+        self.progress_dialog.start("Подготовка к проверке выбранных реестров…")
         self._append_progress("Подготовка к проверке всех выбранных реестров…")
         self.progress.setValue(0)
         self.progress.show()
@@ -593,8 +608,12 @@ class MainWindowRunMixin:
         self._append_progress(
             f"Автоматическое решение невозможно для {len(valid_rows):,} совпадений — открыта ручная проверка."
         )
-        dialog = ManualMatchReviewDialog(valid_rows, self)
-        accepted = dialog.exec() == dialog.DialogCode.Accepted
+        progress_was_visible = self._hide_progress_for_prompt()
+        try:
+            dialog = ManualMatchReviewDialog(valid_rows, self)
+            accepted = dialog.exec() == dialog.DialogCode.Accepted
+        finally:
+            self._restore_progress_after_prompt(progress_was_visible)
         if accepted:
             decisions = dialog.decisions()
             approved = sum(decisions.values())
@@ -634,29 +653,34 @@ class MainWindowRunMixin:
         if remaining:
             preview_lines.append(f"…и ещё записей: {remaining}")
 
-        message = QMessageBox(self)
-        message.setWindowTitle(APP_TITLE)
-        message.setIcon(QMessageBox.Icon.Question)
-        message.setText(
-            f"Подготовлено к записи в базу {data.get('database', '')}: {int(data.get('record_count', 0))} записей."
-        )
-        message.setInformativeText(
-            f"Новых меток: {int(data.get('markers_added', 0))}\n"
-            f"Уже существовало: {int(data.get('markers_already_present', 0))}\n"
-            f"Будет исправлено дублей: {int(data.get('duplicates_repaired', 0))}\n"
-            f"Конфликтов версий: {int(data.get('conflicts', 0))}\n\n"
-            f"Требуют ручной проверки и не будут записаны: {int(data.get('review_rows', 0))}\n\n"
-            + (
-                "Rollback-копия будет создана перед записью.\n\n"
-                if bool(data.get("create_backup", True))
-                else "ВНИМАНИЕ: rollback-копия отключена в настройках.\n\n"
+        progress_was_visible = self._hide_progress_for_prompt()
+        try:
+            message = QMessageBox(self)
+            message.setWindowTitle(APP_TITLE)
+            message.setIcon(QMessageBox.Icon.Question)
+            message.setText(
+                f"Подготовлено к записи в базу {data.get('database', '')}: "
+                f"{int(data.get('record_count', 0))} записей."
             )
-            + "\n".join(preview_lines)
-            + "\n\nЗаписать эти изменения в ИРБИС?"
-        )
-        message.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        message.setDefaultButton(QMessageBox.StandardButton.No)
-        approved = message.exec() == QMessageBox.StandardButton.Yes
+            message.setInformativeText(
+                f"Новых меток: {int(data.get('markers_added', 0))}\n"
+                f"Уже существовало: {int(data.get('markers_already_present', 0))}\n"
+                f"Будет исправлено дублей: {int(data.get('duplicates_repaired', 0))}\n"
+                f"Конфликтов версий: {int(data.get('conflicts', 0))}\n\n"
+                f"Требуют ручной проверки и не будут записаны: {int(data.get('review_rows', 0))}\n\n"
+                + (
+                    "Rollback-копия будет создана перед записью.\n\n"
+                    if bool(data.get("create_backup", True))
+                    else "ВНИМАНИЕ: rollback-копия отключена в настройках.\n\n"
+                )
+                + "\n".join(preview_lines)
+                + "\n\nЗаписать эти изменения в ИРБИС?"
+            )
+            message.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            message.setDefaultButton(QMessageBox.StandardButton.No)
+            approved = message.exec() == QMessageBox.StandardButton.Yes
+        finally:
+            self._restore_progress_after_prompt(progress_was_visible)
         worker.confirm_preview(approved)
 
     def cancel_comparison(self) -> None:

@@ -27,6 +27,7 @@ from irbis_control.core.matcher import (
     compare_foreign_agents,
     database_record_from_tag_values,
     export_results,
+    normalize_author,
     normalize_publication_year,
     normalize_title,
     parse_match_rule,
@@ -34,6 +35,16 @@ from irbis_control.core.matcher import (
 
 
 class BoundaryMatchTests(unittest.TestCase):
+    def test_repeated_initial_before_full_name_is_the_same_author(self) -> None:
+        variants = ("Фаулз Д. Джон", "Фаулз, Джон", "Фаулз Джон")
+
+        self.assertEqual({"фаулз джон"}, {normalize_author(value) for value in variants})
+        record = DatabaseRecord(record_number=1, authors=[variants[0]])
+        matches = DatabaseIndex([record]).match_author_value(variants[1])
+
+        self.assertEqual(1, len(matches))
+        self.assertEqual(100.0, matches[0][2])
+
     def test_new_rules_match_independently_and_can_be_disabled(self) -> None:
         record = database_record_from_tag_values(
             1,

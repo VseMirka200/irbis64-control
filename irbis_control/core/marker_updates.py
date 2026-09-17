@@ -576,6 +576,7 @@ def remove_database_markers(
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
+    progress_cb: ProgressCallback | None = None,
 ) -> tuple[Path, int]:
     """Создаёт TXT-копию без стандартных и текущих настроенных пометок."""
     source = Path(source_path)
@@ -630,11 +631,17 @@ def remove_database_markers(
     text, encoding = _read_text_file_with_encoding(source)
     newline = _detect_newline(text)
     parts = re.split(r"(\r?\n\*{5}\s*(?:\r?\n|$))", text)
+    total_records = sum(bool(parts[index].strip()) for index in range(0, len(parts), 2))
+    if progress_cb:
+        progress_cb(5, f"TXT-база загружена: {total_records:,} записей")
     cleaned_records = 0
+    processed_records = 0
+    progress_step = max(1, total_records // 100)
     for part_index in range(0, len(parts), 2):
         raw_record = parts[part_index]
         if not raw_record.strip():
             continue
+        processed_records += 1
         cleaned, changed = _remove_markers_from_record(
             raw_record,
             newline,
@@ -645,6 +652,12 @@ def remove_database_markers(
         parts[part_index] = cleaned
         if changed:
             cleaned_records += 1
+        if progress_cb and (processed_records == total_records or processed_records % progress_step == 0):
+            percent = 5 + int(processed_records / max(total_records, 1) * 90)
+            progress_cb(
+                min(95, percent),
+                f"Очистка TXT-базы: {processed_records:,} из {total_records:,}",
+            )
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding=encoding, newline="") as output_file:

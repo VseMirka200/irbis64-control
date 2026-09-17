@@ -23,6 +23,10 @@ def _colors() -> dict[str, str]:
             "disabled": "#7f8993",
             "border": "#4a5663",
             "danger_border": "#765050",
+            "danger_button": "#c94b45",
+            "danger_button_hover": "#b8403a",
+            "danger_button_pressed": "#a43732",
+            "danger_button_disabled": "#7a4c4a",
             "button": "#30363d",
             "button_hover": "#39424c",
             "button_pressed": "#242a31",
@@ -43,6 +47,10 @@ def _colors() -> dict[str, str]:
         "disabled": "#6b6b6b",
         "border": "#cbd6e2",
         "danger_border": "#dfcaca",
+        "danger_button": "#c53b3b",
+        "danger_button_hover": "#b52f2f",
+        "danger_button_pressed": "#9f2828",
+        "danger_button_disabled": "#d8a2a2",
         "button": "#ffffff",
         "button_hover": "#f3f7fb",
         "button_pressed": "#e7eef5",
@@ -129,11 +137,23 @@ def common_button_stylesheet() -> str:
             border-color: #8fb9df;
         }
         QPushButton#dangerButton {
-            color: @error@;
-            background: @button@;
-            border-color: @danger_border@;
+            color: #ffffff;
+            background: @danger_button@;
+            border-color: @danger_button@;
         }
-        QPushButton#dangerButton:hover { background: @button_hover@; border-color: @error@; }
+        QPushButton#dangerButton:hover {
+            background: @danger_button_hover@;
+            border-color: @danger_button_hover@;
+        }
+        QPushButton#dangerButton:pressed {
+            background: @danger_button_pressed@;
+            border-color: @danger_button_pressed@;
+        }
+        QPushButton#dangerButton:disabled {
+            color: #eeeeee;
+            background: @danger_button_disabled@;
+            border-color: @danger_button_disabled@;
+        }
         QPushButton#disclosureButton {
             color: @accent@;
             background: transparent;
@@ -210,7 +230,23 @@ def main_window_stylesheet() -> str:
             background: @selection@;
             color: @text@;
         }
+        QTableWidget#manualReviewTable {
+            outline: none;
+            selection-background-color: @card@;
+            selection-color: @text@;
+        }
+        QTableWidget#manualReviewTable::item:selected,
+        QTableWidget#manualReviewTable::item:hover {
+            background: @card@;
+            color: @text@;
+            border: none;
+        }
         QProgressBar { min-height: 12px; max-height: 12px; }
+        QProgressBar#dialogProgress {
+            min-height: 22px;
+            max-height: 22px;
+            text-align: center;
+        }
         QProgressBar#mainProgress {
             min-height: 4px;
             max-height: 4px;
