@@ -22,8 +22,8 @@ DEFAULT_MARKER_SETTINGS: dict[str, MarkerSetting] = {
     **{key: False for key in EXTRA_MATCH_RULES},
     "use_isbn_matching": True,
     "use_title_fallback": True,
-    "use_fuzzy": False,
-    "fuzzy_threshold": 90,
+    "use_fuzzy": True,
+    "fuzzy_threshold": 92,
     "create_excel_report": True,
     "report_substances": True,
     "report_foreign_agents": True,
@@ -73,9 +73,6 @@ def load_marker_settings(path: str | Path) -> dict[str, MarkerSetting]:
             elif key.endswith("_field") and 1 <= value <= 999:
                 settings[key] = value
 
-    # Приблизительный поиск пока не меняет базу: интерфейс использует только точные совпадения.
-    settings["use_fuzzy"] = False
-    settings["fuzzy_threshold"] = 90
     return settings
 
 

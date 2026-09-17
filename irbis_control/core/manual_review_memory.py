@@ -9,7 +9,7 @@ from irbis_control.core.matcher import SOURCE_FOREIGN_AGENTS, normalize_author, 
 from irbis_control.core.models import ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,29 +91,7 @@ def review_identity(result: MatchResult) -> ReviewIdentity | None:
     )
 
 
-def load_approved_review_keys(path: str | Path) -> set[str]:
-    source = Path(path)
-    if not source.is_file():
-        return set()
-    try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return set()
-    if not isinstance(payload, dict):
-        return set()
-    approved = payload.get("approved", [])
-    if not isinstance(approved, list):
-        return set()
-    keys: set[str] = set()
-    for item in approved:
-        if isinstance(item, dict):
-            key = item.get("key")
-            if isinstance(key, str) and key:
-                keys.add(key)
-    return keys
-
-
-def _load_approved_rows(path: Path) -> dict[str, dict[str, str]]:
+def _load_memory_rows(path: Path, section: str) -> dict[str, dict[str, str]]:
     if not path.is_file():
         return {}
     try:
@@ -122,17 +100,42 @@ def _load_approved_rows(path: Path) -> dict[str, dict[str, str]]:
         return {}
     if not isinstance(payload, dict):
         return {}
-    approved = payload.get("approved", [])
-    if not isinstance(approved, list):
+    items = payload.get(section, [])
+    if not isinstance(items, list):
         return {}
     rows: dict[str, dict[str, str]] = {}
-    for item in approved:
+    for item in items:
         if not isinstance(item, dict):
             continue
         key = item.get("key")
         if isinstance(key, str) and key:
             rows[key] = {str(k): str(v) for k, v in item.items() if v is not None}
     return rows
+
+
+def _write_memory_rows(
+    target: Path,
+    approved: dict[str, dict[str, str]],
+    rejected: dict[str, dict[str, str]],
+) -> Path:
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "approved": sorted(approved.values(), key=lambda item: item.get("key", "")),
+        "rejected": sorted(rejected.values(), key=lambda item: item.get("key", "")),
+    }
+    return atomic_write_text(target, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_approved_review_keys(path: str | Path) -> set[str]:
+    return set(_load_memory_rows(Path(path), "approved"))
+
+
+def load_rejected_review_keys(path: str | Path) -> set[str]:
+    return set(_load_memory_rows(Path(path), "rejected"))
+
+
+def _load_approved_rows(path: Path) -> dict[str, dict[str, str]]:
+    return _load_memory_rows(path, "approved")
 
 
 def load_approved_review_rows(path: str | Path) -> list[dict[str, str]]:
@@ -148,6 +151,51 @@ def load_approved_review_rows(path: str | Path) -> list[dict[str, str]]:
     )
 
 
+def load_review_decision_rows(path: str | Path) -> list[dict[str, str]]:
+    source = Path(path)
+    rows: list[dict[str, str]] = []
+    for section, decision in (("approved", "Подтверждено"), ("rejected", "Отклонено")):
+        for row in _load_memory_rows(source, section).values():
+            item = dict(row)
+            item["decision"] = decision
+            item["decided_at"] = item.get("confirmed_at", item.get("rejected_at", ""))
+            rows.append(item)
+    return sorted(
+        rows,
+        key=lambda item: (
+            item.get("database_value", "").casefold(),
+            item.get("registry_value", "").casefold(),
+            item.get("decision", "").casefold(),
+        ),
+    )
+
+
+def remove_review_decision_keys(path: str | Path, keys: set[str] | list[str] | tuple[str, ...]) -> int:
+    target = Path(path)
+    approved = _load_memory_rows(target, "approved")
+    rejected = _load_memory_rows(target, "rejected")
+    requested = {str(key) for key in keys if str(key)}
+    removed = 0
+    for key in requested:
+        if approved.pop(key, None) is not None:
+            removed += 1
+        if rejected.pop(key, None) is not None:
+            removed += 1
+    if removed:
+        _write_memory_rows(target, approved, rejected)
+    return removed
+
+
+def clear_review_decision_memory(path: str | Path) -> int:
+    target = Path(path)
+    approved = _load_memory_rows(target, "approved")
+    rejected = _load_memory_rows(target, "rejected")
+    count = len(approved) + len(rejected)
+    if count:
+        _write_memory_rows(target, {}, {})
+    return count
+
+
 def remove_approved_review_keys(path: str | Path, keys: set[str] | list[str] | tuple[str, ...]) -> int:
     """Удаляет выбранные сохранённые подтверждения и возвращает число удалённых строк."""
     target = Path(path)
@@ -161,11 +209,7 @@ def remove_approved_review_keys(path: str | Path, keys: set[str] | list[str] | t
             removed += 1
     if not removed:
         return 0
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "approved": sorted(rows.values(), key=lambda item: item.get("key", "")),
-    }
-    atomic_write_text(target, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_memory_rows(target, rows, _load_memory_rows(target, "rejected"))
     return removed
 
 
@@ -175,8 +219,7 @@ def clear_approved_review_memory(path: str | Path) -> int:
     rows = _load_approved_rows(target)
     if not rows:
         return 0
-    payload = {"schema_version": SCHEMA_VERSION, "approved": []}
-    atomic_write_text(target, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_memory_rows(target, {}, _load_memory_rows(target, "rejected"))
     return len(rows)
 
 
@@ -208,17 +251,59 @@ def remember_approved_results(
             "confirmed_at": now,
         }
 
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "approved": sorted(rows.values(), key=lambda item: item.get("key", "")),
-    }
     try:
-        atomic_write_text(target, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        rejected = _load_memory_rows(target, "rejected")
+        for key in rows:
+            rejected.pop(key, None)
+        _write_memory_rows(target, rows, rejected)
     except OSError:
         # Невозможность сохранить удобную память решений не должна прерывать
         # саму проверку и постановку меток.
         return 0
     return added
+
+
+def remember_review_decisions(
+    path: str | Path,
+    results: list[MatchResult],
+    decisions: dict[int, bool],
+) -> tuple[int, int]:
+    """Запоминает подтверждённые и отклонённые пары для следующих запусков."""
+    target = Path(path)
+    approved = _load_memory_rows(target, "approved")
+    rejected = _load_memory_rows(target, "rejected")
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    saved_approved = 0
+    saved_rejected = 0
+    for result_index, decision in decisions.items():
+        if result_index < 0 or result_index >= len(results):
+            continue
+        identity = review_identity(results[result_index])
+        if identity is None:
+            continue
+        row = {
+            "key": identity.key,
+            "database_value": identity.database_value,
+            "registry_value": identity.registry_value,
+            "registry_number": identity.registry_number,
+            "source_type": identity.source_type,
+            "method": identity.method,
+        }
+        if decision:
+            saved_approved += identity.key not in approved
+            row["confirmed_at"] = now
+            approved[identity.key] = row
+            rejected.pop(identity.key, None)
+        else:
+            saved_rejected += identity.key not in rejected
+            row["rejected_at"] = now
+            rejected[identity.key] = row
+            approved.pop(identity.key, None)
+    try:
+        _write_memory_rows(target, approved, rejected)
+    except OSError:
+        return 0, 0
+    return saved_approved, saved_rejected
 
 
 def apply_remembered_confirmations(
@@ -250,3 +335,39 @@ def apply_remembered_confirmations(
         confirmation_note="Подтверждено автоматически по сохранённому решению оператора",
     )
     return len(decisions)
+
+
+def apply_remembered_decisions(
+    results: list[MatchResult],
+    summary: ComparisonSummary,
+    path: str | Path,
+) -> tuple[int, int]:
+    """Применяет ранее подтверждённые и отклонённые решения оператора."""
+    approved_keys = load_approved_review_keys(path)
+    rejected_keys = load_rejected_review_keys(path)
+    decisions: dict[int, bool] = {}
+    approved_count = 0
+    rejected_count = 0
+    for index, result in enumerate(results):
+        if result.status != "Возможное совпадение":
+            continue
+        identity = review_identity(result)
+        if identity is None:
+            continue
+        if identity.key in approved_keys:
+            decisions[index] = True
+            approved_count += 1
+        elif identity.key in rejected_keys:
+            decisions[index] = False
+            rejected_count += 1
+    if decisions:
+        from irbis_control.core.matcher import apply_manual_review_decisions
+
+        apply_manual_review_decisions(
+            results,
+            summary,
+            decisions,
+            confirmation_note="Подтверждено автоматически по сохранённому решению оператора",
+            rejection_note="Отклонено автоматически по сохранённому решению оператора",
+        )
+    return approved_count, rejected_count

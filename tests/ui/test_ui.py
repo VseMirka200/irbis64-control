@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -94,6 +95,8 @@ class UiTests(unittest.TestCase):
 
         self.assertFalse(window.advanced_options_toggle.isCheckable())
         self.assertFalse(window.advanced_settings_dialog.isVisible())
+        self.assertFalse(window.match_rules_editor.isHidden())
+        self.assertFalse(window.fuzzy_match_check.isHidden())
 
         self.assertFalse(window.connection_settings_button.isCheckable())
         self.assertTrue(window.connection_card.isHidden())
@@ -108,6 +111,24 @@ class UiTests(unittest.TestCase):
         self.assertEqual(settings_page.backup_check.isChecked(), defaults.create_database_backup)
         self.assertEqual(settings_page.auto_updates_check.isChecked(), defaults.check_updates_on_start)
         self.assertEqual(settings_page.theme_combo.currentData(), THEME_SYSTEM)
+
+    def test_comparison_options_include_saved_match_rules(self) -> None:
+        window = main_window.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        window.marker_settings["use_isbn_matching"] = False
+        window.marker_settings["use_title_fallback"] = True
+        window.marker_settings["use_fuzzy"] = True
+        window.marker_settings["fuzzy_threshold"] = 94
+        window.marker_settings["title_year"] = True
+
+        options = window._comparison_options()
+
+        self.assertFalse(options.use_isbn_matching)
+        self.assertTrue(options.use_title_fallback)
+        self.assertTrue(options.use_fuzzy)
+        self.assertEqual(94, options.fuzzy_threshold)
+        self.assertTrue(options.match_rules["title_year"])
 
     def test_window_geometry_is_restored_without_disabling_resize(self) -> None:
         first = main_window.MainWindow()
@@ -270,6 +291,37 @@ class UiTests(unittest.TestCase):
                 finally:
                     window.close()
                     window.deleteLater()
+
+    def test_review_memory_dialog_lists_approved_and_rejected_decisions(self) -> None:
+        memory_path = self.folder / "review_memory.json"
+        common = {
+            "database_value": "Фаулз Джон",
+            "registry_value": "Джон Фаулз",
+            "registry_number": "1",
+            "method": "Автор",
+        }
+        memory_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "approved": [
+                        {"key": "approved", "confirmed_at": "2026-09-18T10:00:00+00:00", **common}
+                    ],
+                    "rejected": [
+                        {"key": "rejected", "rejected_at": "2026-09-18T11:00:00+00:00", **common}
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        dialog = dialogs.ConfirmationMemoryDialog(memory_path)
+        self.addCleanup(dialog.deleteLater)
+        self.addCleanup(dialog.close)
+
+        decisions = {dialog.table.item(row, 4).text() for row in range(dialog.table.rowCount())}
+        self.assertEqual({"Подтверждено", "Отклонено"}, decisions)
+        self.assertEqual(7, dialog.table.columnCount())
 
     def test_progress_dialog_shows_percent_and_locks_close_while_running(self) -> None:
         dialog = dialogs.ProgressDialog("Выполнение", None)

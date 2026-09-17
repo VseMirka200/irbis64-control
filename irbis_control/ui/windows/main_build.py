@@ -151,6 +151,7 @@ class MainWindowBuildMixin:
         self._marker_autosave_timer.setSingleShot(True)
         self._marker_autosave_timer.timeout.connect(self._autosave_marker_settings)
         self.match_rules_editor.changed.connect(self._queue_marker_settings_autosave)
+        self.fuzzy_match_check.toggled.connect(self._queue_marker_settings_autosave)
         for widget in (
             self.substance_marker_check,
             self.foreign_marker_check,
@@ -566,13 +567,18 @@ class MainWindowBuildMixin:
         self.match_settings_card = match_settings_card
         self.match_rules_editor = MatchRulesEditor(match_settings_card)
         self.match_rules_editor.hide()
+        self.fuzzy_match_check = QCheckBox("Предлагать похожие названия с опечатками для ручной проверки")
+        self.fuzzy_match_check.hide()
+        match_settings_card.body.addWidget(self.fuzzy_match_check)
         match_order = QLabel(
             "1. Точное совпадение по ISBN.\n"
             "2. Точное название книги и фамилия единственного автора.\n"
-            "3. Если автора нет или их несколько — точное название, издательство и год."
+            "3. Если автора нет или их несколько — точное название, издательство и год.\n"
+            "4. Опечатки в названии предлагаются только для ручной проверки."
         )
         match_order.setObjectName("cardDescription")
         match_order.setWordWrap(True)
+        self.match_order_label = match_order
         match_settings_card.body.addWidget(match_order)
         files_root.addWidget(match_settings_card)
 

@@ -36,9 +36,9 @@ from PyQt6.QtWidgets import (
 
 from irbis_control import APP_TITLE as APP_TITLE
 from irbis_control.core.manual_review_memory import (
-    clear_approved_review_memory,
-    load_approved_review_rows,
-    remove_approved_review_keys,
+    clear_review_decision_memory,
+    load_review_decision_rows,
+    remove_review_decision_keys,
     review_identity,
 )
 from irbis_control.core.models import MatchResult
@@ -240,7 +240,7 @@ class ManualMatchReviewDialog(QDialog):
             "Щёлкните по «Файл / лист / строка» или дважды по любой ячейке записи, чтобы открыть "
             "исходный Excel сразу на нужной строке. Если один и тот же автор найден в нескольких "
             "записях и относится к тому же кандидату реестра, подтверждение одной строки сразу "
-            "подтвердит всю такую группу. Подтверждение также запоминается для следующих запусков."
+            "подтвердит всю такую группу. Подтверждения и отклонения запоминаются для следующих запусков."
         )
         description.setObjectName("cardDescription")
         description.setWordWrap(True)
@@ -486,13 +486,13 @@ class ManualMatchReviewDialog(QDialog):
 
 
 class ConfirmationMemoryDialog(QDialog):
-    """Просмотр и удаление сохранённых ручных подтверждений."""
+    """Просмотр и удаление сохранённых ручных решений."""
 
     def __init__(self, memory_path: str | Path, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._memory_path = Path(memory_path)
         self._row_keys: list[str] = []
-        self.setWindowTitle("Память подтверждений")
+        self.setWindowTitle("Память решений")
         self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
         self.resize(1050, 560)
         self.setMinimumSize(760, 420)
@@ -501,14 +501,14 @@ class ConfirmationMemoryDialog(QDialog):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(7)
 
-        title = QLabel("Сохранённые подтверждения")
+        title = QLabel("Сохранённые решения")
         title.setObjectName("dialogTitle")
         root.addWidget(title)
 
         description = QLabel(
-            "Здесь хранятся соответствия, которые вы раньше подтвердили вручную. "
-            "При следующей проверке программа автоматически применяет их к такому же автору "
-            "и тому же кандидату реестра. Удалённое соответствие снова будет показано для ручной проверки."
+            "Здесь хранятся соответствия, которые вы раньше подтвердили или отклонили вручную. "
+            "При следующей проверке программа автоматически применяет то же решение к такому же автору "
+            "и кандидату реестра. Удалённое решение снова потребует ручной проверки."
         )
         description.setObjectName("cardDescription")
         description.setWordWrap(True)
@@ -523,7 +523,8 @@ class ConfirmationMemoryDialog(QDialog):
             "Подтверждённый кандидат",
             "№ реестра",
             "Способ совпадения",
-            "Подтверждено",
+            "Решение",
+            "Дата решения",
             "Действие",
         ]
         self.table = CopyableTableWidget(0, len(headers))
@@ -541,8 +542,9 @@ class ConfirmationMemoryDialog(QDialog):
         header.resizeSection(1, 260)
         header.resizeSection(2, 110)
         header.resizeSection(3, 240)
-        header.resizeSection(4, 170)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.resizeSection(4, 130)
+        header.resizeSection(5, 170)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)
         root.addWidget(self.table, 1)
 
         buttons = QHBoxLayout()
@@ -577,7 +579,7 @@ class ConfirmationMemoryDialog(QDialog):
         return parsed.astimezone().strftime("%d.%m.%Y %H:%M")
 
     def _refresh(self) -> None:
-        rows = load_approved_review_rows(self._memory_path)
+        rows = load_review_decision_rows(self._memory_path)
         self._row_keys = [row.get("key", "") for row in rows]
         self.table.clearContents()
         self.table.setRowCount(len(rows))
@@ -588,7 +590,8 @@ class ConfirmationMemoryDialog(QDialog):
                 row.get("registry_value", ""),
                 row.get("registry_number", ""),
                 row.get("method", ""),
-                self._format_confirmed_at(row.get("confirmed_at", "")),
+                row.get("decision", ""),
+                self._format_confirmed_at(row.get("decided_at", "")),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -598,13 +601,13 @@ class ConfirmationMemoryDialog(QDialog):
 
             delete_button = QPushButton("Удалить")
             delete_button.setObjectName("dangerButton")
-            delete_button.setToolTip("Удалить это сохранённое подтверждение")
+            delete_button.setToolTip("Удалить это сохранённое решение")
             delete_button.clicked.connect(lambda _checked=False, key=row.get("key", ""): self._delete_keys({key}))
-            self.table.setCellWidget(table_row, 5, delete_button)
+            self.table.setCellWidget(table_row, 6, delete_button)
 
         self.table.resizeRowsToContents()
         count = len(rows)
-        self.count_label.setText(f"Сохранено подтверждений: {count}")
+        self.count_label.setText(f"Сохранено решений: {count}")
         self.delete_selected_button.setEnabled(count > 0)
         self.clear_button.setEnabled(count > 0)
 
@@ -613,9 +616,9 @@ class ConfirmationMemoryDialog(QDialog):
         if not keys:
             return
         try:
-            remove_approved_review_keys(self._memory_path, keys)
+            remove_review_decision_keys(self._memory_path, keys)
         except OSError as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось изменить память подтверждений:\n{exc}")
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось изменить память решений:\n{exc}")
             return
         self._refresh()
 
@@ -633,17 +636,17 @@ class ConfirmationMemoryDialog(QDialog):
         answer = QMessageBox.question(
             self,
             APP_TITLE,
-            "Удалить все сохранённые подтверждения?\n\n"
-            "При следующей проверке эти совпадения снова потребуют ручного подтверждения.",
+            "Удалить все сохранённые решения?\n\n"
+            "При следующей проверке эти совпадения снова потребуют ручного решения.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            clear_approved_review_memory(self._memory_path)
+            clear_review_decision_memory(self._memory_path)
         except OSError as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось очистить память подтверждений:\n{exc}")
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось очистить память решений:\n{exc}")
             return
         self._refresh()
 

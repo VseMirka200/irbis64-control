@@ -15,11 +15,13 @@ from irbis_control.core.matcher import (
     CancelCallback,
     ProgressCallback,
     _author_identity,
+    _author_order_variants,
     _cancelled,
     _extract_subfield,
-    author_surname,
+    author_surnames,
     extract_isbns,
     fuzz,
+    isbn_match_keys,
     match_rule_needs_review,
     normalize_author,
     normalize_publication_year,
@@ -241,7 +243,7 @@ class DatabaseIndex:
         self.publications: dict[int, list[tuple[str, str]]] = {}
 
         for record in records:
-            for surname in {author_surname(author) for author in record.authors} - {""}:
+            for surname in {surname for author in record.authors for surname in author_surnames(author)}:
                 self.by_author_surname[surname].append(record)
             for organization in record.organizations:
                 normalized = normalize_author(organization)
@@ -255,7 +257,7 @@ class DatabaseIndex:
                 for item in record.publication
             ]
             for isbn in record.isbns:
-                for normalized in extract_isbns(isbn):
+                for normalized in isbn_match_keys(isbn):
                     self.by_isbn[normalized].append(record)
             for title in record.titles:
                 plain_title = normalize_author(title)
@@ -273,18 +275,28 @@ class DatabaseIndex:
         return match[0] if match is not None else None
 
     @staticmethod
+    def _matched_author_is_primary(record: DatabaseRecord, matched_author: str) -> bool:
+        if not record.primary_authors:
+            return True
+        matched_variants = _author_order_variants(matched_author)
+        return any(matched_variants & _author_order_variants(author) for author in record.primary_authors)
+
+    @staticmethod
     def _matching_author(entry_author: str, record: DatabaseRecord) -> tuple[str, str] | None:
         excel_identity = _author_identity(entry_author)
         if not excel_identity or not record.authors:
             return None
         excel_surname, excel_initials = excel_identity
         entry_normalized = normalize_author(entry_author)
+        entry_order_variants = _author_order_variants(entry_author)
 
         for author in record.authors:
             record_identity = _author_identity(author)
             if not record_identity:
                 continue
             record_surname, record_initials = record_identity
+            if entry_order_variants & _author_order_variants(author):
+                return "exact", author
             if record_surname != excel_surname:
                 continue
             if normalize_author(author) == entry_normalized:
@@ -300,11 +312,18 @@ class DatabaseIndex:
 
     def match_author_value(self, value: str) -> list[tuple[DatabaseRecord, str, float, str]]:
         """Сопоставляет автора по тем же правилам, что используются для строк веществ."""
-        surname = author_surname(value)
-        if not surname:
+        surnames = author_surnames(value)
+        if not surnames:
             return []
         matches: list[tuple[DatabaseRecord, str, float, str]] = []
-        for record in self.by_author_surname.get(surname, []):
+        candidates: list[DatabaseRecord] = []
+        seen: set[int] = set()
+        for surname in surnames:
+            for record in self.by_author_surname.get(surname, []):
+                if record.record_number not in seen:
+                    seen.add(record.record_number)
+                    candidates.append(record)
+        for record in candidates:
             match = self._matching_author(value, record)
             if match is None:
                 continue
@@ -336,10 +355,15 @@ class DatabaseIndex:
     def _author_similarity(entry_author: str, record: DatabaseRecord) -> float:
         if not entry_author or not record.authors:
             return 100.0
-        entry_normalized = normalize_author(entry_author)
+        entry_variants = _author_order_variants(entry_author)
         if fuzz is None:
             return 100.0 if DatabaseIndex._author_matches(entry_author, record) else 0.0
-        return max(fuzz.token_set_ratio(entry_normalized, normalize_author(author)) for author in record.authors)
+        return max(
+            fuzz.token_set_ratio(entry_variant, record_variant)
+            for entry_variant in entry_variants
+            for author in record.authors
+            for record_variant in _author_order_variants(author)
+        )
 
     def _match_isbn(self, entry: ExcelEntry, normalized_isbns: list[str]) -> list[MatchResult]:
         records: list[DatabaseRecord] = []
@@ -349,18 +373,33 @@ class DatabaseIndex:
                 if record.record_number not in seen:
                     seen.add(record.record_number)
                     records.append(record)
-        return [
-            MatchResult(
-                status="Совпадение",
-                method="ISBN",
-                confidence=100.0,
-                excel=entry,
-                database=record,
-                source_type=SOURCE_SUBSTANCES,
-                matched_value=entry.isbn,
+        results: list[MatchResult] = []
+        entry_title = normalize_title(entry.title)
+        for record in records:
+            title_conflict = bool(
+                entry_title
+                and record.titles
+                and entry_title not in {normalize_title(title) for title in record.titles}
             )
-            for record in records
-        ]
+            author_conflict = bool(entry.author and record.authors and self._matching_author(entry.author, record) is None)
+            conflicting_metadata = title_conflict and author_conflict
+            results.append(
+                MatchResult(
+                    status="Возможное совпадение" if conflicting_metadata else "Совпадение",
+                    method="ISBN с противоречием в названии и авторе" if conflicting_metadata else "ISBN",
+                    confidence=95.0 if conflicting_metadata else 100.0,
+                    excel=entry,
+                    database=record,
+                    note=(
+                        "ISBN совпал, но название и автор отличаются — требуется ручная проверка"
+                        if conflicting_metadata
+                        else ""
+                    ),
+                    source_type=SOURCE_SUBSTANCES,
+                    matched_value=entry.isbn,
+                )
+            )
+        return results
 
     def _match_fuzzy(
         self,
@@ -447,7 +486,7 @@ class DatabaseIndex:
         normalized_isbns: set[str],
         normalized_title: str,
     ) -> bool:
-        if "isbn" in fields and not any(normalized_isbns.intersection(extract_isbns(value)) for value in record.isbns):
+        if "isbn" in fields and not any(normalized_isbns.intersection(isbn_match_keys(value)) for value in record.isbns):
             return False
         if "title" in fields and normalized_title not in {normalize_title(value) for value in record.titles}:
             return False
@@ -476,7 +515,12 @@ class DatabaseIndex:
         if "title" in fields:
             pools.append(list(self.by_title.get(normalized_title, [])))
         if "author" in fields:
-            pools.append(list(self.by_author_surname.get(author_surname(entry.author), [])))
+            author_records = [
+                record
+                for surname in author_surnames(entry.author)
+                for record in self.by_author_surname.get(surname, [])
+            ]
+            pools.append(author_records)
         if not pools:
             return []
 
@@ -516,8 +560,6 @@ class DatabaseIndex:
         for _key, label, fields in enabled_rules:
             if not all(entry_values[field] for field in fields):
                 continue
-            needs_review = match_rule_needs_review(fields)
-            confidence = 90.0 if needs_review else 100.0
             for record in self._rule_candidates(entry, fields, normalized_isbns, normalized_title):
                 if not self._record_matches_rule(
                     entry,
@@ -527,13 +569,24 @@ class DatabaseIndex:
                     normalized_title,
                 ):
                     continue
+                author_match = self._matching_author(entry.author, record) if "author" in fields else None
+                secondary_author = bool(
+                    author_match is not None
+                    and not self._matched_author_is_primary(record, author_match[1])
+                )
+                needs_review = match_rule_needs_review(fields) or secondary_author
+                confidence = 90.0 if needs_review else 100.0
                 result = MatchResult(
                     status="Возможное совпадение" if needs_review else "Совпадение",
                     method=label,
                     confidence=confidence,
                     excel=entry,
                     database=record,
-                    note="Требуется ручная проверка сочетания полей" if needs_review else "",
+                    note=(
+                        "Совпадение найдено по дополнительному автору — требуется ручная проверка"
+                        if secondary_author
+                        else "Требуется ручная проверка сочетания полей" if needs_review else ""
+                    ),
                     source_type=SOURCE_SUBSTANCES,
                     matched_value=entry.title or entry.author or entry.isbn,
                 )
@@ -548,15 +601,21 @@ class DatabaseIndex:
         results: list[MatchResult] = []
         for record in self.by_title.get(normalized_title, []):
             record_has_authors = bool(record.authors)
-            author_match_kind = self._author_match_kind(entry.author, record) if entry.author else None
+            author_match = self._matching_author(entry.author, record) if entry.author else None
+            author_match_kind = author_match[0] if author_match is not None else None
             if entry.author and record_has_authors:
                 if author_match_kind is None:
                     continue
                 if author_match_kind == "exact":
-                    status = "Совпадение"
-                    method = "Название и автор"
-                    confidence = 100.0
-                    note = ""
+                    secondary_author = not self._matched_author_is_primary(record, author_match[1])
+                    status = "Возможное совпадение" if secondary_author else "Совпадение"
+                    method = "Название и дополнительный автор" if secondary_author else "Название и автор"
+                    confidence = 90.0 if secondary_author else 100.0
+                    note = (
+                        "Автор найден в дополнительном поле — проверить роль вручную"
+                        if secondary_author
+                        else ""
+                    )
                 else:
                     status = "Возможное совпадение"
                     method = "Название и неполные данные автора"
@@ -618,7 +677,7 @@ class DatabaseIndex:
         use_title_fallback = options.use_title_fallback
         use_fuzzy = options.use_fuzzy
         fuzzy_threshold = options.fuzzy_threshold
-        normalized_isbns = extract_isbns(entry.isbn)
+        normalized_isbns = sorted(isbn_match_keys(entry.isbn))
         if use_isbn_matching:
             isbn_results = self._match_isbn(entry, normalized_isbns)
             if isbn_results:

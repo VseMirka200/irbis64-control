@@ -45,6 +45,115 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual(1, len(matches))
         self.assertEqual(100.0, matches[0][2])
 
+    def test_full_author_name_matches_in_natural_and_catalogue_order(self) -> None:
+        for catalogue_name, natural_name in (
+            ("Фаулз Джон", "Джон Фаулз"),
+            ("Фаулз Джон Роберт", "Джон Роберт Фаулз"),
+        ):
+            with self.subTest(catalogue_name=catalogue_name):
+                record = DatabaseRecord(record_number=1, authors=[catalogue_name])
+                matches = DatabaseIndex([record]).match_author_value(natural_name)
+
+                self.assertEqual(1, len(matches))
+                self.assertEqual(100.0, matches[0][2])
+
+    def test_isbn_10_and_isbn_13_are_equivalent(self) -> None:
+        record = DatabaseRecord(record_number=1, isbns=["978-0-306-40615-7"])
+        entry = ExcelEntry(1, "books.xlsx", "Книги", 2, isbn="0-306-40615-2")
+
+        result = DatabaseIndex([record]).match(entry, True, True, False, 90)[0]
+
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual("ISBN", result.method)
+
+    def test_isbn_with_conflicting_title_and_author_requires_review(self) -> None:
+        record = DatabaseRecord(
+            record_number=1,
+            isbns=["978-0-306-40615-7"],
+            titles=["Другая книга"],
+            authors=["Петров Петр"],
+        )
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            isbn="978-0-306-40615-7",
+            title="Коллекционер",
+            author="Фаулз Джон",
+        )
+
+        result = DatabaseIndex([record]).match(entry, True, True, False, 90)[0]
+
+        self.assertEqual("Возможное совпадение", result.status)
+        self.assertEqual(95.0, result.confidence)
+        self.assertIn("противоречием", result.method)
+
+    def test_fuzzy_title_match_is_only_a_manual_review_candidate(self) -> None:
+        record = DatabaseRecord(record_number=1, titles=["Коллекционер"], authors=["Фаулз Джон"])
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            title="Колекционер",
+            author="Фаулз, Джон",
+        )
+
+        result = DatabaseIndex([record]).match(entry, True, True, True, 92)[0]
+
+        self.assertEqual("Возможное совпадение", result.status)
+        self.assertIn("Приблизительно", result.method)
+        self.assertEqual({}, build_markers_by_record([result]))
+
+    def test_publisher_legal_form_does_not_prevent_exact_publication_match(self) -> None:
+        record = DatabaseRecord(
+            record_number=1,
+            titles=["Коллекционер"],
+            publication=["^CИздательство Эксмо^D2024"],
+        )
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            title="Коллекционер",
+            publisher="ООО «Эксмо»",
+            year="2024",
+        )
+
+        result = DatabaseIndex([record]).match(entry, True, True, False, 90)[0]
+
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual("Название + издательство + год", result.method)
+
+    def test_secondary_author_requires_manual_review(self) -> None:
+        record = database_record_from_tag_values(
+            1,
+            [
+                (200, "^AКоллекционер"),
+                (700, "^AФаулз^BДжон"),
+                (702, "^AИванов^BИван"),
+            ],
+        )
+        secondary_entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            title="Коллекционер",
+            author="Иванов Иван",
+        )
+        primary_entry = replace(secondary_entry, author="Фаулз Джон")
+
+        secondary = DatabaseIndex([record]).match(secondary_entry, True, True, False, 90)[0]
+        primary = DatabaseIndex([record]).match(primary_entry, True, True, False, 90)[0]
+
+        self.assertEqual("Возможное совпадение", secondary.status)
+        self.assertIn("дополнительный автор", secondary.method)
+        self.assertEqual({}, build_markers_by_record([secondary]))
+        self.assertEqual("Совпадение", primary.status)
+
     def test_new_rules_match_independently_and_can_be_disabled(self) -> None:
         record = database_record_from_tag_values(
             1,

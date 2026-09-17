@@ -323,8 +323,8 @@ class MarkerSettingsDialog(QDialog):
             **{key: bool(self.settings.get(key, False)) for key in EXTRA_MATCH_RULES},
             "use_isbn_matching": self.isbn_match_check.isChecked(),
             "use_title_fallback": self.title_fallback_check.isChecked(),
-            "use_fuzzy": False,
-            "fuzzy_threshold": 90,
+            "use_fuzzy": bool(self.settings.get("use_fuzzy", True)),
+            "fuzzy_threshold": int(self.settings.get("fuzzy_threshold", 92)),
             "create_excel_report": bool(self.settings.get("create_excel_report", True)),
             "report_substances": bool(self.settings.get("report_substances", True)),
             "report_foreign_agents": bool(self.settings.get("report_foreign_agents", True)),
@@ -851,6 +851,7 @@ class MainWindow(
         if not hasattr(self, "substance_marker_edit"):
             return
         self.match_rules_editor.set_values(self.marker_settings)
+        self.fuzzy_match_check.setChecked(bool(self.marker_settings["use_fuzzy"]))
         self.create_excel_report_check.setChecked(bool(self.marker_settings["create_excel_report"]))
         self.report_substances_check.setChecked(bool(self.marker_settings["report_substances"]))
         self.report_foreign_agents_check.setChecked(bool(self.marker_settings["report_foreign_agents"]))
@@ -897,10 +898,8 @@ class MainWindow(
     def _marker_values_from_ui(self) -> dict[str, str | int | bool]:
         return {
             **self.match_rules_editor.values(),
-            "use_isbn_matching": True,
-            "use_title_fallback": True,
-            "use_fuzzy": False,
-            "fuzzy_threshold": 90,
+            "use_fuzzy": self.fuzzy_match_check.isChecked(),
+            "fuzzy_threshold": 92,
             "create_excel_report": self.create_excel_report_check.isChecked(),
             "report_substances": self.report_substances_check.isChecked(),
             "report_foreign_agents": self.report_foreign_agents_check.isChecked(),

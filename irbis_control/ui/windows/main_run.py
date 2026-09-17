@@ -8,6 +8,7 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMessageBox
 
 from irbis_control import APP_TITLE
+from irbis_control.core.matcher import EXTRA_MATCH_RULES
 from irbis_control.core.models import ComparisonOptions, ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.ui.components.dialogs import ManualMatchReviewDialog
@@ -15,6 +16,15 @@ from irbis_control.ui.services.workers import ComparisonWorker, DirectIrbisCompa
 
 
 class MainWindowRunMixin:
+    def _comparison_options(self) -> ComparisonOptions:
+        return ComparisonOptions(
+            use_isbn_matching=bool(self.marker_settings.get("use_isbn_matching", True)),
+            use_title_fallback=bool(self.marker_settings.get("use_title_fallback", True)),
+            use_fuzzy=bool(self.marker_settings.get("use_fuzzy", True)),
+            fuzzy_threshold=int(self.marker_settings.get("fuzzy_threshold", 92)),
+            match_rules={key: bool(self.marker_settings.get(key, False)) for key in EXTRA_MATCH_RULES},
+        )
+
     def _hide_progress_for_prompt(self) -> bool:
         """Временно освобождает модальность для диалога, требующего ответа пользователя."""
         was_visible = self.progress_dialog.isVisible()
@@ -525,12 +535,7 @@ class MainWindowRunMixin:
             "sort": str(self.marker_settings["report_sort"]),
             "report_only": bool(self.marker_settings["report_only"]),
         }
-        comparison_options = ComparisonOptions(
-            use_isbn_matching=True,
-            use_title_fallback=True,
-            use_fuzzy=False,
-            fuzzy_threshold=90,
-        )
+        comparison_options = self._comparison_options()
 
         self.thread = QThread(self)
         if direct_mode:

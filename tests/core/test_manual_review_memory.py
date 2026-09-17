@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import tempfile
+import unittest
 from pathlib import Path
 
 from irbis_control.core.manual_review_memory import (
     apply_remembered_confirmations,
+    apply_remembered_decisions,
     load_approved_review_keys,
+    load_review_decision_rows,
     remember_approved_results,
+    remember_review_decisions,
     review_identity,
 )
 from irbis_control.core.matcher import SOURCE_FOREIGN_AGENTS
@@ -153,3 +158,43 @@ def test_memory_rows_can_be_listed_and_removed(tmp_path: Path) -> None:
     assert clear_approved_review_memory(memory_path) == 1
     assert load_approved_review_rows(memory_path) == []
     assert load_approved_review_keys(memory_path) == set()
+
+
+class ReviewDecisionMemoryTests(unittest.TestCase):
+    def test_approved_and_rejected_decisions_are_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            memory_path = Path(folder) / "manual_review_confirmations.json"
+            first_run = [
+                _result(394, "Шпионский роман", registry_number="276"),
+                _result(395, "Другая книга", registry_number="999"),
+            ]
+
+            self.assertEqual((1, 1), remember_review_decisions(memory_path, first_run, {0: True, 1: False}))
+            self.assertEqual(
+                {"Подтверждено", "Отклонено"},
+                {row["decision"] for row in load_review_decision_rows(memory_path)},
+            )
+
+            later_results = [
+                _result(401, "Новая книга", registry_number="276"),
+                _result(402, "Ещё одна книга", registry_number="999"),
+            ]
+            summary = _summary(2)
+
+            self.assertEqual((1, 1), apply_remembered_decisions(later_results, summary, memory_path))
+            self.assertEqual("Совпадение", later_results[0].status)
+            self.assertEqual("Отклонено вручную", later_results[1].status)
+            self.assertIn("сохранённому решению", later_results[1].note)
+            self.assertEqual(0, summary.review_rows)
+
+    def test_new_decision_replaces_opposite_saved_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            memory_path = Path(folder) / "manual_review_confirmations.json"
+            result = _result(394, "Шпионский роман")
+
+            remember_review_decisions(memory_path, [result], {0: False})
+            remember_review_decisions(memory_path, [result], {0: True})
+
+            rows = load_review_decision_rows(memory_path)
+            self.assertEqual(1, len(rows))
+            self.assertEqual("Подтверждено", rows[0]["decision"])
