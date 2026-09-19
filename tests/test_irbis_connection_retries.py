@@ -21,6 +21,7 @@ class RetryClient(IrbisClient):
         self.registered = True
 
 
+class IrbisConnectionRetryTests(unittest.TestCase):
     def test_temporary_failure_is_retried(self) -> None:
         client = RetryClient(failures=2)
 
