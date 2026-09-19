@@ -1438,12 +1438,8 @@ COMMON_MATCH_HEADERS = [
 
 SUBSTANCE_MATCH_HEADERS = [
     *COMMON_MATCH_HEADERS,
-    "Способ совпадения",
-    "Совпавшее значение",
-    "Файл перечня веществ",
-    "Лист",
-    "Строка",
-    "Регистрационный номер из перечня",
+    "Почему добавлено",
+    "Файл-источник",
 ]
 
 FOREIGN_AGENT_MATCH_HEADERS = [
@@ -1546,14 +1542,20 @@ def _substance_match_row(
     record: DatabaseRecord,
     record_results: list[MatchResult],
 ) -> list[Any]:
+    reasons = []
+    for result in record_results:
+        method = safe_text(result.method).strip()
+        matched_value = safe_text(result.matched_value).strip()
+        reasons.append(
+            f"{method} — {matched_value}" if method and matched_value else method or matched_value
+        )
     return [
         *_base_txt_row(number, record),
-        _parallel_join(result.method for result in record_results),
-        _parallel_join(result.matched_value for result in record_results),
-        _parallel_join(Path(result.excel.source_file).name for result in record_results),
-        _parallel_join(result.excel.sheet_name for result in record_results),
-        _parallel_join(result.excel.row_number for result in record_results),
-        _parallel_join(result.excel.registration_number for result in record_results),
+        _unique_join(reasons, "\n"),
+        _unique_join(
+            (Path(result.excel.source_file).name for result in record_results),
+            "\n",
+        ),
     ]
 
 
@@ -1776,8 +1778,7 @@ def export_results(
             row_fill_color="E2F0D9",
             widths={
                 "A": 7, "B": 34, "C": 52, "D": 24, "E": 24, "F": 42,
-                "G": 24, "H": 28, "I": 42, "J": 34, "K": 22, "L": 12,
-                "M": 30,
+                "G": 24, "H": 48, "I": 34,
             },
             active=not sheet_created,
             cancel_cb=cancel_cb,
@@ -2001,7 +2002,13 @@ def _normalized_marker_text(value: str) -> str:
 def _foreign_marker_identity(value: str) -> str | None:
     """Ключ короткой авторской метки ^AI^@... для удаления повторов.
 
-    Возвращаем только нормализованное имя после ^AI^@. Это позволяет
+    Если в метке явно указан псевдоним, используем его как идентификатор
+    персоны. В реестре встречаются дубли строк с опечаткой в настоящей
+    фамилии, но с одним и тем же псевдонимом (например, ЧХАРТИШВИЛИ и
+    ЧХАРТИШВИЛЛИ при псевдониме БОРИС АКУНИН). Для библиотечной записи это
+    одна и та же отметка, а не два разных иностранных агента.
+
+    В остальных случаях возвращаем нормализованное имя после ^AI^@. Это позволяет
     схлопывать два визуально одинаковых повторения даже при скрытых Unicode
     символах, попавших из реестра/Excel. Другие значения поля 333 не трогаем.
     """
@@ -2012,6 +2019,16 @@ def _foreign_marker_identity(value: str) -> str | None:
     name = normalized[len(prefix):].strip()
     if not name:
         return None
+    pseudonym_match = re.search(r"\(\s*псевдоним\s*:\s*([^)]+)\)", name, flags=re.IGNORECASE)
+    if pseudonym_match:
+        pseudonym = re.sub(
+            r"[^0-9a-zа-я]+",
+            "",
+            pseudonym_match.group(1),
+            flags=re.IGNORECASE,
+        )
+        if pseudonym:
+            return pseudonym
     # Пунктуация и пробелы в ФИО/псевдониме не должны превращать одного
     # автора в две отдельные метки. Буквы и цифры сохраняем.
     return re.sub(r"[^0-9a-zа-я]+", "", name, flags=re.IGNORECASE)
@@ -2070,11 +2087,42 @@ def _modify_matched_record(
         if field_markers is not None
         else ((marker_field, marker) for marker in markers_333)
     )
-    markers = list(dict.fromkeys(
-        (int(field_number), marker.strip())
-        for field_number, marker in requested_markers
-        if marker and marker.strip()
-    ))
+    markers: list[tuple[int, str]] = []
+    marker_keys: set[tuple[int, str]] = set()
+    for field_number, marker in requested_markers:
+        marker = marker.strip() if marker else ""
+        if not marker:
+            continue
+        identity = _foreign_marker_identity(marker)
+        key = (
+            int(field_number),
+            f"foreign:{identity}" if identity is not None else _normalized_marker_text(marker),
+        )
+        if key in marker_keys:
+            continue
+        marker_keys.add(key)
+        markers.append((int(field_number), marker))
+    requested_foreign_keys = {
+        (field_number, identity)
+        for field_number, marker in markers
+        if (identity := _foreign_marker_identity(marker)) is not None
+    }
+    if requested_foreign_keys:
+        seen_foreign: set[tuple[int, str]] = set()
+        deduped_lines: list[str] = []
+        for line in lines:
+            field_number = _field_number(line)
+            match = re.match(r"^\s*#\d{1,3}:\s*(.*?)\s*$", line)
+            identity = _foreign_marker_identity(match.group(1)) if match else None
+            pair = (field_number, identity) if field_number is not None and identity is not None else None
+            if pair is not None and pair in requested_foreign_keys:
+                if pair in seen_foreign:
+                    changed = True
+                    continue
+                seen_foreign.add(pair)
+            deduped_lines.append(line)
+        lines = deduped_lines
+
     # Если в TXT уже лежит несколько одинаковых повторений нашей метки,
     # исправляем их так же, как в прямом режиме ИРБИС.
     for field_number, marker in markers:

@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from irbis_bridge import IrbisClient, IrbisError, apply_modified_snapshot, create_irbis_snapshot, replace_txt_storage
+from ui_locale import install_russian_ui
 
 APP_TITLE = "ИРБИС64 Контроль — подключение к базе"
 
@@ -427,6 +428,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 def main() -> int:
     args = parse_args(sys.argv[1:])
     app = QApplication(sys.argv)
+    install_russian_ui(app)
     app.setApplicationName("IRBIS64ControlDB")
     app.setOrganizationName("IRBIS64Control")
     window = ConnectorWindow(args.database, args.modified)

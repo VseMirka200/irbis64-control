@@ -8,6 +8,7 @@ import sys
 import traceback
 import urllib.error
 import urllib.request
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from threading import Event
@@ -66,6 +67,7 @@ from matcher import (
 )
 from result_diff import ResultDiffRow, ResultDiffSummary, compare_result_files, compare_text_files
 from irbis_bridge import IrbisClient, IrbisError, IrbisField, IrbisRecord, apply_modified_snapshot, create_irbis_snapshot, load_manifest
+from ui_locale import install_russian_ui
 
 
 def resource_path(*parts: str) -> str:
@@ -128,6 +130,10 @@ def database_connector_config_path() -> Path:
 
 def window_state_path() -> Path:
     return app_data_dir() / "window_state.json"
+
+
+def run_journal_path() -> Path:
+    return app_data_dir() / "run_journal.log"
 
 
 def _version_parts(value: str) -> tuple[int, ...]:
@@ -1825,6 +1831,8 @@ class MarkerSettingsDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    RUN_JOURNAL_MAX_LINES = 10_000
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(APP_TITLE)
@@ -1846,8 +1854,13 @@ class MainWindow(QMainWindow):
         self.last_output_path = ""
         self.last_modified_database_path = ""
         self.last_run_direct = False
+        self.last_run_report_only = False
         self.marker_settings = load_marker_settings()
         self.progress_dialog = ProgressDialog("Ход выполнения", self)
+        self._journal_lines: deque[str] = deque(maxlen=self.RUN_JOURNAL_MAX_LINES)
+        self._journal_save_timer = QTimer(self)
+        self._journal_save_timer.setSingleShot(True)
+        self._journal_save_timer.timeout.connect(self._save_run_journal)
 
         self._build_ui()
         self._apply_style()
@@ -2118,6 +2131,21 @@ class MainWindow(QMainWindow):
             if widget is not None:
                 widget.setEnabled(not enabled and not direct)
 
+    def create_matches_excel(self) -> None:
+        """Запускает проверку из раздела отчёта без добавления меток."""
+        create_report = self.create_excel_report_check.isChecked()
+        report_only = self.report_only_check.isChecked()
+        self.create_excel_report_check.setChecked(True)
+        self.report_only_check.setChecked(True)
+        try:
+            self.start_comparison()
+        finally:
+            # Рабочий поток уже получил копию параметров. Возвращаем прежние
+            # настройки интерфейса, чтобы обычный запуск не стал отчётным.
+            self.create_excel_report_check.setChecked(create_report)
+            self.report_only_check.setChecked(report_only)
+            self._sync_marker_settings_from_ui(save=True, show_message=False)
+
     def select_modified_database_output(self) -> None:
         initial = self.modified_database_edit.text().strip() or self._default_modified_database_path()
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить TXT-копию с метками", initial, "TXT (*.txt)")
@@ -2213,18 +2241,10 @@ class MainWindow(QMainWindow):
             self._reflow_actions(2)
         if hasattr(self, "marker_card"):
             self.marker_card.title_label.setText("Метки в ИРБИС" if direct else "Метки в TXT-копии")
-        if hasattr(self, "cleanup_card"):
-            self.cleanup_card.setVisible(True)
-            if direct:
-                self.cleanup_title.setText("Очистка меток в ИРБИС")
-                self.cleanup_desc.setText(
-                    "Удалить настроенные метки прямо из выбранной базы ИРБИС."
-                )
-                self.cleanup_button.setText("Удалить метки из ИРБИС")
-            else:
-                self.cleanup_title.setText("Очистка меток")
-                self.cleanup_desc.setText("Создать новую TXT-копию без настроенных пометок.")
-                self.cleanup_button.setText("Удалить все метки из TXT")
+        if hasattr(self, "cleanup_button"):
+            self.cleanup_button.setText(
+                "Удалить метки из ИРБИС" if direct else "Удалить все метки из TXT"
+            )
 
     def _restore_irbis_config(self) -> None:
         try:
@@ -3095,7 +3115,7 @@ class MainWindow(QMainWindow):
         self.foreign_agents_card = SectionCard("Реестр иностранных агентов", "")
         self.foreign_agents_edit = QLineEdit(); self.foreign_agents_edit.hide()
         self.foreign_agents_list = QListWidget(); self.foreign_agents_list.setObjectName("compactList"); self.foreign_agents_list.setMaximumHeight(58); self.foreign_agents_list.setMinimumHeight(38)
-        self.foreign_agents_button = QPushButton("Выбрать реестр"); self.foreign_agents_button.setObjectName("secondaryButton"); self.foreign_agents_button.clicked.connect(self.select_foreign_agents)
+        self.foreign_agents_button = QPushButton("Добавить Excel"); self.foreign_agents_button.setObjectName("secondaryButton"); self.foreign_agents_button.clicked.connect(self.select_foreign_agents)
         self.clear_foreign_agents_button = QPushButton("Очистить"); self.clear_foreign_agents_button.setObjectName("mutedButton"); self.clear_foreign_agents_button.clicked.connect(self._clear_foreign_agents)
         fa_actions = QGridLayout(); fa_actions.setHorizontalSpacing(4); fa_actions.setVerticalSpacing(4)
         self.foreign_agents_controls = fa_actions
@@ -3142,7 +3162,6 @@ class MainWindow(QMainWindow):
         utility_row = QGridLayout(); utility_row.setHorizontalSpacing(4); utility_row.setVerticalSpacing(4)
         self.utility_controls = utility_row
         self.compare_reports_button = QPushButton("Сравнить Excel-отчёты"); self.compare_reports_button.setObjectName("mutedButton"); self.compare_reports_button.clicked.connect(self.open_result_comparison)
-        self.compare_text_button = QPushButton("Сравнить TXT-базы"); self.compare_text_button.setObjectName("mutedButton"); self.compare_text_button.clicked.connect(self.open_text_comparison)
         next_lists = QPushButton("Далее: списки →"); next_lists.setObjectName("primaryButton"); next_lists.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(2))
         files_root.addWidget(next_lists)
         files_root.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -3195,6 +3214,30 @@ class MainWindow(QMainWindow):
         report_lists_card.body.addLayout(report_format_row)
         lists_root.addWidget(report_lists_card)
 
+        report_create_card = SectionCard("Создание Excel-файла с совпадениями", "")
+        self.report_create_card = report_create_card
+        report_create_hint = QLabel(
+            "Создать выбранные списки совпадений без добавления меток в ИРБИС или TXT-базу."
+        )
+        report_create_hint.setObjectName("cardDescription")
+        report_create_hint.setWordWrap(True)
+        report_create_card.body.addWidget(report_create_hint)
+        self.create_matches_excel_button = QPushButton("Создать Excel-файл с совпадениями")
+        self.create_matches_excel_button.setObjectName("primaryButton")
+        self.create_matches_excel_button.clicked.connect(self.create_matches_excel)
+        for button in (self.create_matches_excel_button, self.compare_reports_button):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        report_create_actions = QGridLayout()
+        report_create_actions.setHorizontalSpacing(4)
+        report_create_actions.setVerticalSpacing(4)
+        report_create_actions.addWidget(self.create_matches_excel_button, 0, 0)
+        report_create_actions.addWidget(self.compare_reports_button, 0, 1)
+        report_create_actions.setColumnStretch(0, 1)
+        report_create_actions.setColumnStretch(1, 1)
+        report_create_card.body.addLayout(report_create_actions)
+        lists_root.addWidget(report_create_card)
+
         next_marks = QPushButton("Далее: метки →"); next_marks.setObjectName("primaryButton"); next_marks.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(3))
         self.next_marks_button = next_marks
         lists_root.addLayout(utility_row)
@@ -3226,13 +3269,6 @@ class MainWindow(QMainWindow):
         marker_card.body.addLayout(marker_grid)
         run_root.addWidget(marker_card)
 
-        self.cleanup_card = QFrame(); self.cleanup_card.setObjectName("dangerCard")
-        cleanup_layout = QHBoxLayout(self.cleanup_card); cleanup_layout.setContentsMargins(4, 3, 4, 3); cleanup_layout.setSpacing(5)
-        cleanup_text = QVBoxLayout(); self.cleanup_title = QLabel("Очистка меток"); self.cleanup_title.setObjectName("cardTitle"); self.cleanup_desc = QLabel("Создать новую TXT-копию без настроенных пометок."); self.cleanup_desc.setObjectName("cardDescription"); self.cleanup_desc.setWordWrap(True)
-        cleanup_text.addWidget(self.cleanup_title); cleanup_text.addWidget(self.cleanup_desc); cleanup_layout.addLayout(cleanup_text, 1)
-        self.cleanup_button = QPushButton("Удалить все метки из TXT"); self.cleanup_button.setObjectName("dangerButton"); self.cleanup_button.clicked.connect(self.clean_markers); cleanup_layout.addWidget(self.cleanup_button)
-        run_root.addWidget(self.cleanup_card)
-
         next_run_tab = QPushButton("Далее: запуск и журнал →")
         next_run_tab.setObjectName("primaryButton")
         next_run_tab.clicked.connect(lambda: self.workflow_tabs.setCurrentIndex(4))
@@ -3252,32 +3288,43 @@ class MainWindow(QMainWindow):
         action_title_row = QHBoxLayout(); action_title_row.setSpacing(6)
         action_title = QLabel("Управление запуском и результатами"); action_title.setObjectName("cardTitle"); action_title_row.addWidget(action_title, 1)
         self.actions_layout.addLayout(action_title_row)
-        action_hint = QLabel("В прямом режиме найденные метки записываются в ИРБИС автоматически во время проверки. Ниже доступны отмена и открытие отчёта.")
+        action_hint = QLabel("Запустите проверку или удалите ранее добавленные метки из выбранной базы.")
         action_hint.setObjectName("cardDescription")
         action_hint.setWordWrap(True)
         self.actions_layout.addWidget(action_hint)
         local_start_row = QHBoxLayout(); local_start_row.setSpacing(4)
-        self.run_tab_start_button = QPushButton("Начать сравнение")
+        self.run_tab_start_button = QPushButton("Запустить действие")
         self.run_tab_start_button.setObjectName("primaryButton")
         self.run_tab_start_button.clicked.connect(self.start_comparison)
-        local_start_row.addWidget(self.run_tab_start_button)
-        local_start_row.addStretch()
+        local_start_row.addWidget(self.run_tab_start_button, 1)
+        self.cleanup_button = QPushButton("Удалить метки из ИРБИС")
+        self.cleanup_button.setObjectName("dangerButton")
+        self.cleanup_button.clicked.connect(self.clean_markers)
+        for button in (self.run_tab_start_button, self.cleanup_button):
+            button.setMinimumWidth(0)
+            button.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        local_start_row.addWidget(self.cleanup_button, 1)
         self.actions_layout.addLayout(local_start_row)
         self.actions_buttons_layout = QGridLayout(); self.actions_buttons_layout.setHorizontalSpacing(4); self.actions_buttons_layout.setVerticalSpacing(4)
-        self.cancel_button = QPushButton("Отменить"); self.cancel_button.setObjectName("dangerButton"); self.cancel_button.setEnabled(False); self.cancel_button.clicked.connect(self.cancel_comparison)
-        self.open_button = QPushButton("Открыть Excel-отчёт"); self.open_button.setObjectName("mutedButton"); self.open_button.setEnabled(False); self.open_button.clicked.connect(self.open_report)
+        # Служебные объекты остаются для логики состояния, но эти действия
+        # больше не выводятся в интерфейсе блока запуска.
+        self.cancel_button = QPushButton("Отменить", self.actions_card); self.cancel_button.setEnabled(False); self.cancel_button.hide()
+        self.open_button = QPushButton("Открыть Excel-отчёт", self.actions_card); self.open_button.setEnabled(False); self.open_button.hide()
         self.open_modified_database_button = QPushButton("Открыть TXT-копию"); self.open_modified_database_button.setObjectName("mutedButton"); self.open_modified_database_button.setEnabled(False); self.open_modified_database_button.clicked.connect(self.open_modified_database)
         self.write_irbis_button = QPushButton("Отправить TXT в ИРБИС")
         self.write_irbis_button.setObjectName("secondaryButton"); self.write_irbis_button.setEnabled(False); self.write_irbis_button.clicked.connect(self.apply_results_to_irbis)
-        self.clear_all_button = QPushButton("Очистить всё"); self.clear_all_button.setObjectName("mutedButton"); self.clear_all_button.clicked.connect(self.clear_all)
-        action_buttons = [self.open_button, self.open_modified_database_button, self.write_irbis_button, self.clear_all_button, self.cancel_button]
+        self.clear_all_button = QPushButton("Очистить всё", self.actions_card); self.clear_all_button.hide()
+        action_buttons = [self.open_modified_database_button, self.write_irbis_button]
         for i, button in enumerate(action_buttons):
             self.actions_buttons_layout.addWidget(button, i // 2, i % 2)
         for column in range(2): self.actions_buttons_layout.setColumnStretch(column, 1)
         self.action_buttons = action_buttons
         self.actions_layout.addLayout(self.actions_buttons_layout)
 
-        self.progress = QProgressBar(); self.progress.setRange(0, 100); self.progress.setValue(0); self.actions_layout.addWidget(self.progress)
+        self.progress = QProgressBar(); self.progress.setObjectName("mainProgress"); self.progress.setRange(0, 100); self.progress.setValue(0)
+        self.progress.setMinimumWidth(0); self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.progress.hide()
+        self.actions_layout.addWidget(self.progress)
         self.status_row = QHBoxLayout(); self.status_row.setSpacing(4)
         self.status_dot = QLabel(); self.status_dot.setObjectName("statusDot"); self.status_dot.setProperty("state", "idle"); self.status_dot.setFixedSize(6, 6); self.status_dot.hide()
         self.status_label = QLabel("Готово к работе"); self.status_label.setObjectName("statusLabel"); self.status_label.setWordWrap(True)
@@ -3286,9 +3333,10 @@ class MainWindow(QMainWindow):
 
         log_card = QFrame(); log_card.setObjectName("sectionCard")
         log_layout = QVBoxLayout(log_card); log_layout.setContentsMargins(4, 3, 4, 4); log_layout.setSpacing(4)
-        log_header = QHBoxLayout(); log_header.setSpacing(6); log_title = QLabel("Журнал"); log_title.setObjectName("cardTitle"); log_header.addWidget(log_title); log_header.addStretch()
-        clear_log = QPushButton("Очистить журнал"); clear_log.setObjectName("mutedButton"); clear_log.clicked.connect(lambda: self.run_log.clear()); log_header.addWidget(clear_log); log_layout.addLayout(log_header)
+        log_header = QHBoxLayout(); log_header.setSpacing(6); log_title = QLabel("Журнал"); log_title.setObjectName("cardTitle"); log_header.addWidget(log_title); log_header.addStretch(); log_layout.addLayout(log_header)
         self.run_log = QTextEdit(); self.run_log.setObjectName("logEdit"); self.run_log.setReadOnly(True); self.run_log.setMinimumHeight(100); self.run_log.setPlaceholderText("Здесь будет отображаться ход подключения, загрузки и сравнения…")
+        self.run_log.document().setMaximumBlockCount(self.RUN_JOURNAL_MAX_LINES)
+        self._load_run_journal()
         log_layout.addWidget(self.run_log, 1); results_root.addWidget(log_card, 1)
         self.workflow_tabs.addTab(self.results_tab, "Запуск")
         self.workflow_tabs.currentChanged.connect(
@@ -3298,7 +3346,7 @@ class MainWindow(QMainWindow):
         # Служебные элементы для совместимости с прежней логикой.
         self.table = QTableWidget(0, 6, self); self.table.hide()
         self.file_action_buttons = [self.database_button, self.clear_database_button, self.foreign_agents_button, self.clear_foreign_agents_button, self.add_excel_button, self.clear_excel_button]
-        self.section_cards = [self.database_card, self.foreign_agents_card, self.excel_card, match_settings_card, compare_card, report_lists_card, marker_card]
+        self.section_cards = [self.database_card, self.foreign_agents_card, self.excel_card, match_settings_card, compare_card, report_lists_card, report_create_card, marker_card]
         self.tools_card = compare_card
         self.left_panel = self.files_tab; self.right_panel = self.results_tab
         self.content_host = self.workflow_tabs
@@ -3412,9 +3460,7 @@ class MainWindow(QMainWindow):
             self.compare_controls.addWidget(self.create_excel_report_check, 0, 0, 1, 4)
             self.compare_controls.addWidget(self.report_only_check, 1, 0, 1, 4)
             self.compare_controls.setColumnStretch(0, 1)
-            self.utility_controls.addWidget(self.compare_reports_button, 0, 0)
-            self.utility_controls.addWidget(self.compare_text_button, 0, 1)
-            self.utility_controls.addWidget(self.next_marks_button, 1, 0, 1, 2)
+            self.utility_controls.addWidget(self.next_marks_button, 0, 0, 1, 2)
             self.utility_controls.setColumnStretch(0, 1)
             self.utility_controls.setColumnStretch(1, 1)
         else:
@@ -3422,24 +3468,8 @@ class MainWindow(QMainWindow):
             self.compare_controls.addWidget(self.report_only_check, 0, 1)
             self.compare_controls.setColumnStretch(0, 1)
             self.compare_controls.setColumnStretch(1, 1)
-            self.utility_controls.addWidget(self.compare_reports_button, 0, 0)
-            self.utility_controls.addWidget(self.compare_text_button, 0, 1)
-            self.utility_controls.addWidget(self.next_marks_button, 0, 2)
-            self.utility_controls.setColumnStretch(2, 1)
-
-    def _reflow_secondary_controls(self, narrow: bool) -> None:
-        self._take_all(self.tools_controls)
-        for column in range(3):
-            self.tools_controls.setColumnStretch(column, 0)
-        if narrow:
-            self.tools_controls.addWidget(self.compare_reports_button, 0, 0)
-            self.tools_controls.addWidget(self.compare_text_button, 1, 0)
-            self.tools_controls.setColumnStretch(0, 1)
-        else:
-            self.tools_controls.addWidget(self.compare_reports_button, 0, 0)
-            self.tools_controls.addWidget(self.compare_text_button, 0, 1)
-            self.tools_controls.setColumnStretch(0, 1)
-            self.tools_controls.setColumnStretch(1, 1)
+            self.utility_controls.addWidget(self.next_marks_button, 0, 0)
+            self.utility_controls.setColumnStretch(0, 1)
 
     def _reflow_report_lists(self, narrow: bool) -> None:
         self._take_all(self.report_lists_grid)
@@ -3671,6 +3701,22 @@ class MainWindow(QMainWindow):
             QPushButton#primaryButton:disabled { color: #e4e4e4; background: #8fb9df; border-color: #8fb9df; }
             QListWidget#compactList::item { min-height: 21px; }
             QProgressBar { min-height: 12px; max-height: 12px; }
+            QProgressBar#mainProgress {
+                min-height: 4px;
+                max-height: 4px;
+                border: none;
+                border-radius: 2px;
+                background: #c4c9cf;
+                padding: 0;
+                margin: 0;
+                text-align: center;
+            }
+            QProgressBar#mainProgress::chunk {
+                border: none;
+                border-radius: 2px;
+                background: #0078d4;
+                margin: 0;
+            }
 
             /* Вкладки и их содержимое образуют одну общую поверхность. */
             QTabWidget#workflowTabs::pane {
@@ -3852,8 +3898,6 @@ class MainWindow(QMainWindow):
         self.open_modified_database_button.setEnabled(False)
         if hasattr(self, "write_irbis_button"):
             self.write_irbis_button.setEnabled(False)
-        if hasattr(self, "run_log"):
-            self.run_log.clear()
         self.last_results = []
         self.last_summary = None
         self.last_output_path = ""
@@ -4033,6 +4077,7 @@ class MainWindow(QMainWindow):
             irbis_params = {}
 
         self.last_run_direct = direct_mode
+        self.last_run_report_only = bool(self.marker_settings.get("report_only", False))
         self.table.setRowCount(0)
         selected_sources = []
         if excel_paths:
@@ -4042,14 +4087,15 @@ class MainWindow(QMainWindow):
         sources_text = ", ".join(selected_sources)
 
         self.workflow_tabs.setCurrentIndex(4)
-        self.run_log.clear()
         self.progress_dialog.clear()
         self._append_progress("Подготовка к проверке всех выбранных реестров…")
         self.progress.setValue(0)
+        self.progress.show()
         self.open_button.setEnabled(False)
         self.open_modified_database_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.run_tab_start_button.setEnabled(False)
+        self.create_matches_excel_button.setEnabled(False)
         self.marker_settings_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
         self.write_irbis_button.setEnabled(False)
@@ -4166,6 +4212,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(int, str)
     def on_progress(self, percent: int, text: str) -> None:
+        self.progress.show()
         self.progress.setValue(max(0, min(100, percent)))
         self._set_status(text, "running")
         self.progress_dialog.set_progress(percent, text)
@@ -4173,6 +4220,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(object, object)
     def on_finished(self, results: list[MatchResult], summary: ComparisonSummary) -> None:
+        self.progress.hide()
         self.last_results = results
         self.last_summary = summary
         self._fill_preview(results)
@@ -4187,7 +4235,7 @@ class MainWindow(QMainWindow):
             }
         )
 
-        report_only = bool(self.marker_settings.get("report_only", False))
+        report_only = self.last_run_report_only
         if report_only:
             self.last_modified_database_path = ""
             self.open_modified_database_button.setEnabled(False)
@@ -4290,6 +4338,7 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_failed(self, error_text: str) -> None:
+        self.progress.hide()
         self._set_status("Ошибка", "error")
         self.progress_dialog.finish("Ошибка. Подробности показаны ниже.", 0)
         self._append_progress(error_text)
@@ -4302,17 +4351,20 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str)
     def on_cancelled(self, message: str) -> None:
+        self.progress.hide()
         self._set_status(message, "warning")
         self.progress_dialog.finish(message, self.progress.value())
 
     @pyqtSlot()
     def _cleanup_worker(self) -> None:
+        self.progress.hide()
         if self.thread:
             self.thread.deleteLater()
         self.worker = None
         self.thread = None
         self.start_button.setEnabled(True)
         self.run_tab_start_button.setEnabled(True)
+        self.create_matches_excel_button.setEnabled(True)
         self.marker_settings_button.setEnabled(True)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(True)
@@ -4344,11 +4396,34 @@ class MainWindow(QMainWindow):
         return " | ".join(dict.fromkeys(parts))
 
     def _append_progress(self, text: str) -> None:
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"[{timestamp}] {text}"
         self.progress_dialog.append_line(line)
         if hasattr(self, "run_log"):
             self.run_log.append(line)
+        self._journal_lines.append(line)
+        self._journal_save_timer.start(250)
+
+    def _load_run_journal(self) -> None:
+        try:
+            lines = run_journal_path().read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError):
+            lines = []
+        self._journal_lines.extend(lines[-self.RUN_JOURNAL_MAX_LINES:])
+        if self._journal_lines:
+            self.run_log.setPlainText("\n".join(self._journal_lines))
+            scrollbar = self.run_log.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+
+    def _save_run_journal(self) -> None:
+        try:
+            path = run_journal_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = "\n".join(self._journal_lines)
+            path.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+        except OSError:
+            # Ошибка журнала не должна прерывать основную проверку базы.
+            pass
 
     def open_report(self) -> None:
         if self.last_output_path and Path(self.last_output_path).is_file():
@@ -4395,6 +4470,7 @@ class MainWindow(QMainWindow):
             self._save_window_state()
         except Exception:
             pass
+        self._save_run_journal()
         event.accept()
 
 
@@ -4408,6 +4484,7 @@ def main() -> int:
             pass
 
     app = QApplication(sys.argv)
+    install_russian_ui(app)
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
     apply_light_palette(app)
