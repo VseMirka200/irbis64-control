@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, QStandardPaths, Qt, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence
+from PyQt6.QtGui import QDesktopServices, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -904,22 +904,6 @@ class UsefulLinksDialog(QDialog):
         close_button.clicked.connect(self.accept)
         transfer_buttons.addWidget(close_button)
 
-        dialog_buttons = (
-            add_button,
-            remove_button,
-            open_button,
-            import_button,
-            export_button,
-            close_button,
-        )
-        margins = layout.contentsMargins()
-        three_button_row_width = (self.minimumWidth() - margins.left() - margins.right() - buttons.spacing() * 2) // 3
-        common_button_width = min(
-            max(button.sizeHint().width() for button in dialog_buttons),
-            three_button_row_width,
-        )
-        for button in dialog_buttons:
-            button.setFixedWidth(common_button_width)
         layout.addLayout(transfer_buttons)
 
         self._refresh()

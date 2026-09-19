@@ -31,7 +31,7 @@ from irbis_control.core.matcher import (
 )
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.infrastructure.irbis_bridge import load_manifest
-from irbis_control.ui.components.dialogs import ResultComparisonDialog, TextComparisonDialog
+from irbis_control.ui.components.dialogs import ResultComparisonDialog
 from irbis_control.ui.services.workers import IrbisOperationWorker, UpdateWorker
 from irbis_control.ui.windows.connection_dialog import IrbisConnectionDialog
 
@@ -55,7 +55,7 @@ class MainWindowOperationsMixin:
                 "password": self.irbis_password_edit.text(),
                 "database": self._current_irbis_database(),
                 "query": self.irbis_query_edit.text(),
-                "page_size": self.irbis_page_size_spin.value(),
+                "page_size": self.irbis_page_size,
             },
             databases,
             self,
@@ -80,7 +80,7 @@ class MainWindowOperationsMixin:
         self.irbis_login_edit.setText(str(values["login"]))
         self.irbis_password_edit.setText(str(values["password"]))
         self.irbis_query_edit.setText(str(values["query"]))
-        self.irbis_page_size_spin.setValue(int(values["page_size"]))
+        self.irbis_page_size = max(100, min(2000, int(values["page_size"])))
         database = str(values["database"])
         database_index = self.irbis_db_combo.findData(database)
         if database_index < 0:
@@ -142,12 +142,6 @@ class MainWindowOperationsMixin:
             database = self._current_irbis_database() or "не выбрана"
             self.direct_source_label.setText(f"ИРБИС · {database}" if direct else "Локальная TXT-база")
             self._sync_direct_source_status()
-        if hasattr(self, "irbis_base_status"):
-            self.irbis_base_status.setText(
-                "База читается пакетами при запуске" if direct else "Добавьте локальный TXT в разделе «Данные»"
-            )
-        if hasattr(self, "irbis_local_hint"):
-            self.irbis_local_hint.setVisible(not direct)
         if hasattr(self, "write_irbis_button"):
             self.write_irbis_button.setVisible(not direct)
         if hasattr(self, "open_modified_database_button"):
@@ -156,10 +150,8 @@ class MainWindowOperationsMixin:
             widget = getattr(self, name, None)
             if widget is not None:
                 widget.setVisible(not direct)
-                report_only = bool(getattr(self, "report_only_check", None) and self.report_only_check.isChecked())
-                widget.setEnabled(not direct and not report_only)
-        if hasattr(self, "action_buttons"):
-            self._reflow_actions(2)
+                mode = str(self.output_mode_combo.currentData()) if hasattr(self, "output_mode_combo") else "full"
+                widget.setEnabled(not direct and mode != "report")
         if hasattr(self, "result_files_layout"):
             self._reflow_result_files()
         if hasattr(self, "marker_card"):
@@ -230,21 +222,18 @@ class MainWindowOperationsMixin:
         self._populate_irbis_databases([], saved_database)
         self.irbis_query_edit.setText(str(config.get("query", "I=$")))
         try:
-            self.irbis_read_workers_spin.setValue(max(1, min(8, int(config.get("read_workers", 4)))))
+            self.irbis_read_workers = max(1, min(8, int(config.get("read_workers", 4))))
         except Exception:
-            self.irbis_read_workers_spin.setValue(4)
+            self.irbis_read_workers = 4
         try:
-            self.irbis_page_size_spin.setValue(max(100, min(2000, int(config.get("page_size", 500)))))
+            self.irbis_page_size = max(100, min(2000, int(config.get("page_size", 500))))
         except Exception:
-            self.irbis_page_size_spin.setValue(500)
+            self.irbis_page_size = 500
         self.direct_irbis_checkbox.setChecked(bool(config.get("direct_mode", True)))
         if config.get("snapshot"):
-            self.irbis_snapshot_edit.setText(str(config["snapshot"]))
+            self.irbis_snapshot_path = str(config["snapshot"])
         if config.get("manifest"):
-            self.irbis_manifest_edit.setText(str(config["manifest"]))
-        snapshot = Path(self.irbis_snapshot_edit.text().strip())
-        if snapshot.is_file() and not self.direct_irbis_checkbox.isChecked():
-            self.irbis_base_status.setText(f"Найдена рабочая копия: {snapshot.name}")
+            self.irbis_manifest_path = str(config["manifest"])
         self._update_direct_mode_ui()
 
     def _save_irbis_config(self) -> None:
@@ -255,11 +244,11 @@ class MainWindowOperationsMixin:
             "password": self.irbis_password_edit.text(),
             "database": self._current_irbis_database(),
             "query": self.irbis_query_edit.text().strip(),
-            "read_workers": self.irbis_read_workers_spin.value(),
-            "page_size": self.irbis_page_size_spin.value(),
+            "read_workers": self.irbis_read_workers,
+            "page_size": self.irbis_page_size,
             "direct_mode": self.direct_irbis_checkbox.isChecked(),
-            "snapshot": self.irbis_snapshot_edit.text().strip(),
-            "manifest": self.irbis_manifest_edit.text().strip(),
+            "snapshot": self.irbis_snapshot_path.strip(),
+            "manifest": self.irbis_manifest_path.strip(),
             "modified": self.last_modified_database_path or self.modified_database_edit.text().strip(),
         }
         atomic_write_text(
@@ -274,11 +263,11 @@ class MainWindowOperationsMixin:
             "password": self.irbis_password_edit.text(),
             "database": self._current_irbis_database(),
             "query": self.irbis_query_edit.text().strip() or "I=$",
-            "read_workers": self.irbis_read_workers_spin.value(),
-            "page_size": self.irbis_page_size_spin.value(),
+            "read_workers": self.irbis_read_workers,
+            "page_size": self.irbis_page_size,
             "direct_mode": self.direct_irbis_checkbox.isChecked(),
-            "snapshot": self.irbis_snapshot_edit.text().strip(),
-            "manifest": self.irbis_manifest_edit.text().strip(),
+            "snapshot": self.irbis_snapshot_path.strip(),
+            "manifest": self.irbis_manifest_path.strip(),
             "modified": self.last_modified_database_path or self.modified_database_edit.text().strip(),
             "backup_dir": str(self._app_data_dir() / "backups"),
             "create_backup": self.app_settings.create_database_backup,
@@ -322,13 +311,6 @@ class MainWindowOperationsMixin:
         if not silent:
             self._save_irbis_config()
         if not silent:
-            self.irbis_progress.setValue(0)
-            self.irbis_progress.show()
-            QTimer.singleShot(0, self._fit_scroll_content)
-            self.irbis_test_button.setEnabled(False)
-            self.irbis_tune_read_button.setEnabled(False)
-            self.irbis_refresh_databases_action.setEnabled(False)
-            self.irbis_fetch_button.setEnabled(False)
             self.write_irbis_button.setEnabled(False)
             if hasattr(self, "cleanup_button"):
                 self.cleanup_button.setEnabled(False)
@@ -365,8 +347,6 @@ class MainWindowOperationsMixin:
     @pyqtSlot(int, str)
     def _on_irbis_progress(self, percent: int, text: str) -> None:
         percent = max(0, min(100, percent))
-        self.irbis_progress.show()
-        self.irbis_progress.setValue(percent)
         self._set_irbis_status(text, "running")
         if self.irbis_worker is not None and self.irbis_worker.mode == "clean_markers":
             self.progress_dialog.set_progress(percent, text)
@@ -383,14 +363,11 @@ class MainWindowOperationsMixin:
                 "success",
             )
             return
-        self.irbis_progress.setValue(100)
-        self.irbis_progress.hide()
-        QTimer.singleShot(0, self._fit_scroll_content)
         if mode == "tune_read":
             data = result if isinstance(result, dict) else {}
             page_size = max(100, min(2000, int(data.get("page_size", 500))))
             probe_total = int(data.get("probe_total", 0))
-            self.irbis_page_size_spin.setValue(page_size)
+            self.irbis_page_size = page_size
             active_dialog = getattr(self, "_active_connection_dialog", None)
             if active_dialog is not None and active_dialog.isVisible():
                 active_dialog.page_size_spin.setValue(page_size)
@@ -430,22 +407,20 @@ class MainWindowOperationsMixin:
             item = QListWidgetItem(str(snapshot))
             item.setData(Qt.ItemDataRole.UserRole, True)
             self.database_list.addItem(item)
-            self.database_edit.setText(str(snapshot))
-            self.irbis_snapshot_edit.setText(str(snapshot))
-            self.irbis_manifest_edit.setText(str(Path(self.irbis_manifest_edit.text().strip())))
+            self.irbis_snapshot_path = str(snapshot)
+            self.irbis_manifest_path = str(Path(self.irbis_manifest_path.strip()))
             self._update_database_summary()
             self._set_default_outputs(force=True)
-            self.irbis_base_status.setText(f"Готово: {len(manifest.records)} записей • {snapshot.name}")
             self._set_irbis_status(f"Рабочая база готова: {len(manifest.records)} записей", "success")
             self._append_progress(
                 f"Рабочая база готова: {len(manifest.records)} записей. Файл автоматически выбран для проверки."
             )
             self.last_modified_database_path = ""
             self.write_irbis_button.setEnabled(
-                snapshot.is_file() and Path(self.irbis_manifest_edit.text().strip()).is_file()
+                snapshot.is_file() and Path(self.irbis_manifest_path.strip()).is_file()
             )
             self._save_irbis_config()
-            self.workflow_tabs.setCurrentIndex(1)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return
         if mode == "clean_markers":
             data = result if isinstance(result, dict) else {}
@@ -495,8 +470,6 @@ class MainWindowOperationsMixin:
             self._irbis_response_ms = None
             self._set_irbis_status(f"Нет подключения • проверено в {checked_at}", "error")
             return
-        self.irbis_progress.setValue(0)
-        self.irbis_progress.hide()
         QTimer.singleShot(0, self._fit_scroll_content)
         self._set_irbis_status("Ошибка подключения/обмена с ИРБИС", "error")
         self._append_progress(f"Ошибка ИРБИС: {error}")
@@ -510,10 +483,6 @@ class MainWindowOperationsMixin:
             self.irbis_thread.deleteLater()
         self.irbis_thread = None
         self.irbis_worker = None
-        self.irbis_test_button.setEnabled(True)
-        self.irbis_tune_read_button.setEnabled(True)
-        self.irbis_refresh_databases_action.setEnabled(True)
-        self.irbis_fetch_button.setEnabled(True)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(True)
         modified_candidates = [item.strip() for item in self.last_modified_database_path.split(";") if item.strip()]
@@ -522,13 +491,13 @@ class MainWindowOperationsMixin:
             if output_candidate and Path(output_candidate).is_file():
                 modified_candidates = [output_candidate]
         if not modified_candidates:
-            snapshot_candidate = self.irbis_snapshot_edit.text().strip()
+            snapshot_candidate = self.irbis_snapshot_path.strip()
             if snapshot_candidate and Path(snapshot_candidate).is_file():
                 modified_candidates = [snapshot_candidate]
         can_write = bool(
             len(modified_candidates) == 1
             and Path(modified_candidates[0]).is_file()
-            and Path(self.irbis_manifest_edit.text().strip()).is_file()
+            and Path(self.irbis_manifest_path.strip()).is_file()
         )
         self.write_irbis_button.setEnabled(can_write)
 
@@ -542,7 +511,7 @@ class MainWindowOperationsMixin:
             if candidate and Path(candidate).is_file():
                 modified_paths = [candidate]
         if not modified_paths:
-            snapshot_candidate = self.irbis_snapshot_edit.text().strip()
+            snapshot_candidate = self.irbis_snapshot_path.strip()
             if snapshot_candidate and Path(snapshot_candidate).is_file():
                 modified_paths = [snapshot_candidate]
         if len(modified_paths) != 1 or not Path(modified_paths[0]).is_file():
@@ -553,7 +522,7 @@ class MainWindowOperationsMixin:
             )
             return
         modified = modified_paths[0]
-        manifest_path = Path(self.irbis_manifest_edit.text().strip())
+        manifest_path = Path(self.irbis_manifest_path.strip())
         if not manifest_path.is_file():
             QMessageBox.warning(self, APP_TITLE, "Карта MFN отсутствует. Сначала получите базу через вкладку ИРБИС.")
             return
@@ -724,14 +693,6 @@ class MainWindowOperationsMixin:
             dialog._set_default_output()
         dialog.exec()
 
-    def open_text_comparison(self) -> None:
-        dialog = TextComparisonDialog(self)
-        modified_paths = [path.strip() for path in self.last_modified_database_path.split(";") if path.strip()]
-        if modified_paths and Path(modified_paths[0]).is_file():
-            dialog.new_edit.setText(modified_paths[0])
-            dialog._set_default_output()
-        dialog.exec()
-
     def clean_markers(self) -> None:
         if not self._sync_marker_settings_from_ui(save=True, show_message=False):
             return
@@ -746,11 +707,11 @@ class MainWindowOperationsMixin:
         database = str(params.get("database", "")).strip()
         if not str(params.get("login", "")).strip():
             QMessageBox.warning(self, APP_TITLE, "Введите логин каталогизатора ИРБИС.")
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return
         if not database:
             QMessageBox.warning(self, APP_TITLE, "Выберите базу ИРБИС из списка.")
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return
 
         answer = QMessageBox.warning(
@@ -829,8 +790,8 @@ class MainWindowOperationsMixin:
         self.open_modified_database_button.setEnabled(Path(cleaned_path).is_file())
         self.write_irbis_button.setEnabled(
             Path(cleaned_path).is_file()
-            and Path(self.irbis_manifest_edit.text().strip()).is_file()
-            and Path(self.irbis_snapshot_edit.text().strip()).is_file()
+            and Path(self.irbis_manifest_path.strip()).is_file()
+            and Path(self.irbis_snapshot_path.strip()).is_file()
         )
         self._save_irbis_config()
         self._append_progress(f"Очищенная TXT-копия выбрана для отправки в ИРБИС: {cleaned_path}")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
+import shutil
 import sys
 from collections import deque
 from datetime import datetime
@@ -23,9 +23,12 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTextBrowser,
     QVBoxLayout,
+    QListWidgetItem,
     QWidget,
 )
 
@@ -54,14 +57,6 @@ from irbis_control.application.updater import (
     ReleaseAsset,
 )
 from irbis_control.core.matcher import (
-    DEFAULT_AGE_MARKER,
-    DEFAULT_AGE_MARKER_FIELD,
-    DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
-    DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
-    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
-    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
-    DEFAULT_SUBSTANCE_MARKER,
-    DEFAULT_SUBSTANCE_MARKER_FIELD,
     EXTRA_MATCH_RULES,
 )
 from irbis_control.core.models import ComparisonSummary, MatchResult
@@ -74,7 +69,7 @@ from irbis_control.infrastructure.nkp_source import (
     NKP_DRUG_PAGE_URL,
     NKP_FOREIGN_AGENTS_PAGE_URL,
 )
-from irbis_control.paths import icon_path, project_root
+from irbis_control.paths import icon_path
 from irbis_control.ui.components.dialogs import (
     DEFAULT_USEFUL_LINKS as DEFAULT_USEFUL_LINKS,
 )
@@ -101,9 +96,6 @@ from irbis_control.ui.components.widgets import (
 )
 from irbis_control.ui.components.widgets import (
     LayoutHintWidget as LayoutHintWidget,
-)
-from irbis_control.ui.components.widgets import (
-    ListResizeHandle as ListResizeHandle,
 )
 from irbis_control.ui.components.widgets import (
     MatchFieldsComboBox as MatchFieldsComboBox,
@@ -175,255 +167,6 @@ def save_marker_settings(settings: dict[str, str | int | bool]) -> None:
 
 
 # Проверяет значения служебных полей перед сохранением настроек меток.
-class MarkerSettingsDialog(QDialog):
-    def __init__(self, settings: dict[str, str | int | bool], parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Настройки")
-        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
-        self.resize(620, 440)
-        self.setMinimumSize(500, 380)
-        if parent is not None:
-            # Отдельные окна верхнего уровня не всегда наследуют таблицу стилей
-            # главного окна на всех платформах и системных темах.
-            self.setStyleSheet(parent.styleSheet())
-        self.settings = dict(settings)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        title = QLabel("Настройки проверки")
-        title.setObjectName("dialogTitle")
-        layout.addWidget(title)
-
-        search_title = QLabel("Параметры поиска")
-        search_title.setObjectName("cardTitle")
-        layout.addWidget(search_title)
-
-        self.isbn_match_check = QCheckBox("Точные совпадения по ISBN")
-        self.isbn_match_check.setChecked(bool(settings["use_isbn_matching"]))
-        layout.addWidget(self.isbn_match_check)
-
-        self.title_fallback_check = QCheckBox("Точные совпадения по названию и автору")
-        self.title_fallback_check.setChecked(bool(settings["use_title_fallback"]))
-        layout.addWidget(self.title_fallback_check)
-
-        marker_title = QLabel("Пометки в TXT-копии")
-        marker_title.setObjectName("cardTitle")
-        layout.addWidget(marker_title)
-
-        description = QLabel(
-            "Для каждой пометки выберите номер поля и задайте его содержимое. "
-            "Пустое содержимое отключает соответствующую пометку."
-        )
-        description.setObjectName("cardDescription")
-        description.setWordWrap(True)
-        layout.addWidget(description)
-
-        form = QGridLayout()
-        form.setHorizontalSpacing(7)
-        form.setVerticalSpacing(5)
-
-        field_header = QLabel("Поле")
-        field_header.setObjectName("fieldLabel")
-        marker_header = QLabel("Содержимое")
-        marker_header.setObjectName("fieldLabel")
-        form.addWidget(field_header, 0, 1)
-        form.addWidget(marker_header, 0, 2)
-
-        self.substance_enabled_check = QCheckBox("Вещества")
-        self.substance_enabled_check.setChecked(bool(settings["substance_marker_enabled"]))
-        self.substance_field_spin = self._field_spin(int(settings["substance_marker_field"]))
-        self.substance_edit = QLineEdit(str(settings["substance_marker"]))
-        self.substance_edit.setObjectName("settingsField")
-        self.substance_edit.setPlaceholderText(DEFAULT_SUBSTANCE_MARKER)
-        form.addWidget(self.substance_enabled_check, 1, 0)
-        form.addWidget(self.substance_field_spin, 1, 1)
-        form.addWidget(self.substance_edit, 1, 2)
-
-        self.foreign_enabled_check = QCheckBox("Иноагенты — авторы")
-        self.foreign_enabled_check.setChecked(bool(settings["foreign_agent_marker_enabled"]))
-        self.foreign_field_spin = self._field_spin(int(settings["foreign_agent_marker_field"]))
-        self.foreign_edit = QLineEdit(str(settings["foreign_agent_marker_template"]))
-        self.foreign_edit.setObjectName("settingsField")
-        self.foreign_edit.setPlaceholderText(DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
-        self.foreign_edit.setToolTip("{name} будет заменено на совпавшего автора")
-        form.addWidget(self.foreign_enabled_check, 2, 0)
-        form.addWidget(self.foreign_field_spin, 2, 1)
-        form.addWidget(self.foreign_edit, 2, 2)
-
-        self.organization_enabled_check = QCheckBox("Иноагенты — организации")
-        self.organization_enabled_check.setChecked(bool(settings["foreign_organization_marker_enabled"]))
-        self.organization_field_spin = self._field_spin(int(settings["foreign_organization_marker_field"]))
-        self.organization_edit = QLineEdit(str(settings["foreign_organization_marker_template"]))
-        self.organization_edit.setObjectName("settingsField")
-        self.organization_edit.setPlaceholderText(DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE)
-        form.addWidget(self.organization_enabled_check, 3, 0)
-        form.addWidget(self.organization_field_spin, 3, 1)
-        form.addWidget(self.organization_edit, 3, 2)
-
-        foreign_hint = QLabel("Используйте {name}, чтобы подставить совпавшего автора или название организации.")
-        foreign_hint.setObjectName("cardDescription")
-        foreign_hint.setWordWrap(True)
-        form.addWidget(foreign_hint, 4, 2)
-
-        self.age_enabled_check = QCheckBox("Все найденные записи")
-        self.age_enabled_check.setChecked(bool(settings["age_marker_enabled"]))
-        self.age_field_spin = self._field_spin(int(settings["age_marker_field"]))
-        self.age_edit = QLineEdit(str(settings["age_marker"]))
-        self.age_edit.setObjectName("settingsField")
-        self.age_edit.setPlaceholderText(DEFAULT_AGE_MARKER)
-        form.addWidget(self.age_enabled_check, 5, 0)
-        form.addWidget(self.age_field_spin, 5, 1)
-        form.addWidget(self.age_edit, 5, 2)
-        form.setColumnStretch(2, 1)
-        layout.addLayout(form)
-
-        self.preview = QLabel()
-        self.preview.setObjectName("cardDescription")
-        self.preview.setWordWrap(True)
-        layout.addWidget(self.preview)
-        for edit in (self.substance_edit, self.foreign_edit, self.organization_edit, self.age_edit):
-            edit.textChanged.connect(self._update_preview)
-        for spin in (
-            self.substance_field_spin,
-            self.foreign_field_spin,
-            self.organization_field_spin,
-            self.age_field_spin,
-        ):
-            spin.valueChanged.connect(self._update_preview)
-        for check in (
-            self.substance_enabled_check,
-            self.foreign_enabled_check,
-            self.organization_enabled_check,
-            self.age_enabled_check,
-        ):
-            check.toggled.connect(self._update_preview)
-            check.toggled.connect(self._update_control_states)
-        self._update_control_states()
-        self._update_preview()
-
-        layout.addStretch()
-        buttons = QHBoxLayout()
-        reset_button = QPushButton("По умолчанию")
-        reset_button.setObjectName("mutedButton")
-        reset_button.clicked.connect(self._reset_defaults)
-        buttons.addWidget(reset_button)
-        buttons.addStretch()
-
-        cancel_button = QPushButton("Отмена")
-        cancel_button.setObjectName("mutedButton")
-        cancel_button.clicked.connect(self.reject)
-
-        save_button = QPushButton("Сохранить")
-        save_button.setObjectName("primaryButton")
-        save_button.clicked.connect(self._save)
-        buttons.addWidget(save_button)
-        buttons.addWidget(cancel_button)
-        layout.addLayout(buttons)
-
-    @staticmethod
-    def _field_spin(value: int) -> QSpinBox:
-        spin = QSpinBox()
-        spin.setRange(1, 999)
-        spin.setValue(value)
-        spin.setPrefix("#")
-        spin.setMinimumWidth(68)
-        spin.setMaximumWidth(88)
-        return spin
-
-    def _values(self) -> dict[str, str | int | bool]:
-        return {
-            **{key: bool(self.settings.get(key, False)) for key in EXTRA_MATCH_RULES},
-            "use_isbn_matching": self.isbn_match_check.isChecked(),
-            "use_title_fallback": self.title_fallback_check.isChecked(),
-            "use_fuzzy": bool(self.settings.get("use_fuzzy", True)),
-            "fuzzy_threshold": int(self.settings.get("fuzzy_threshold", 92)),
-            "create_excel_report": bool(self.settings.get("create_excel_report", True)),
-            "report_substances": bool(self.settings.get("report_substances", True)),
-            "report_foreign_agents": bool(self.settings.get("report_foreign_agents", True)),
-            "report_combined": bool(self.settings.get("report_combined", False)),
-            "report_summary": bool(self.settings.get("report_summary", False)),
-            "report_deduplicate": bool(self.settings.get("report_deduplicate", True)),
-            "report_sort": str(self.settings.get("report_sort", "record")),
-            "report_only": bool(self.settings.get("report_only", False)),
-            "substance_marker": self.substance_edit.text().strip(),
-            "foreign_agent_marker_template": self.foreign_edit.text().strip(),
-            "foreign_organization_marker_template": self.organization_edit.text().strip(),
-            "age_marker": self.age_edit.text().strip(),
-            "substance_marker_field": self.substance_field_spin.value(),
-            "foreign_agent_marker_field": self.foreign_field_spin.value(),
-            "foreign_organization_marker_field": self.organization_field_spin.value(),
-            "age_marker_field": self.age_field_spin.value(),
-            "substance_marker_enabled": self.substance_enabled_check.isChecked(),
-            "foreign_agent_marker_enabled": self.foreign_enabled_check.isChecked(),
-            "foreign_organization_marker_enabled": self.organization_enabled_check.isChecked(),
-            "age_marker_enabled": self.age_enabled_check.isChecked(),
-        }
-
-    def _update_preview(self) -> None:
-        values = self._values()
-        foreign_preview = str(values["foreign_agent_marker_template"]).replace("{name}", "ИВАНОВ ИВАН ИВАНОВИЧ")
-        organization_preview = str(values["foreign_organization_marker_template"]).replace(
-            "{name}", "НАЗВАНИЕ ОРГАНИЗАЦИИ"
-        )
-        self.preview.setText(
-            f"Пример: #{int(values['substance_marker_field']):03d}: "
-            f"{values['substance_marker'] if values['substance_marker_enabled'] else 'отключена'}; "
-            f"для иноагента — #{int(values['foreign_agent_marker_field']):03d}: "
-            f"{foreign_preview if values['foreign_agent_marker_enabled'] else 'отключена'}; "
-            f"организация — #{int(values['foreign_organization_marker_field']):03d}: "
-            f"{organization_preview if values['foreign_organization_marker_enabled'] else 'отключена'}; "
-            f"#{int(values['age_marker_field']):03d}: "
-            f"{values['age_marker'] if values['age_marker_enabled'] else 'отключена'}."
-        )
-
-    def _update_control_states(self, *_args) -> None:
-        groups = (
-            (self.substance_enabled_check, self.substance_field_spin, self.substance_edit),
-            (self.foreign_enabled_check, self.foreign_field_spin, self.foreign_edit),
-            (self.organization_enabled_check, self.organization_field_spin, self.organization_edit),
-            (self.age_enabled_check, self.age_field_spin, self.age_edit),
-        )
-        for check, field, edit in groups:
-            field.setEnabled(check.isChecked())
-            edit.setEnabled(check.isChecked())
-
-    def _reset_defaults(self) -> None:
-        self.isbn_match_check.setChecked(True)
-        self.title_fallback_check.setChecked(True)
-        self.substance_edit.setText(DEFAULT_SUBSTANCE_MARKER)
-        self.foreign_edit.setText(DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
-        self.organization_edit.setText(DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE)
-        self.age_edit.setText(DEFAULT_AGE_MARKER)
-        self.substance_field_spin.setValue(DEFAULT_SUBSTANCE_MARKER_FIELD)
-        self.foreign_field_spin.setValue(DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
-        self.organization_field_spin.setValue(DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD)
-        self.age_field_spin.setValue(DEFAULT_AGE_MARKER_FIELD)
-        self.substance_enabled_check.setChecked(True)
-        self.foreign_enabled_check.setChecked(True)
-        self.organization_enabled_check.setChecked(True)
-        self.age_enabled_check.setChecked(True)
-
-    def _save(self) -> None:
-        values = self._values()
-        marker_values = [value for value in values.values() if isinstance(value, str)]
-        if any("\n" in value or "\r" in value for value in marker_values):
-            QMessageBox.warning(self, APP_TITLE, "Метка должна состоять из одной строки.")
-            return
-        if any(re.search(r"#\d{1,3}\s*:", value, re.IGNORECASE) for value in marker_values):
-            QMessageBox.warning(self, APP_TITLE, "Введите содержимое метки без номера поля.")
-            return
-        try:
-            save_marker_settings(values)
-        except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось сохранить настройки:\n{exc}")
-            return
-        self.settings = values
-        self.accept()
-
-
-# Редактирует общие настройки и передаёт их окну только после сохранения.
 class ApplicationSettingsPage(QWidget):
     saved = pyqtSignal(object)
     cancelled = pyqtSignal()
@@ -436,16 +179,29 @@ class ApplicationSettingsPage(QWidget):
         super().__init__(parent)
         self.settings = settings
         self.setObjectName("tabPage")
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(7)
-        layout = QVBoxLayout()
-        root.addLayout(layout, 1)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(7)
 
-        safety_card = SectionCard("Безопасность базы", "")
+        # Содержимое настроек прокручивается отдельно, а footer остаётся
+        # закреплённым снизу. Так кнопки действий не уезжают при прокрутке.
+        self.content_scroll = QScrollArea()
+        self.content_scroll.setObjectName("settingsScroll")
+        self.content_scroll.setWidgetResizable(True)
+        self.content_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.content_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.content_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        content = QWidget()
+        content.setObjectName("settingsContent")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(0, 0, 4, 0)
+        layout.setSpacing(7)
+        self.content_scroll.setWidget(content)
+        root.addWidget(self.content_scroll, 1)
+
+        safety_card = SectionCard("Безопасность базы")
         layout.addWidget(safety_card)
         self.backup_check = QCheckBox("Создавать rollback-копию базы перед изменением записей")
         self.backup_check.setChecked(settings.create_database_backup)
@@ -454,7 +210,7 @@ class ApplicationSettingsPage(QWidget):
         )
         safety_card.body.addWidget(self.backup_check)
 
-        appearance_card = SectionCard("Оформление", "")
+        appearance_card = SectionCard("Оформление")
         layout.addWidget(appearance_card)
         theme_row = QHBoxLayout()
         theme_row.setSpacing(7)
@@ -470,7 +226,7 @@ class ApplicationSettingsPage(QWidget):
         theme_row.addWidget(self.theme_combo, 1)
         appearance_card.body.addLayout(theme_row)
 
-        sources_card = SectionCard("Онлайн-реестры НКП РГБ", "")
+        sources_card = SectionCard("Онлайн-реестры НКП РГБ")
         layout.addWidget(sources_card)
         source_hint = QLabel(
             "Выберите, какие официальные реестры обновлять автоматически перед проверкой. "
@@ -485,29 +241,29 @@ class ApplicationSettingsPage(QWidget):
         self.nkp_foreign_check.setChecked(settings.use_nkp_foreign_agents_registry)
         sources_card.body.addWidget(self.nkp_drug_check)
         sources_card.body.addWidget(self.nkp_foreign_check)
-        source_actions = QHBoxLayout()
-        source_actions.setSpacing(7)
+
+        # Кэш — два самостоятельных действия во всю ширину карточки.
         self.open_registry_cache_button = QPushButton("Открыть кэш")
         self.open_registry_cache_button.setObjectName("mutedButton")
+        self.open_registry_cache_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.clear_registry_cache_button = QPushButton("Очистить кэш")
         self.clear_registry_cache_button.setObjectName("mutedButton")
+        self.clear_registry_cache_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         if parent is not None:
             self.open_registry_cache_button.clicked.connect(parent.open_registry_cache_folder)
             self.clear_registry_cache_button.clicked.connect(parent.clear_registry_cache)
-        source_actions.addWidget(self.open_registry_cache_button)
-        source_actions.addWidget(self.clear_registry_cache_button)
-        source_actions.addStretch()
-        sources_card.body.addLayout(source_actions)
+        sources_card.body.addWidget(self.open_registry_cache_button)
+        sources_card.body.addWidget(self.clear_registry_cache_button)
 
-        updates_card = SectionCard("Обновления", "")
+        updates_card = SectionCard("Обновления")
         layout.addWidget(updates_card)
         self.auto_updates_check = QCheckBox("Проверять обновления на GitHub при запуске")
         self.auto_updates_check.setChecked(settings.check_updates_on_start)
         updates_card.body.addWidget(self.auto_updates_check)
-        check_button = QPushButton("Проверить обновления")
-        check_button.setObjectName("mutedButton")
+        self.check_updates_button = QPushButton("Проверить обновления")
+        self.check_updates_button.setObjectName("mutedButton")
         if parent is not None:
-            check_button.clicked.connect(lambda: parent.check_updates(manual=True))
+            self.check_updates_button.clicked.connect(lambda: parent.check_updates(manual=True))
 
         about_button = QPushButton("О программе")
         about_button.setObjectName("mutedButton")
@@ -516,25 +272,31 @@ class ApplicationSettingsPage(QWidget):
         info_actions = QHBoxLayout()
         info_actions.setSpacing(7)
         info_actions.addWidget(about_button, 1)
-        info_actions.addWidget(check_button, 1)
+        info_actions.addWidget(self.check_updates_button, 1)
         layout.addLayout(info_actions)
         layout.addStretch()
 
-        buttons = QHBoxLayout()
+        # Нижний колонтитул всегда остаётся на месте независимо от прокрутки.
+        self.footer = QFrame()
+        self.footer.setObjectName("settingsFooter")
+        footer_layout = QHBoxLayout(self.footer)
+        footer_layout.setContentsMargins(0, 7, 0, 0)
+        footer_layout.setSpacing(7)
         self.reset_settings_button = QPushButton("По умолчанию")
         self.reset_settings_button.setObjectName("mutedButton")
         self.reset_settings_button.setToolTip("Вернуть рекомендуемые настройки; изменения применятся после сохранения")
         self.reset_settings_button.clicked.connect(self._reset_defaults)
-        buttons.addWidget(self.reset_settings_button)
-        buttons.addStretch()
-        cancel_button = QPushButton("Отмена")
-        cancel_button.clicked.connect(self.cancelled.emit)
-        save_button = QPushButton("Сохранить")
-        save_button.setObjectName("primaryButton")
-        save_button.clicked.connect(self._save)
-        buttons.addWidget(save_button)
-        buttons.addWidget(cancel_button)
-        root.addLayout(buttons)
+        self.save_settings_button = QPushButton("Сохранить")
+        self.save_settings_button.setObjectName("primaryButton")
+        self.save_settings_button.clicked.connect(self._save)
+        self.cancel_settings_button = QPushButton("Отмена")
+        self.cancel_settings_button.setObjectName("mutedButton")
+        self.cancel_settings_button.clicked.connect(self.cancelled.emit)
+        footer_layout.addWidget(self.reset_settings_button)
+        footer_layout.addStretch()
+        footer_layout.addWidget(self.save_settings_button)
+        footer_layout.addWidget(self.cancel_settings_button)
+        root.addWidget(self.footer, 0)
 
     def _reset_defaults(self) -> None:
         defaults = ApplicationSettings()
@@ -636,15 +398,12 @@ class MainWindow(
 
     def __init__(self) -> None:
         super().__init__()
-        self._window_resize_tracking = False
-        self._programmatic_window_resize = False
-        self._window_manually_resized = False
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
-        # Размер окна подстраивается под текущую страницу. Если содержимое не
-        # помещается на экране, оно остаётся прокручиваемым.
-        self.setMinimumSize(520, 360)
-        self.resize(560, 520)
+        # Главное окно имеет устойчивый стартовый размер и дальше меняется только
+        # пользователем. Содержимое, которое не помещается, прокручивается внутри.
+        self.setMinimumSize(560, 420)
+        self.resize(920, 700)
 
         self.thread: QThread | None = None
         self.worker: QObject | None = None
@@ -673,6 +432,7 @@ class MainWindow(
         self.progress_dialog.cancel_requested.connect(self._cancel_current_comparison)
         self.nkp_refresh_thread: QThread | None = None
         self.nkp_refresh_worker: NkpRegistryRefreshWorker | None = None
+        self._pending_nkp_download: tuple[str, Path] | None = None
         self._journal_lines: deque[str] = deque(maxlen=self.RUN_JOURNAL_MAX_LINES)
         self._journal_save_timer = QTimer(self)
         self._journal_save_timer.setSingleShot(True)
@@ -680,7 +440,6 @@ class MainWindow(
 
         self._build_ui()
         self._apply_style()
-        self._align_all_control_heights()
         self._restore_window_state()
         self._irbis_health_timer = QTimer(self)
         self._irbis_health_timer.setInterval(self.IRBIS_HEALTH_CHECK_INTERVAL_MS)
@@ -692,9 +451,6 @@ class MainWindow(
         QTimer.singleShot(1_500, self._auto_check_irbis_connection)
         if self.app_settings.check_updates_on_start:
             QTimer.singleShot(3_000, lambda: self.check_updates(manual=False))
-
-    def _asset_icon(self, filename: str) -> QIcon:
-        return QIcon(icon_path(filename))
 
     @staticmethod
     def _database_connector_config_path() -> Path:
@@ -708,31 +464,123 @@ class MainWindow(
     def _run_journal_path() -> Path:
         return run_journal_path()
 
-    def _align_all_control_heights(self) -> None:
-        """Согласует высоту полей и кнопок, чтобы форма оставалась компактной."""
-        field_height = max(
-            self.irbis_host_edit.minimumHeight(),
-            self.irbis_host_edit.sizeHint().height(),
-        )
+    @staticmethod
+    def _safe_int(value: object, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
-        for field in self.findChildren(QLineEdit):
-            if field.objectName() != "qt_spinbox_lineedit":
-                field.setFixedHeight(field_height)
-        for field in self.findChildren(QComboBox):
-            field.setFixedHeight(field_height)
-        for field in self.findChildren(QSpinBox):
-            field.setFixedHeight(field_height)
-        for button in self.findChildren(QPushButton):
-            button.setFixedHeight(field_height)
+    @staticmethod
+    def _safe_string_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item).strip()]
 
-        self.direct_irbis_box.setFixedHeight(field_height)
-        self.irbis_password_box.setFixedHeight(field_height)
-        self.irbis_database_box.setFixedHeight(field_height)
+    @staticmethod
+    def _fill_path_list(widget, paths: list[str]) -> None:
+        widget.clear()
+        for path in paths:
+            item = QListWidgetItem(path)
+            item.setData(Qt.ItemDataRole.UserRole, True)
+            widget.addItem(item)
+
+    def _restore_interface_state(self, data: dict[str, object]) -> None:
+        ui = data.get("ui", {})
+        if not isinstance(ui, dict):
+            return
+
+        database_paths = self._safe_string_list(ui.get("database_paths"))
+        excel_paths = self._safe_string_list(ui.get("excel_paths"))
+        foreign_path = str(ui.get("foreign_agents_path", "") or "")
+        self._fill_path_list(self.database_list, database_paths)
+        self._fill_path_list(self.excel_list, excel_paths)
+        self.foreign_agents_path = foreign_path
+        self._update_database_summary()
+        self._update_excel_summary()
+        self._update_foreign_agents_summary()
+
+        if "output_path" in ui:
+            self.output_edit.setText(str(ui.get("output_path", "") or ""))
+        if "modified_database_path" in ui:
+            self.modified_database_edit.setText(str(ui.get("modified_database_path", "") or ""))
+
+        source_mode = str(ui.get("source_mode", "") or "")
+        source_index = self.source_mode_combo.findData(source_mode)
+        if source_index >= 0:
+            self.source_mode_combo.setCurrentIndex(source_index)
+
+        output_mode = str(ui.get("output_mode", "") or "")
+        output_index = self.output_mode_combo.findData(output_mode)
+        if output_index >= 0:
+            self.output_mode_combo.setCurrentIndex(output_index)
+
+        journal_filter = str(ui.get("journal_filter", "") or "")
+        journal_index = self.journal_filter_combo.findData(journal_filter)
+        if journal_index >= 0:
+            self.journal_filter_combo.setCurrentIndex(journal_index)
+        self.journal_search_edit.setText(str(ui.get("journal_search", "") or ""))
+
+        settings_draft = ui.get("settings_draft", {})
+        if isinstance(settings_draft, dict):
+            page = self.application_settings_page
+            if isinstance(settings_draft.get("create_database_backup"), bool):
+                page.backup_check.setChecked(settings_draft["create_database_backup"])
+            if isinstance(settings_draft.get("check_updates_on_start"), bool):
+                page.auto_updates_check.setChecked(settings_draft["check_updates_on_start"])
+            theme = str(settings_draft.get("theme", "") or "")
+            theme_index = page.theme_combo.findData(theme)
+            if theme_index >= 0:
+                page.theme_combo.setCurrentIndex(theme_index)
+            if isinstance(settings_draft.get("use_nkp_drug_registry"), bool):
+                page.nkp_drug_check.setChecked(settings_draft["use_nkp_drug_registry"])
+            if isinstance(settings_draft.get("use_nkp_foreign_agents_registry"), bool):
+                page.nkp_foreign_check.setChecked(settings_draft["use_nkp_foreign_agents_registry"])
+
+        positions = ui.get("workflow_scroll_positions", {})
+        if isinstance(positions, dict):
+            self._workflow_scroll_positions = {
+                str(key): max(0, self._safe_int(value))
+                for key, value in positions.items()
+                if str(key) in {"data", "parameters", "results", "settings"}
+            }
+        self._advanced_scroll_position = max(0, self._safe_int(ui.get("advanced_scroll", 0)))
+        settings_scroll = max(0, self._safe_int(ui.get("settings_scroll", 0)))
+        log_scroll = max(0, self._safe_int(ui.get("log_scroll", 0)))
+
+        page_key = str(ui.get("workflow_page", "data") or "data")
+        target_page = {
+            "data": self.data_tab,
+            "parameters": self.parameters_tab,
+            "results": self.results_tab,
+            "settings": self.application_settings_page,
+        }.get(page_key, self.data_tab)
+        # При восстановлении currentChanged не должен перезаписать сохранённую
+        # позицию предыдущей вкладки текущим (нулевым) значением scrollbar.
+        self._active_workflow_page_key = None
+        self.workflow_tabs.setCurrentWidget(target_page)
+        if target_page is self.application_settings_page:
+            self.marker_settings_button.setChecked(True)
+        self._active_workflow_page_key = self._workflow_page_key(target_page)
+
+        def restore_scrolls() -> None:
+            current_key = self._workflow_page_key()
+            main_bar = self.scroll_area.verticalScrollBar()
+            main_target = int(self._workflow_scroll_positions.get(current_key, 0))
+            main_bar.setValue(max(main_bar.minimum(), min(main_target, main_bar.maximum())))
+            settings_bar = self.application_settings_page.content_scroll.verticalScrollBar()
+            settings_bar.setValue(max(settings_bar.minimum(), min(settings_scroll, settings_bar.maximum())))
+            log_bar = self.run_log.verticalScrollBar()
+            log_bar.setValue(max(log_bar.minimum(), min(log_scroll, log_bar.maximum())))
+
+        QTimer.singleShot(0, restore_scrolls)
 
     def _restore_window_state(self) -> None:
         try:
             data = json.loads(window_state_path().read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
             data = {}
 
         try:
@@ -743,7 +591,6 @@ class MainWindow(
             saved_width = self.width()
             saved_height = self.height()
             has_saved_geometry = False
-        self._window_manually_resized = has_saved_geometry
 
         screens = QApplication.screens()
         primary = QApplication.primaryScreen()
@@ -772,12 +619,10 @@ class MainWindow(
                 area.y() + max(0, (area.height() - height) // 2),
             )
 
+        self._restore_interface_state(data)
         if has_saved_geometry and bool(data.get("maximized", False)):
             self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
-        elif not has_saved_geometry:
-            QTimer.singleShot(0, lambda: self._resize_height_to_current_page(force=True))
-        else:
-            QTimer.singleShot(0, self._fit_scroll_content)
+        QTimer.singleShot(0, self._fit_scroll_content)
 
     def _save_window_state(self) -> None:
         if self.isMaximized():
@@ -787,12 +632,43 @@ class MainWindow(
         else:
             position = self.frameGeometry().topLeft()
             normal_size = self.size()
+
+        current_page_key = self._workflow_page_key()
+        if current_page_key != "unknown":
+            self._workflow_scroll_positions[current_page_key] = self.scroll_area.verticalScrollBar().value()
+        if hasattr(self, "advanced_scroll"):
+            self._advanced_scroll_position = self.advanced_scroll.verticalScrollBar().value()
+
         payload = {
+            "schema_version": 2,
             "x": position.x(),
             "y": position.y(),
             "width": normal_size.width(),
             "height": normal_size.height(),
             "maximized": self.isMaximized(),
+            "ui": {
+                "workflow_page": current_page_key,
+                "workflow_scroll_positions": dict(self._workflow_scroll_positions),
+                "settings_scroll": self.application_settings_page.content_scroll.verticalScrollBar().value(),
+                "advanced_scroll": int(self._advanced_scroll_position),
+                "log_scroll": self.run_log.verticalScrollBar().value(),
+                "source_mode": str(self.source_mode_combo.currentData() or "irbis"),
+                "output_mode": str(self.output_mode_combo.currentData() or "full"),
+                "database_paths": self._database_paths(),
+                "foreign_agents_path": self.foreign_agents_path.strip(),
+                "excel_paths": self._excel_paths(),
+                "output_path": self.output_edit.text().strip(),
+                "modified_database_path": self.modified_database_edit.text().strip(),
+                "journal_filter": str(self.journal_filter_combo.currentData() or "all"),
+                "journal_search": self.journal_search_edit.text(),
+                "settings_draft": {
+                    "create_database_backup": self.application_settings_page.backup_check.isChecked(),
+                    "check_updates_on_start": self.application_settings_page.auto_updates_check.isChecked(),
+                    "theme": str(self.application_settings_page.theme_combo.currentData() or THEME_SYSTEM),
+                    "use_nkp_drug_registry": self.application_settings_page.nkp_drug_check.isChecked(),
+                    "use_nkp_foreign_agents_registry": self.application_settings_page.nkp_foreign_check.isChecked(),
+                },
+            },
         }
         path = window_state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -808,12 +684,6 @@ class MainWindow(
     def open_confirmation_memory(self) -> None:
         """Открывает сохранённые решения ручной проверки для просмотра и удаления."""
         ConfirmationMemoryDialog(manual_review_memory_path(), self).exec()
-
-    def open_marker_settings(self) -> None:
-        dialog = MarkerSettingsDialog(self.marker_settings, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.marker_settings = dict(dialog.settings)
-            self._apply_marker_settings_to_ui()
 
     def open_application_settings(self) -> None:
         page = self.application_settings_page
@@ -922,7 +792,7 @@ class MainWindow(
         # что выбранный локальный файл сейчас не участвует в сравнении.
         for widget in (self.foreign_agents_list, self.foreign_agents_button):
             widget.setEnabled(not foreign_online)
-        self.clear_foreign_agents_button.setEnabled(bool(self.foreign_agents_edit.text().strip()))
+        self.clear_foreign_agents_button.setEnabled(bool(self.foreign_agents_path.strip()))
         self.foreign_agents_list.setToolTip(
             "Онлайн-реестр НКП включён: локальный файл временно не используется."
             if foreign_online
@@ -947,6 +817,64 @@ class MainWindow(
         url = NKP_FOREIGN_AGENTS_PAGE_URL if registry == "foreign" else NKP_DRUG_PAGE_URL
         if not QDesktopServices.openUrl(QUrl(url)):
             QMessageBox.warning(self, APP_TITLE, f"Не удалось открыть страницу НКП РГБ:\n{url}")
+
+    def download_nkp_registry_file(self, registry: str) -> None:
+        """Обновляет реестр и сохраняет его копию в выбранное пользователем место."""
+        if registry not in {"drug", "foreign"}:
+            return
+        if self.thread is not None and self.thread.isRunning():
+            QMessageBox.information(self, APP_TITLE, "Сначала дождитесь завершения текущей проверки.")
+            return
+        if self.nkp_refresh_thread is not None and self.nkp_refresh_thread.isRunning():
+            QMessageBox.information(self, APP_TITLE, "Обновление реестра НКП уже выполняется.")
+            return
+        filename = FOREIGN_AGENTS_CACHE_FILENAME if registry == "foreign" else DRUG_CACHE_FILENAME
+        downloads = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation)
+        initial_dir = Path(downloads) if downloads else Path.home() / "Downloads"
+        initial = str(initial_dir / filename)
+        target, _ = QFileDialog.getSaveFileName(
+            self,
+            "Скачать файл реестра",
+            initial,
+            "Excel (*.xlsx)",
+        )
+        if not target:
+            return
+        if not target.lower().endswith(".xlsx"):
+            target += ".xlsx"
+        self._pending_nkp_download = (registry, Path(target))
+        self.refresh_nkp_registry(registry)
+
+    def _complete_pending_nkp_download(self, registry: str, result: object) -> None:
+        pending = self._pending_nkp_download
+        if pending is None or pending[0] != registry:
+            return
+        self._pending_nkp_download = None
+        source = Path(getattr(result, "path", ""))
+        target = pending[1]
+        if not source.is_file():
+            QMessageBox.warning(self, APP_TITLE, "Файл реестра не найден после обновления.")
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != target.resolve():
+                shutil.copy2(source, target)
+        except OSError as exc:
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось сохранить файл реестра:\n{exc}")
+            return
+        self._set_status(f"Файл реестра сохранён: {target}", "success")
+        QMessageBox.information(self, APP_TITLE, f"Файл реестра сохранён:\n{target}")
+
+    def _set_nkp_action_buttons_enabled(self, registry: str, enabled: bool) -> None:
+        names = (
+            ("refresh_nkp_foreign_button", "open_nkp_foreign_button", "download_nkp_foreign_button")
+            if registry == "foreign"
+            else ("refresh_nkp_drug_button", "open_nkp_drug_button", "download_nkp_drug_button")
+        )
+        for name in names:
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(enabled)
 
     def open_registry_cache_folder(self) -> None:
         folder = self._registry_cache_dir()
@@ -993,9 +921,8 @@ class MainWindow(
             return
         if registry not in {"drug", "foreign"}:
             return
-        button = self.refresh_nkp_foreign_button if registry == "foreign" else self.refresh_nkp_drug_button
         label = self.nkp_foreign_status_label if registry == "foreign" else self.nkp_drug_status_label
-        button.setEnabled(False)
+        self._set_nkp_action_buttons_enabled(registry, False)
         label.setText("Обновление с НКП РГБ…")
         self._set_status("Обновление реестра НКП РГБ…", "running")
 
@@ -1024,56 +951,20 @@ class MainWindow(
             + (f" · {detail}" if detail else ""),
             "warning" if used_cache else "success",
         )
-        button = self.refresh_nkp_foreign_button if registry == "foreign" else self.refresh_nkp_drug_button
-        button.setEnabled(True)
+        self._set_nkp_action_buttons_enabled(registry, True)
+        self._complete_pending_nkp_download(registry, result)
 
     def _nkp_registry_refresh_failed(self, registry: str, error: str) -> None:
         self._refresh_registry_cache_status()
-        button = self.refresh_nkp_foreign_button if registry == "foreign" else self.refresh_nkp_drug_button
-        button.setEnabled(True)
+        self._set_nkp_action_buttons_enabled(registry, True)
+        if self._pending_nkp_download is not None and self._pending_nkp_download[0] == registry:
+            self._pending_nkp_download = None
         self._set_status("Не удалось обновить реестр НКП", "error")
         QMessageBox.warning(self, APP_TITLE, f"Не удалось обновить реестр НКП РГБ:\n{error}")
 
     def _nkp_registry_refresh_thread_finished(self) -> None:
         self.nkp_refresh_thread = None
         self.nkp_refresh_worker = None
-
-    def open_database_connector(self) -> None:
-        """Запускает отдельную утилиту прямого подключения к хранилищу/ИРБИС."""
-        database_paths = self._database_paths()
-        database_path = database_paths[0] if database_paths else ""
-        modified_paths = [path.strip() for path in self.last_modified_database_path.split(";") if path.strip()]
-        modified_path = modified_paths[0] if modified_paths else self.modified_database_edit.text().strip()
-
-        try:
-            if getattr(sys, "frozen", False):
-                base = Path(sys.executable).resolve().parent
-                candidates = [
-                    base / "IRBIS64ControlDB.exe",
-                ]
-                connector = next((path for path in candidates if path.is_file()), None)
-                if connector is None:
-                    raise FileNotFoundError(
-                        "Рядом с ИРБИС64 Контроль не найден IRBIS64ControlDB.exe. "
-                        "Пересоберите комплект через scripts\\build_exe.bat."
-                    )
-                command = [str(connector)]
-            else:
-                connector_script = project_root() / "db_connector.py"
-                if not connector_script.is_file():
-                    raise FileNotFoundError(f"Не найден файл {connector_script.name}")
-                command = [sys.executable, str(connector_script)]
-
-            if database_path:
-                command.extend(["--database", database_path])
-            if modified_path and Path(modified_path).is_file():
-                command.extend(["--modified", modified_path])
-            subprocess.Popen(
-                command,
-                cwd=str(Path(command[0]).resolve().parent if getattr(sys, "frozen", False) else project_root()),
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось запустить подключение к базе:\n{exc}")
 
     @staticmethod
     def _make_field_spin(value: int = 1) -> QSpinBox:
@@ -1082,7 +973,7 @@ class MainWindow(
         spin.setValue(value)
         spin.setPrefix("#")
         spin.setMinimumWidth(88)
-        spin.setMaximumWidth(88)
+        spin.setMaximumWidth(128)
         return spin
 
     def _apply_marker_settings_to_ui(self) -> None:
@@ -1090,7 +981,6 @@ class MainWindow(
             return
         self.match_rules_editor.set_values(self.marker_settings)
         self.fuzzy_match_check.setChecked(bool(self.marker_settings["use_fuzzy"]))
-        self.create_excel_report_check.setChecked(bool(self.marker_settings["create_excel_report"]))
         self.report_substances_check.setChecked(bool(self.marker_settings["report_substances"]))
         self.report_foreign_agents_check.setChecked(bool(self.marker_settings["report_foreign_agents"]))
         self.report_combined_check.setChecked(bool(self.marker_settings["report_combined"]))
@@ -1098,8 +988,7 @@ class MainWindow(
         self.report_deduplicate_check.setChecked(bool(self.marker_settings["report_deduplicate"]))
         sort_index = self.report_sort_combo.findData(str(self.marker_settings["report_sort"]))
         self.report_sort_combo.setCurrentIndex(max(0, sort_index))
-        self.report_only_check.setChecked(bool(self.marker_settings["report_only"]))
-        self._update_report_controls(self.create_excel_report_check.isChecked())
+        self._sync_output_mode_from_settings()
         self.substance_marker_edit.setText(str(self.marker_settings["substance_marker"]))
         self.foreign_marker_edit.setText(str(self.marker_settings["foreign_agent_marker_template"]))
         self.foreign_organization_marker_edit.setText(str(self.marker_settings["foreign_organization_marker_template"]))
@@ -1115,7 +1004,6 @@ class MainWindow(
         )
         self.age_marker_check.setChecked(bool(self.marker_settings["age_marker_enabled"]))
         self._update_marker_control_states()
-        self._sync_output_mode_from_checks()
 
     def _update_marker_control_states(self, *_args) -> None:
         groups = (
@@ -1138,14 +1026,14 @@ class MainWindow(
             **self.match_rules_editor.values(),
             "use_fuzzy": self.fuzzy_match_check.isChecked(),
             "fuzzy_threshold": 92,
-            "create_excel_report": self.create_excel_report_check.isChecked(),
+            "create_excel_report": str(self.output_mode_combo.currentData()) in {"full", "report"},
             "report_substances": self.report_substances_check.isChecked(),
             "report_foreign_agents": self.report_foreign_agents_check.isChecked(),
             "report_combined": self.report_combined_check.isChecked(),
             "report_summary": self.report_summary_check.isChecked(),
             "report_deduplicate": self.report_deduplicate_check.isChecked(),
             "report_sort": str(self.report_sort_combo.currentData()),
-            "report_only": self.report_only_check.isChecked(),
+            "report_only": str(self.output_mode_combo.currentData()) == "report",
             "substance_marker": self.substance_marker_edit.text().strip(),
             "foreign_agent_marker_template": self.foreign_marker_edit.text().strip(),
             "foreign_organization_marker_template": self.foreign_organization_marker_edit.text().strip(),
@@ -1164,11 +1052,11 @@ class MainWindow(
         values = self._marker_values_from_ui()
         if not any(bool(values[key]) for key in ("use_isbn_matching", "use_title_fallback", *EXTRA_MATCH_RULES)):
             QMessageBox.warning(self, APP_TITLE, "Включите хотя бы одно правило совпадения.")
-            self.workflow_tabs.setCurrentIndex(1)
+            self.workflow_tabs.setCurrentWidget(self.parameters_tab)
             return False
         if bool(values["report_only"]) and not bool(values["create_excel_report"]):
             QMessageBox.warning(self, APP_TITLE, "Для режима «Только отчёт» включите создание Excel-отчёта.")
-            self.workflow_tabs.setCurrentIndex(1)
+            self.workflow_tabs.setCurrentWidget(self.parameters_tab)
             return False
         report_keys = (
             "report_substances",
@@ -1178,7 +1066,7 @@ class MainWindow(
         )
         if bool(values["create_excel_report"]) and not any(bool(values[key]) for key in report_keys):
             QMessageBox.warning(self, APP_TITLE, "Выберите хотя бы один лист для Excel-отчёта.")
-            self.workflow_tabs.setCurrentIndex(1)
+            self.workflow_tabs.setCurrentWidget(self.parameters_tab)
             return False
         text_values = [value for value in values.values() if isinstance(value, str)]
         if any("\n" in value or "\r" in value for value in text_values):
@@ -1238,8 +1126,6 @@ class MainWindow(
         self._sync_marker_settings_from_ui(save=True, show_message=False)
 
     def _update_report_controls(self, enabled: bool) -> None:
-        if not enabled and self.report_only_check.isChecked():
-            self.report_only_check.setChecked(False)
         for widget in (
             self.output_label,
             self.output_edit,
@@ -1251,29 +1137,12 @@ class MainWindow(
         ):
             widget.setEnabled(enabled)
 
-    def _update_report_only(self, enabled: bool) -> None:
-        if enabled and not self.create_excel_report_check.isChecked():
-            self.create_excel_report_check.setChecked(True)
+    def _update_output_target_controls(self, report_only: bool) -> None:
         direct = self.direct_irbis_checkbox.isChecked() if hasattr(self, "direct_irbis_checkbox") else False
         for name in ("modified_database_label", "modified_database_edit", "txt_path_button"):
             widget = getattr(self, name, None)
             if widget is not None:
-                widget.setEnabled(not enabled and not direct)
-
-    def create_matches_excel(self) -> None:
-        """Запускает проверку из раздела отчёта без добавления меток."""
-        create_report = self.create_excel_report_check.isChecked()
-        report_only = self.report_only_check.isChecked()
-        self.create_excel_report_check.setChecked(True)
-        self.report_only_check.setChecked(True)
-        try:
-            self.start_comparison()
-        finally:
-            # Рабочий поток уже получил копию параметров. Возвращаем прежние
-            # настройки интерфейса, чтобы обычный запуск не стал отчётным.
-            self.create_excel_report_check.setChecked(create_report)
-            self.report_only_check.setChecked(report_only)
-            self._sync_marker_settings_from_ui(save=True, show_message=False)
+                widget.setEnabled(not report_only and not direct)
 
     def select_modified_database_output(self) -> None:
         initial = self.modified_database_edit.text().strip() or self._default_modified_database_path()

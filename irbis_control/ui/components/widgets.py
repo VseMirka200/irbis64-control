@@ -173,7 +173,7 @@ class LayoutHintWidget(QWidget):
 
 # Задаёт единые отступы и заголовки для блоков настроек.
 class SectionCard(QFrame):
-    def __init__(self, title: str, description: str) -> None:
+    def __init__(self, title: str) -> None:
         super().__init__()
         self.setObjectName("sectionCard")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
@@ -193,23 +193,11 @@ class SectionCard(QFrame):
         title_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
         self.outer_layout.addLayout(title_row)
 
-        self.description_label: QLabel | None = None
-        if description:
-            self.description_label = QLabel(description)
-            self.description_label.setObjectName("cardDescription")
-            self.description_label.setWordWrap(True)
-            self.description_label.hide()
-            self.outer_layout.addWidget(self.description_label)
-
         self.body = QVBoxLayout()
         self.body.setContentsMargins(0, 1, 0, 0)
         self.body.setSpacing(4)
         self.outer_layout.addLayout(self.body)
 
-    def set_compact(self, compact: bool, very_compact: bool = False) -> None:
-        self.outer_layout.setContentsMargins(4, 4, 4, 4)
-        self.outer_layout.setSpacing(4)
-        self.body.setSpacing(4)
 
 
 # Позволяет выбрать несколько полей правила без закрытия списка после каждого щелчка.
@@ -284,74 +272,6 @@ class MatchFieldsComboBox(QComboBox):
         painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
 
 
-# Позволяет менять высоту списка мышью и клавиатурой.
-class ListResizeHandle(QFrame):
-    heightChanged = pyqtSignal(int)
-
-    def __init__(
-        self,
-        target: QListWidget,
-        *,
-        minimum_height: int = 76,
-        maximum_height: int = 600,
-        accessible_name: str = "Изменить высоту списка правил",
-    ) -> None:
-        super().__init__()
-        self.target = target
-        self.minimum_height = minimum_height
-        self.maximum_height = maximum_height
-        self._drag_y: float | None = None
-        self._start_height = target.height()
-        self.setFixedHeight(10)
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.setAccessibleName(accessible_name)
-        self.setToolTip(
-            "Потяните вверх или вниз, чтобы изменить высоту списка. Также можно использовать стрелки ↑ и ↓."
-        )
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 3, 0, 3)
-        grip = QFrame()
-        grip.setObjectName("listResizeGrip")
-        grip.setFixedSize(32, 3)
-        grip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignCenter)
-
-    def _set_height(self, height: int) -> None:
-        bounded_height = max(self.minimum_height, min(self.maximum_height, height))
-        self.target.setFixedHeight(bounded_height)
-        self.heightChanged.emit(bounded_height)
-
-    def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_y = event.globalPosition().y()
-            self._start_height = self.target.height()
-            event.accept()
-        else:
-            super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event) -> None:
-        if self._drag_y is not None:
-            self._set_height(self._start_height + round(event.globalPosition().y() - self._drag_y))
-            event.accept()
-        else:
-            super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_y = None
-            event.accept()
-        else:
-            super().mouseReleaseEvent(event)
-
-    def keyPressEvent(self, event) -> None:
-        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
-            self._set_height(self.target.height() + (20 if event.key() == Qt.Key.Key_Down else -20))
-            event.accept()
-        else:
-            super().keyPressEvent(event)
-
-
 # Управляет правилами сравнения и не допускает дубли и пустой набор правил.
 class MatchRulesEditor(QWidget):
     changed = pyqtSignal()
@@ -371,14 +291,13 @@ class MatchRulesEditor(QWidget):
         root.addLayout(row)
         self.rules = QListWidget()
         self.rules.setObjectName("matchRulesList")
-        self.rules.setFixedHeight(76)
+        self.rules.setMinimumHeight(100)
+        self.rules.setMaximumHeight(180)
         self.rules.setWordWrap(True)
         self.rules.setTextElideMode(Qt.TextElideMode.ElideNone)
         self.rules.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.rules.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         root.addWidget(self.rules)
-        self.resize_handle = ListResizeHandle(self.rules)
-        root.addWidget(self.resize_handle)
         self.error = QLabel()
         self.error.setObjectName("errorLabel")
         self.error.setWordWrap(True)

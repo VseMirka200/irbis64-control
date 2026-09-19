@@ -60,7 +60,7 @@ class UiTests(unittest.TestCase):
         window.show()
         self.app.processEvents()
         self.assertEqual(window.workflow_tabs.count(), 4)
-        self.assertEqual(len(window.section_cards), 8)
+        self.assertFalse(hasattr(window, "section_cards"))
         self.assertEqual(
             [window.workflow_tabs.tabText(index) for index in range(3)],
             ["Данные", "Параметры", "Результат"],
@@ -89,14 +89,16 @@ class UiTests(unittest.TestCase):
         window.source_mode_combo.setCurrentIndex(window.source_mode_combo.findData("txt"))
         self.assertFalse(window.direct_irbis_checkbox.isChecked())
         self.assertIn("TXT", window.source_mode_hint.text())
-        self.assertEqual("Скачать реестры", window.download_registries_label.text())
-        self.assertTrue(window.download_registries_label.isHidden())
+        self.assertFalse(hasattr(window, "download_registries_label"))
         self.assertEqual("Полезные ссылки", window.source_useful_links_button.text())
         self.assertIs(window.source_mode_combo.parentWidget(), window.source_useful_links_button.parentWidget())
 
         window.output_mode_combo.setCurrentIndex(window.output_mode_combo.findData("report"))
-        self.assertTrue(window.create_excel_report_check.isChecked())
-        self.assertTrue(window.report_only_check.isChecked())
+        self.assertFalse(hasattr(window, "create_excel_report_check"))
+        self.assertFalse(hasattr(window, "report_only_check"))
+        values = window._marker_values_from_ui()
+        self.assertTrue(values["create_excel_report"])
+        self.assertTrue(values["report_only"])
 
         self.assertFalse(window.advanced_options_toggle.isCheckable())
         self.assertFalse(window.advanced_settings_dialog.isVisible())
@@ -104,8 +106,9 @@ class UiTests(unittest.TestCase):
         self.assertFalse(window.fuzzy_match_check.isHidden())
 
         self.assertFalse(window.connection_settings_button.isCheckable())
-        self.assertTrue(window.connection_card.isHidden())
-        self.assertTrue(window.base_card.isHidden())
+        self.assertFalse(hasattr(window, "connection_card"))
+        self.assertFalse(hasattr(window, "base_card"))
+        self.assertTrue(window._irbis_state_container.isHidden())
 
         settings_page = window.application_settings_page
         settings_page.backup_check.setChecked(False)
@@ -188,7 +191,7 @@ class UiTests(unittest.TestCase):
         self.assertGreater(second.maximumWidth(), second.width())
         self.assertGreater(second.maximumHeight(), second.height())
 
-    def test_source_registries_have_room_and_do_not_leave_stale_window_space(self) -> None:
+    def test_source_registries_have_stable_height_without_manual_resize_handles(self) -> None:
         window = main_window.MainWindow()
         self.addCleanup(window.deleteLater)
         self.addCleanup(window.close)
@@ -203,56 +206,18 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual(window.foreign_agents_list.height(), 84)
         self.assertEqual(window.excel_list.height(), 84)
-        for card in (window.foreign_agents_card, window.excel_card):
-            self.assertEqual(card.height(), card.sizeHint().height())
-            self.assertLessEqual(
-                card.height() - card.body.geometry().bottom(),
-                card.outer_layout.contentsMargins().bottom() + 2,
-            )
-        page_layout = window.data_tab.layout()
-        last_card_bottom = max(
-            window.foreign_agents_card.geometry().bottom(),
-            window.excel_card.geometry().bottom(),
-        )
-        self.assertLessEqual(
-            window.data_tab.height() - last_card_bottom,
-            page_layout.contentsMargins().bottom() + 3,
-        )
+        self.assertFalse(hasattr(window, "foreign_agents_resize_handle"))
+        self.assertFalse(hasattr(window, "excel_resize_handle"))
+        self.assertFalse(hasattr(window, "download_registries_label"))
+        self.assertFalse(hasattr(window, "clear_all_button"))
 
+        initial_size = window.size()
+        window._update_excel_summary()
+        window._update_foreign_agents_summary()
+        self.app.processEvents()
+        self.assertEqual(window.size(), initial_size)
         self.assertGreater(window.maximumWidth(), window.width())
         self.assertGreater(window.maximumHeight(), window.height())
-
-        old_window_height = window.height()
-        window.excel_resize_handle._set_height(144)
-        self.app.processEvents()
-        window._fit_scroll_content()
-        self.app.processEvents()
-        self.assertEqual(window.excel_list.height(), 144)
-        self.assertGreater(window.height(), old_window_height)
-
-        window._update_excel_summary()
-        self.assertEqual(window.excel_list.height(), 144)
-
-        window.excel_resize_handle._set_height(58)
-        window.foreign_agents_resize_handle._set_height(58)
-        self.app.processEvents()
-        window._resize_height_to_current_page()
-        self.app.processEvents()
-        last_card_bottom = max(
-            window.foreign_agents_card.geometry().bottom(),
-            window.excel_card.geometry().bottom(),
-        )
-        self.assertLessEqual(
-            window.data_tab.height() - last_card_bottom,
-            page_layout.contentsMargins().bottom() + 3,
-        )
-
-        window.resize(900, 700)
-        self.app.processEvents()
-        window.excel_resize_handle._set_height(164)
-        self.app.processEvents()
-        self.assertEqual(window.size().width(), 900)
-        self.assertEqual(window.size().height(), 700)
 
     def test_connection_dialog_returns_edited_values(self) -> None:
         dialog = IrbisConnectionDialog(

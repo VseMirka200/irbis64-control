@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, Qt, QTimer
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QApplication,
     QComboBox,
     QDialog,
     QFrame,
@@ -18,54 +16,13 @@ from PyQt6.QtWidgets import (
 )
 
 from irbis_control.application.marker_settings import DEFAULT_MARKER_SETTINGS
-from irbis_control.paths import icon_path
 from irbis_control.ui.components.widgets import SectionCard
-from irbis_control.ui.theme import apply_main_title_font, main_window_stylesheet
+from irbis_control.ui.theme import main_window_stylesheet
 
 
 class MainWindowLayoutMixin:
-    def eventFilter(self, watched, event) -> bool:
-        if (
-            hasattr(self, "scroll_area")
-            and watched is self.scroll_area.viewport()
-            and event.type() == QEvent.Type.Wheel
-            and hasattr(self, "workflow_tabs")
-            and self.workflow_tabs.currentWidget()
-            in (
-                getattr(self, "data_tab", None),
-                getattr(self, "parameters_tab", None),
-                getattr(self, "results_tab", None),
-            )
-            and self.scroll_area.verticalScrollBar().maximum() == 0
-        ):
-            self.scroll_area.verticalScrollBar().setValue(0)
-            return True
-        return super().eventFilter(watched, event)
-
     def _compose_simplified_workflow(self) -> None:
         """Перекомпоновывает рабочие элементы в короткий сценарий из трёх шагов."""
-        self._simplified_workflow = True
-
-        for widget in (
-            self.irbis_intro,
-            self.files_intro,
-            self.lists_intro,
-            self.markers_intro,
-            self.results_intro,
-            self.irbis_next_button,
-            self.next_lists_button,
-            self.next_marks_button,
-            self.next_run_button,
-            self.run_tab_start_button,
-            self.create_matches_excel_button,
-            self.report_create_card,
-            self.action_title,
-            self.action_hint,
-        ):
-            widget.hide()
-
-        while self.workflow_tabs.count():
-            self.workflow_tabs.removeTab(0)
 
         # Шаг 1. Источник и проверочные реестры находятся на одной странице.
         data_layout = self.irbis_tab.layout()
@@ -75,7 +32,7 @@ class MainWindowLayoutMixin:
         data_layout.setContentsMargins(8, 8, 8, 4)
         data_layout.setSpacing(8)
 
-        mode_card = SectionCard("Где находятся записи", "")
+        mode_card = SectionCard("Где находятся записи")
         mode_row = QHBoxLayout()
         mode_row.setSpacing(8)
         mode_label = QLabel("Источник")
@@ -100,10 +57,6 @@ class MainWindowLayoutMixin:
         self.source_mode_hint.setObjectName("cardDescription")
         self.source_mode_hint.setWordWrap(True)
         mode_card.body.addWidget(self.source_mode_hint)
-        # Совместимость со сторонним кодом, который мог обращаться к старому полю.
-        # Элемент больше не показывается в интерфейсе.
-        self.download_registries_label = QLabel("Скачать реестры")
-        self.download_registries_label.hide()
         data_layout.addWidget(mode_card)
 
         connection_overview = QFrame()
@@ -127,17 +80,9 @@ class MainWindowLayoutMixin:
         self.connection_settings_button.setObjectName("mutedButton")
         self.connection_settings_button.setToolTip("Открыть параметры подключения в отдельном окне")
         self.connection_settings_button.clicked.connect(self.open_connection_settings)
-        # Старое имя оставлено как совместимый псевдоним для внешних интеграций.
-        self.connection_details_toggle = self.connection_settings_button
         overview_layout.addWidget(self.connection_settings_button, 0, Qt.AlignmentFlag.AlignVCenter)
         # Исходные контролы хранят состояние и используются операциями ИРБИС, но больше
         # не встраиваются в тесную карточку главного окна.
-        self.connection_card.hide()
-        self.base_card.hide()
-        self.irbis_actions.hide()
-        self.direct_irbis_box.hide()
-        self.direct_note.hide()
-        self.irbis_local_hint.hide()
         data_layout.addWidget(connection_overview)
 
         records_header = QHBoxLayout()
@@ -155,12 +100,8 @@ class MainWindowLayoutMixin:
         self.sources_grid.addWidget(self.excel_card, 0, 1)
         self.sources_grid.setColumnStretch(0, 1)
         self.sources_grid.setColumnStretch(1, 1)
-        for card, list_widget in (
-            (self.foreign_agents_card, self.foreign_agents_list),
-            (self.excel_card, self.excel_list),
-        ):
+        for card in (self.foreign_agents_card, self.excel_card):
             card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-            list_widget.setFixedHeight(84)
         data_layout.addLayout(self.sources_grid)
         data_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.data_tab = self.irbis_tab
@@ -176,7 +117,7 @@ class MainWindowLayoutMixin:
         parameters_layout.setContentsMargins(8, 8, 8, 8)
         parameters_layout.setSpacing(8)
 
-        outcome_card = SectionCard("Что получить после проверки", "")
+        outcome_card = SectionCard("Что получить после проверки")
         outcome_row = QHBoxLayout()
         outcome_row.setSpacing(8)
         outcome_label = QLabel("Результат")
@@ -204,40 +145,41 @@ class MainWindowLayoutMixin:
         defaults_note.setWordWrap(True)
         parameters_layout.addWidget(defaults_note)
 
-        confirmation_memory_card = SectionCard("Память решений", "")
-        confirmation_memory_row = QHBoxLayout()
-        confirmation_memory_row.setSpacing(8)
+        confirmation_memory_card = SectionCard("Память решений")
+        confirmation_memory_grid = QGridLayout()
+        confirmation_memory_grid.setContentsMargins(0, 0, 0, 0)
+        confirmation_memory_grid.setHorizontalSpacing(8)
+        confirmation_memory_grid.setVerticalSpacing(0)
         confirmation_memory_hint = QLabel(
             "Сохранённые ручные подтверждения и отклонения автоматически применяются к таким же совпадениям. "
             "Здесь их можно просмотреть и удалить."
         )
         confirmation_memory_hint.setObjectName("cardDescription")
         confirmation_memory_hint.setWordWrap(True)
-        confirmation_memory_row.addWidget(confirmation_memory_hint, 1)
+        confirmation_memory_grid.addWidget(confirmation_memory_hint, 0, 0)
+        confirmation_memory_grid.setColumnStretch(0, 1)
         self.confirmation_memory_button = QPushButton("Открыть память")
         self.confirmation_memory_button.setObjectName("mutedButton")
         self.confirmation_memory_button.setToolTip("Просмотреть или удалить сохранённые решения")
         self.confirmation_memory_button.clicked.connect(self.open_confirmation_memory)
-
-        # На Windows один AlignVCenter у QPushButton может выглядеть смещённым
-        # относительно многострочного QLabel из-за различий sizeHint/baseline.
-        # Отдельный контейнер центрирует кнопку по фактической высоте строки.
-        memory_button_box = QWidget()
-        memory_button_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
-        memory_button_layout = QVBoxLayout(memory_button_box)
-        memory_button_layout.setContentsMargins(0, 0, 0, 0)
-        memory_button_layout.setSpacing(0)
-        memory_button_layout.addStretch(1)
-        memory_button_layout.addWidget(self.confirmation_memory_button, 0, Qt.AlignmentFlag.AlignHCenter)
-        memory_button_layout.addStretch(1)
-        confirmation_memory_row.addWidget(memory_button_box)
-        confirmation_memory_card.body.addLayout(confirmation_memory_row)
+        # QGridLayout центрирует кнопку относительно фактической высоты всей
+        # многострочной строки, поэтому её положение не зависит от baseline QLabel.
+        confirmation_memory_grid.addWidget(
+            self.confirmation_memory_button,
+            0,
+            1,
+            1,
+            1,
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+        )
+        confirmation_memory_card.body.addLayout(confirmation_memory_grid)
         parameters_layout.addWidget(confirmation_memory_card)
 
         self.advanced_options_toggle = QPushButton("Открыть дополнительные настройки")
         self.advanced_options_toggle.setObjectName("mutedButton")
         self.advanced_options_toggle.setCheckable(False)
-        parameters_layout.addWidget(self.advanced_options_toggle, 0, Qt.AlignmentFlag.AlignLeft)
+        self.advanced_options_toggle.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        parameters_layout.addWidget(self.advanced_options_toggle)
 
         self.advanced_settings_dialog = QDialog(self)
         self.advanced_settings_dialog.setWindowTitle("Дополнительные настройки")
@@ -247,18 +189,17 @@ class MainWindowLayoutMixin:
         dialog_layout = QVBoxLayout(self.advanced_settings_dialog)
         dialog_layout.setContentsMargins(8, 8, 8, 8)
         dialog_layout.setSpacing(7)
-        advanced_scroll = QScrollArea()
-        advanced_scroll.setObjectName("mainScroll")
-        advanced_scroll.setWidgetResizable(True)
-        advanced_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        advanced_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        advanced_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.advanced_scroll = QScrollArea()
+        self.advanced_scroll.setObjectName("mainScroll")
+        self.advanced_scroll.setWidgetResizable(True)
+        self.advanced_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.advanced_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.advanced_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.advanced_options = QWidget()
         advanced_layout = QVBoxLayout(self.advanced_options)
         advanced_layout.setContentsMargins(0, 0, 4, 0)
         advanced_layout.setSpacing(7)
         self.match_settings_card.title_label.setText("Порядок сравнения")
-        self.match_order_label.hide()
         self.match_rules_editor.show()
         self.fuzzy_match_check.show()
         advanced_layout.addWidget(self.match_settings_card)
@@ -269,26 +210,30 @@ class MainWindowLayoutMixin:
         self.marker_card.title_label.setText("Служебные метки")
         advanced_layout.addWidget(self.marker_card)
         advanced_layout.addStretch()
-        self.create_excel_report_check.hide()
-        self.report_only_check.hide()
-        advanced_scroll.setWidget(self.advanced_options)
-        dialog_layout.addWidget(advanced_scroll, 1)
-        dialog_buttons = QHBoxLayout()
-        reset_advanced_button = QPushButton("По умолчанию")
-        reset_advanced_button.setObjectName("mutedButton")
-        reset_advanced_button.setToolTip("Вернуть рекомендуемые правила, отчёты и метки; применятся после сохранения")
-        reset_advanced_button.clicked.connect(self._reset_advanced_settings_defaults)
-        dialog_buttons.addWidget(reset_advanced_button)
+        self.advanced_scroll.setWidget(self.advanced_options)
+        dialog_layout.addWidget(self.advanced_scroll, 1)
+        self.advanced_footer = QFrame()
+        self.advanced_footer.setObjectName("settingsFooter")
+        dialog_buttons = QHBoxLayout(self.advanced_footer)
+        dialog_buttons.setContentsMargins(0, 7, 0, 0)
+        dialog_buttons.setSpacing(7)
+        self.reset_advanced_button = QPushButton("По умолчанию")
+        self.reset_advanced_button.setObjectName("mutedButton")
+        self.reset_advanced_button.setToolTip(
+            "Вернуть рекомендуемые правила, отчёты и метки; применятся после сохранения"
+        )
+        self.reset_advanced_button.clicked.connect(self._reset_advanced_settings_defaults)
+        dialog_buttons.addWidget(self.reset_advanced_button)
         dialog_buttons.addStretch()
-        cancel_advanced_button = QPushButton("Отмена")
-        cancel_advanced_button.setObjectName("mutedButton")
-        cancel_advanced_button.clicked.connect(self.advanced_settings_dialog.reject)
-        save_advanced_button = QPushButton("Сохранить")
-        save_advanced_button.setObjectName("primaryButton")
-        save_advanced_button.clicked.connect(self._save_advanced_settings)
-        dialog_buttons.addWidget(save_advanced_button)
-        dialog_buttons.addWidget(cancel_advanced_button)
-        dialog_layout.addLayout(dialog_buttons)
+        self.save_advanced_button = QPushButton("Сохранить")
+        self.save_advanced_button.setObjectName("primaryButton")
+        self.save_advanced_button.clicked.connect(self._save_advanced_settings)
+        self.cancel_advanced_button = QPushButton("Отмена")
+        self.cancel_advanced_button.setObjectName("mutedButton")
+        self.cancel_advanced_button.clicked.connect(self.advanced_settings_dialog.reject)
+        dialog_buttons.addWidget(self.save_advanced_button)
+        dialog_buttons.addWidget(self.cancel_advanced_button)
+        dialog_layout.addWidget(self.advanced_footer, 0)
         self.advanced_options_toggle.clicked.connect(self.open_advanced_settings)
         parameters_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.parameters_tab = self.lists_tab
@@ -316,7 +261,6 @@ class MainWindowLayoutMixin:
         self.actions_layout.addWidget(self.result_summary_label)
         run_buttons = QHBoxLayout()
         run_buttons.setSpacing(6)
-        self.header_actions.removeWidget(self.start_button)
         self.start_button.setText("Запустить проверку")
         self.start_button.setObjectName("primaryButton")
         self.start_button.show()
@@ -413,6 +357,10 @@ class MainWindowLayoutMixin:
         self.workflow_tabs.addTab(self.results_tab, "Результат")
 
         self.application_settings_page = self.settings_page_class(self.app_settings, self)
+        # Единственная кнопка проверки обновлений живёт в настройках.
+        # Раньше для фонового обновления существовала вторая, постоянно скрытая
+        # кнопка в старой шапке главного окна.
+        self.update_button = self.application_settings_page.check_updates_button
         self.application_settings_page.saved.connect(self._save_application_settings)
         self.application_settings_page.cancelled.connect(self._close_application_settings)
         settings_index = self.workflow_tabs.addTab(self.application_settings_page, "Настройки")
@@ -420,42 +368,30 @@ class MainWindowLayoutMixin:
         self._settings_return_page = self.data_tab
         self.workflow_tabs.currentChanged.connect(self._settings_navigation_changed)
         self.workflow_tabs.currentChanged.connect(self._workflow_page_changed)
-        self.workflow_tabs.currentChanged.connect(lambda _index: QTimer.singleShot(0, self._fit_scroll_content))
 
         self.root_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._workflow_page_changed(self.workflow_tabs.currentIndex())
 
-    def _set_disclosure(
-        self,
-        button: QPushButton,
-        content: QWidget,
-        expanded: bool,
-        expanded_text: str,
-        collapsed_text: str,
-    ) -> None:
-        content.setVisible(expanded)
-        button.setText(expanded_text if expanded else collapsed_text)
-        content.updateGeometry()
-        if hasattr(self, "scroll_area") and self.scroll_area.widget() is not None:
-            scroll_content = self.scroll_area.widget()
-            scroll_content.setMinimumHeight(0)
-            scroll_content.setMaximumHeight(16777215)
-            scroll_content.updateGeometry()
-        QTimer.singleShot(0, self._fit_scroll_content)
-
     def _reset_advanced_settings_defaults(self) -> None:
         self.marker_settings = dict(DEFAULT_MARKER_SETTINGS)
         self._apply_marker_settings_to_ui()
-        self._sync_output_mode_from_checks()
 
     def open_advanced_settings(self) -> None:
         saved_settings = dict(self.marker_settings)
         self._advanced_settings_editing = True
+        QTimer.singleShot(0, self._restore_advanced_scroll_position)
         result = self.advanced_settings_dialog.exec()
+        self._advanced_scroll_position = self.advanced_scroll.verticalScrollBar().value()
         if result != QDialog.DialogCode.Accepted:
             self.marker_settings = saved_settings
             self._apply_marker_settings_to_ui()
         self._advanced_settings_editing = False
+
+    def _restore_advanced_scroll_position(self) -> None:
+        if not hasattr(self, "advanced_scroll"):
+            return
+        bar = self.advanced_scroll.verticalScrollBar()
+        bar.setValue(max(bar.minimum(), min(int(self._advanced_scroll_position), bar.maximum())))
 
     def _save_advanced_settings(self) -> None:
         if self._sync_marker_settings_from_ui(save=True, show_message=True):
@@ -467,8 +403,36 @@ class MainWindowLayoutMixin:
     def open_maintenance_window(self) -> None:
         self.maintenance_dialog.exec()
 
+    def _workflow_page_key(self, widget=None) -> str:
+        widget = self.workflow_tabs.currentWidget() if widget is None else widget
+        if widget is getattr(self, "data_tab", None):
+            return "data"
+        if widget is getattr(self, "parameters_tab", None):
+            return "parameters"
+        if widget is getattr(self, "results_tab", None):
+            return "results"
+        if widget is getattr(self, "application_settings_page", None):
+            return "settings"
+        return "unknown"
+
     def _workflow_page_changed(self, _index: int) -> None:
-        QTimer.singleShot(0, lambda: self.scroll_area.verticalScrollBar().setValue(0))
+        if not hasattr(self, "scroll_area"):
+            return
+        bar = self.scroll_area.verticalScrollBar()
+        previous_key = getattr(self, "_active_workflow_page_key", None)
+        if previous_key:
+            self._workflow_scroll_positions[previous_key] = bar.value()
+        current_key = self._workflow_page_key()
+        self._active_workflow_page_key = current_key
+        target = int(self._workflow_scroll_positions.get(current_key, 0))
+
+        def restore() -> None:
+            if self._workflow_page_key() != current_key:
+                return
+            current_bar = self.scroll_area.verticalScrollBar()
+            current_bar.setValue(max(current_bar.minimum(), min(target, current_bar.maximum())))
+
+        QTimer.singleShot(0, restore)
 
     def _source_mode_changed(self, _index: int) -> None:
         direct = self.source_mode_combo.currentData() == "irbis"
@@ -504,28 +468,24 @@ class MainWindowLayoutMixin:
         )
 
     def _output_mode_changed(self, _index: int) -> None:
-        if getattr(self, "_syncing_output_mode", False):
-            return
-        mode = self.output_mode_combo.currentData()
-        self._syncing_output_mode = True
-        try:
-            self.create_excel_report_check.setChecked(mode in {"full", "report"})
-            self.report_only_check.setChecked(mode == "report")
-        finally:
-            self._syncing_output_mode = False
+        mode = str(self.output_mode_combo.currentData() or "full")
         descriptions = {
             "full": "Будет создан Excel-отчёт, а подтверждённые совпадения получат служебные метки.",
             "report": "Будет создан только Excel-отчёт. Записи ИРБИС и TXT-файлы не изменятся.",
             "markers": "Подтверждённые совпадения получат метки; Excel-отчёт создаваться не будет.",
         }
-        self.output_mode_hint.setText(descriptions[str(mode)])
+        self.output_mode_hint.setText(descriptions.get(mode, descriptions["full"]))
+        self._update_report_controls(mode in {"full", "report"})
+        self._update_output_target_controls(mode == "report")
+        if not getattr(self, "_syncing_output_mode", False):
+            self._queue_report_settings_autosave()
 
-    def _sync_output_mode_from_checks(self) -> None:
+    def _sync_output_mode_from_settings(self) -> None:
         if not hasattr(self, "output_mode_combo"):
             return
-        if self.report_only_check.isChecked():
+        if bool(self.marker_settings.get("report_only")):
             mode = "report"
-        elif self.create_excel_report_check.isChecked():
+        elif bool(self.marker_settings.get("create_excel_report", True)):
             mode = "full"
         else:
             mode = "markers"
@@ -533,69 +493,39 @@ class MainWindowLayoutMixin:
         try:
             index = self.output_mode_combo.findData(mode)
             self.output_mode_combo.setCurrentIndex(max(0, index))
+            self._output_mode_changed(self.output_mode_combo.currentIndex())
         finally:
             self._syncing_output_mode = False
-        self._output_mode_changed(self.output_mode_combo.currentIndex())
 
     @staticmethod
     def _take_all(layout) -> None:
         while layout.count():
             layout.takeAt(0)
 
-    def _reflow_irbis_connection_form(self, _narrow: bool) -> None:
-        if not hasattr(self, "irbis_connection_form"):
-            return
-        form = self.irbis_connection_form
-        self._take_all(form)
-        for column in range(4):
-            form.setColumnStretch(column, 0)
-            form.setColumnMinimumWidth(column, 0)
-
-        labels = self.irbis_field_labels
-        fields = {
-            "host": self.irbis_host_edit,
-            "port": self.irbis_port_spin,
-            "login": self.irbis_login_edit,
-            "password": self.irbis_password_box,
-            "database": self.irbis_database_box,
-            "query": self.irbis_query_edit,
-        }
-
-        # Макет подключения всегда состоит из двух равных колонок:
-        # слева сервер/логин/база, справа порт/пароль/запрос.
-        pairs = (("host", "port"), ("login", "password"), ("database", "query"))
-        for pair_row, (left, right) in enumerate(pairs):
-            label_row = pair_row * 2
-            field_row = label_row + 1
-            form.addWidget(labels[left], label_row, 0)
-            form.addWidget(labels[right], label_row, 1)
-            form.addWidget(fields[left], field_row, 0)
-            form.addWidget(fields[right], field_row, 1)
-        form.setColumnStretch(0, 1)
-        form.setColumnStretch(1, 1)
-        self.irbis_db_combo.setMinimumContentsLength(6)
-        self.irbis_db_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-
-    def _reflow_actions(self, columns: int) -> None:
-        self._take_all(self.actions_buttons_layout)
-        for column in range(8):
-            self.actions_buttons_layout.setColumnStretch(column, 0)
-        visible_buttons = [button for button in self.action_buttons if not button.isHidden()]
-        for index, button in enumerate(visible_buttons):
-            self.actions_buttons_layout.addWidget(button, index // columns, index % columns)
-        for column in range(columns):
-            self.actions_buttons_layout.setColumnStretch(column, 1)
-
     def _reflow_result_files(self) -> None:
+        """Перестраивает видимые кнопки результата без старой скрытой панели.
+
+        Кнопки этого блока меняют видимость при переключении TXT/ИРБИС.
+        Поэтому раскладка собирается заново только в актуальном
+        ``result_files_layout``. Старый ``actions_buttons_layout`` намеренно
+        не используется: после упрощения интерфейса он больше не является
+        частью видимого дерева и мог перетянуть кнопки из блока результата.
+        """
         if not hasattr(self, "result_files_layout"):
             return
         self._take_all(self.result_files_layout)
         for column in range(2):
             self.result_files_layout.setColumnStretch(column, 0)
-        visible_buttons = [button for button in self.result_file_buttons if not button.isHidden()]
+
+        visible_buttons = [
+            button
+            for button in getattr(self, "result_file_buttons", ())
+            if not button.isHidden()
+        ]
+        columns = 2 if len(visible_buttons) > 1 else 1
         for index, button in enumerate(visible_buttons):
-            self.result_files_layout.addWidget(button, index // 2, index % 2)
-        for column in range(min(2, len(visible_buttons))):
+            self.result_files_layout.addWidget(button, index // columns, index % columns)
+        for column in range(columns if visible_buttons else 0):
             self.result_files_layout.setColumnStretch(column, 1)
 
     def _reflow_source_controls(self, narrow: bool, very_narrow: bool) -> None:
@@ -625,28 +555,6 @@ class MainWindowLayoutMixin:
                 layout.addWidget(primary, 0, 1)
                 layout.addWidget(clear, 1, 1)
                 layout.setColumnStretch(0, 1)
-
-    def _reflow_file_controls(self, narrow: bool) -> None:
-        self._take_all(self.compare_controls)
-        self._take_all(self.utility_controls)
-        for column in range(4):
-            self.compare_controls.setColumnStretch(column, 0)
-            self.utility_controls.setColumnStretch(column, 0)
-
-        if narrow:
-            self.compare_controls.addWidget(self.create_excel_report_check, 0, 0, 1, 4)
-            self.compare_controls.addWidget(self.report_only_check, 1, 0, 1, 4)
-            self.compare_controls.setColumnStretch(0, 1)
-            self.utility_controls.addWidget(self.next_marks_button, 0, 0, 1, 2)
-            self.utility_controls.setColumnStretch(0, 1)
-            self.utility_controls.setColumnStretch(1, 1)
-        else:
-            self.compare_controls.addWidget(self.create_excel_report_check, 0, 0)
-            self.compare_controls.addWidget(self.report_only_check, 0, 1)
-            self.compare_controls.setColumnStretch(0, 1)
-            self.compare_controls.setColumnStretch(1, 1)
-            self.utility_controls.addWidget(self.next_marks_button, 0, 0)
-            self.utility_controls.setColumnStretch(0, 1)
 
     def _reflow_report_lists(self, narrow: bool) -> None:
         self._take_all(self.report_lists_grid)
@@ -678,105 +586,25 @@ class MainWindowLayoutMixin:
                 self.report_format_layout.setColumnStretch(2, 1)
 
     def _apply_responsive_layout(self, force: bool = False) -> None:
+        """Перестраивает только реально видимые части интерфейса.
+
+        Старые скрытые вкладки подключения и шапка больше не участвуют в
+        адаптивной раскладке: работа с невидимыми виджетами была источником
+        случайных изменений геометрии главного окна.
+        """
         if not hasattr(self, "scroll_area"):
             return
         width = max(1, self.scroll_area.viewport().width())
-        mode = tuple(width < breakpoint for breakpoint in (1500, 720, 900, 800, 760, 700))
+        compact = width < 900
+        very_compact = width < 760
+        mode = (compact, very_compact)
         if not force and mode == self._responsive_mode:
             return
         self._responsive_mode = mode
-        (
-            compact_header,
-            stack_irbis,
-            compact,
-            short_start,
-            very_compact,
-            hide_logo,
-        ) = mode
-
-        if hasattr(self, "irbis_connection_form"):
-            self._reflow_irbis_connection_form(very_compact)
 
         self.root_layout.setContentsMargins(0, 0, 0, 0)
         self.root_layout.setSpacing(0)
-
-        logo_size = 22 if compact else 26
-        self.header_logo.setVisible(not hide_logo)
-        if self.header_logo.isVisible():
-            self.header_logo.setPixmap(QIcon(icon_path("irbis64_control_icon.png")).pixmap(logo_size, logo_size))
-            self.header_logo.setFixedSize(logo_size + 2, logo_size + 2)
-        apply_main_title_font(self.main_title, compact)
-        self.subtitle_primary.setVisible(width >= 900)
-
-        self.start_button.setText("Запуск" if short_start else "Запустить проверку")
-        self.start_button.setMinimumWidth(0)
-        self.marker_settings_button.setText("Настройки")
         self.marker_settings_button.setToolTip("Открыть настройки приложения")
-        self.marker_settings_button.setMinimumWidth(0)
-        self.marker_settings_button.setMaximumWidth(16777215)
-        header_buttons = (
-            (self.useful_links_button, "Полезные ссылки"),
-            (self.update_button, "Проверить обновление"),
-        )
-        for button, full_text in header_buttons:
-            button.setVisible(True)
-            button.setText("" if compact_header else full_text)
-            button.setToolTip(full_text)
-            button.setMinimumWidth(32 if compact_header else 0)
-            button.setMaximumWidth(32 if compact_header else 16777215)
-
-        tab_titles = (
-            ("Данные", "Параметры", "Результат")
-            if getattr(self, "_simplified_workflow", False)
-            else ("Подключение", "Источники", "Списки", "Метки", "Запуск")
-        )
-        for index, title in enumerate(tab_titles):
-            self.workflow_tabs.setTabText(index, title)
-
-        for intro_label in (
-            self.irbis_intro,
-            self.files_intro,
-            self.lists_intro,
-            self.markers_intro,
-            self.results_intro,
-        ):
-            intro_label.hide()
-
-        # Блоки подключения располагаются рядом только когда для обоих хватает
-        # места; на меньшей ширине они складываются вертикально без обрезания.
-        if hasattr(self, "irbis_columns") and not getattr(self, "_simplified_workflow", False):
-            self._take_all(self.irbis_columns)
-            for column in range(2):
-                self.irbis_columns.setColumnStretch(column, 0)
-            if stack_irbis:
-                self.irbis_columns.addWidget(self.connection_card, 0, 0)
-                self.irbis_columns.addWidget(self.base_card, 1, 0)
-                self.irbis_columns.setAlignment(self.connection_card, Qt.AlignmentFlag.AlignTop)
-                self.irbis_columns.setAlignment(self.base_card, Qt.AlignmentFlag.AlignTop)
-                self.irbis_columns.setColumnStretch(0, 1)
-                self.irbis_columns.setColumnStretch(1, 0)
-            else:
-                self.irbis_columns.addWidget(self.connection_card, 0, 0)
-                self.irbis_columns.addWidget(self.base_card, 0, 1)
-                self.irbis_columns.setAlignment(self.connection_card, Qt.AlignmentFlag.AlignTop)
-                self.irbis_columns.setAlignment(self.base_card, Qt.AlignmentFlag.AlignTop)
-                self.irbis_columns.setColumnStretch(0, 3)
-                self.irbis_columns.setColumnStretch(1, 2)
-
-        if hasattr(self, "irbis_action_layout"):
-            self._take_all(self.irbis_action_layout)
-            for column in range(3):
-                self.irbis_action_layout.setColumnStretch(column, 0)
-            if very_compact:
-                self.irbis_test_button.setMaximumWidth(16777215)
-                self.irbis_action_layout.addWidget(self.irbis_test_button, 0, 0)
-                self.irbis_action_layout.setColumnStretch(0, 1)
-            else:
-                self.irbis_test_button.setMaximumWidth(240)
-                self.irbis_action_layout.addWidget(self.irbis_test_button, 0, 1)
-                self.irbis_action_layout.setColumnStretch(0, 1)
-            self.irbis_action_layout.addWidget(self.irbis_progress, 1, 0, 1, 3)
-            self.irbis_action_layout.addWidget(self.irbis_status_box, 2, 0, 1, 3)
 
         if hasattr(self, "sources_grid"):
             self._take_all(self.sources_grid)
@@ -796,19 +624,15 @@ class MainWindowLayoutMixin:
 
         if hasattr(self, "database_controls"):
             self._reflow_source_controls(compact, very_compact)
-            self._reflow_file_controls(compact)
-
-        if hasattr(self, "action_buttons"):
-            self._reflow_actions(2)
-
-        for card in self.section_cards:
-            card.set_compact(True, very_compact)
 
         QTimer.singleShot(0, self._fit_scroll_content)
 
     def _fit_scroll_content(self) -> None:
         if not hasattr(self, "scroll_area") or self.scroll_area.widget() is None:
             return
+        bar = self.scroll_area.verticalScrollBar()
+        current_key = self._workflow_page_key() if hasattr(self, "workflow_tabs") else "unknown"
+        preserved = int(self._workflow_scroll_positions.get(current_key, bar.value()))
         content = self.scroll_area.widget()
         content.setMinimumHeight(0)
         content.setMaximumHeight(16777215)
@@ -823,47 +647,23 @@ class MainWindowLayoutMixin:
         content.updateGeometry()
         content.adjustSize()
 
-    def _resize_height_to_current_page(self, *, force: bool = False) -> None:
-        """Подгоняет только высоту окна, не запрещая последующее ручное изменение."""
-        self._fit_scroll_content()
-        if self._window_manually_resized and not force:
-            return
-        content = self.scroll_area.widget()
-        if content is None:
-            return
-        current_page = self.workflow_tabs.currentWidget()
-        target_height = content.sizeHint().height()
-        if current_page is not None and self.isVisible():
-            # QTabWidget.sizeHint() учитывает самую высокую вкладку, даже если она
-            # сейчас скрыта. Берём высоту открытой страницы и добавляем только
-            # фактическую высоту панели вкладок.
-            tab_chrome = max(0, self.workflow_tabs.height() - current_page.height())
-            target_height = current_page.sizeHint().height() + tab_chrome
-        target_height = max(240, target_height)
-        screen = self.screen() or QApplication.primaryScreen()
-        if screen is not None:
-            target_height = min(target_height, screen.availableGeometry().height())
-        self._programmatic_window_resize = True
-        try:
-            self.resize(self.width(), target_height)
-        finally:
-            self._programmatic_window_resize = False
-        content.adjustSize()
+        # Пересчёт sizeHint не должен прокручивать страницу в начало.
+        def restore() -> None:
+            if hasattr(self, "workflow_tabs") and self._workflow_page_key() != current_key:
+                return
+            current_bar = self.scroll_area.verticalScrollBar()
+            current_bar.setValue(max(current_bar.minimum(), min(preserved, current_bar.maximum())))
+
+        QTimer.singleShot(0, restore)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        if self._window_resize_tracking and not self._programmatic_window_resize:
-            self._window_manually_resized = True
-        if hasattr(self, "section_cards"):
+        if hasattr(self, "workflow_tabs"):
             self._apply_responsive_layout()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         QTimer.singleShot(0, lambda: self._apply_responsive_layout(force=True))
-        QTimer.singleShot(0, self._enable_window_resize_tracking)
-
-    def _enable_window_resize_tracking(self) -> None:
-        self._window_resize_tracking = True
 
     def _apply_style(self) -> None:
         self.setStyleSheet(main_window_stylesheet())

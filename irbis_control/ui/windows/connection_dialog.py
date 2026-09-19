@@ -137,26 +137,7 @@ class IrbisConnectionDialog(QDialog):
         layout.addWidget(button_box)
 
         self.host_edit.setFocus()
-        control_height = max(
-            self.host_edit.sizeHint().height(),
-            self.port_spin.sizeHint().height(),
-            self.database_combo.sizeHint().height(),
-        )
-        for field in (
-            self.host_edit,
-            self.port_spin,
-            self.login_edit,
-            self.password_edit,
-            self.database_combo,
-            self.query_edit,
-            self.page_size_spin,
-        ):
-            field.setFixedHeight(control_height)
-        for button in self.findChildren(QPushButton):
-            button.setFixedHeight(control_height)
         layout.activate()
-        self.adjustSize()
-        self.resize(max(520, self.width()), max(self.minimumSizeHint().height(), self.height()))
 
     def values(self) -> dict[str, object]:
         database_data = self.database_combo.currentData()

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, QUrl, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QFileDialog, QListWidgetItem
 
@@ -41,44 +41,37 @@ class MainWindowRunMixin:
         self.progress_dialog.activateWindow()
 
     def _adjust_source_list_height(self, list_widget) -> None:
-        if list_widget.property("sourceHeightManuallySet"):
+        """Компактно меняет высоту только списка TXT-баз.
+
+        Excel-реестры имеют постоянную высоту: ручное изменение их геометрии
+        раньше заставляло главное окно самопроизвольно менять размер.
+        """
+        if list_widget is not getattr(self, "database_list", None):
             return
         selected_count = sum(
             bool(list_widget.item(index).data(Qt.ItemDataRole.UserRole)) for index in range(list_widget.count())
         )
-        if list_widget.property("resizableSourceList"):
-            target_height = 84
-        else:
-            target_height = 58 if selected_count > 1 else 27
-        if list_widget.height() == target_height:
-            return
-        list_widget.setFixedHeight(target_height)
-        list_widget.updateGeometry()
-        QTimer.singleShot(0, self._resize_height_to_current_page)
-
-    def _source_list_resized(self, list_widget, _height: int) -> None:
-        list_widget.setProperty("sourceHeightManuallySet", True)
-        list_widget.updateGeometry()
-        QTimer.singleShot(0, self._resize_height_to_current_page)
+        target_height = 58 if selected_count > 1 else 38
+        if list_widget.height() != target_height:
+            list_widget.setFixedHeight(target_height)
+            list_widget.updateGeometry()
 
     def _set_irbis_status(self, text: str, state: str = "success") -> None:
-        self.irbis_status.setText(text)
+        # Состояние подключения отображается в единственном видимом месте —
+        # карточке источника. Раньше тот же статус дублировался в полностью
+        # скрытом старом блоке подключения, из-за чего существовало два UI-состояния.
         visual_state = state if state in {"success", "running", "warning", "error"} else "error"
         self._irbis_connection_state = visual_state
         self._irbis_connection_status_text = text
-        self.irbis_status_dot.setProperty("state", visual_state)
-        self.irbis_status_dot.style().unpolish(self.irbis_status_dot)
-        self.irbis_status_dot.style().polish(self.irbis_status_dot)
         self._refresh_connection_overview()
-        self.irbis_status_dot.update()
         self._sync_direct_source_status()
 
     def _set_status(self, text: str, state: str = "idle") -> None:
         self.status_label.setText(text)
-        self.status_dot.setProperty("state", state)
-        self.status_dot.style().unpolish(self.status_dot)
-        self.status_dot.style().polish(self.status_dot)
-        self.status_dot.update()
+        self.status_label.setProperty("state", state)
+        self.status_label.style().unpolish(self.status_label)
+        self.status_label.style().polish(self.status_label)
+        self.status_label.update()
 
     def _update_excel_summary(self) -> None:
         paths = self._excel_paths()
@@ -88,23 +81,13 @@ class MainWindowRunMixin:
             placeholder.setData(Qt.ItemDataRole.UserRole, False)
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             self.excel_list.addItem(placeholder)
-            self.excel_summary_edit.clear()
-            self.excel_summary_edit.setPlaceholderText("Файлы не выбраны")
-            self.excel_summary_edit.setToolTip("Перетащите Excel сюда или нажмите «Добавить Excel»")
             self._adjust_source_list_height(self.excel_list)
             return
-        names = [Path(path).name for path in paths]
-        if len(names) == 1:
-            summary = names[0]
-        else:
-            summary = f"Выбрано файлов: {len(names)} — {names[0]}"
-        self.excel_summary_edit.setText(summary)
-        self.excel_summary_edit.setToolTip("\n".join(paths))
         self._adjust_source_list_height(self.excel_list)
 
     def _update_foreign_agents_summary(self) -> None:
         self.foreign_agents_list.clear()
-        path = self.foreign_agents_edit.text().strip()
+        path = self.foreign_agents_path.strip()
         if hasattr(self, "clear_foreign_agents_button"):
             self.clear_foreign_agents_button.setEnabled(bool(path))
         if path:
@@ -140,13 +123,12 @@ class MainWindowRunMixin:
         self._set_default_outputs(force=True)
 
     def _clear_foreign_agents(self) -> None:
-        self.foreign_agents_edit.clear()
+        self.foreign_agents_path = ""
         self._update_foreign_agents_summary()
         self._set_default_outputs(force=True)
 
     def _clear_database_files(self) -> None:
         self.database_list.clear()
-        self.database_edit.clear()
         self._update_database_summary()
         self._set_default_outputs(force=True)
 
@@ -167,7 +149,6 @@ class MainWindowRunMixin:
                 self.database_list.addItem(item)
                 existing.add(path)
         if paths:
-            self.database_edit.setText(paths[0])
             self._update_database_summary()
             self._set_default_outputs(force=True)
 
@@ -175,7 +156,7 @@ class MainWindowRunMixin:
         """Принимает реестр иноагентов, перетащенный из Проводника."""
         if not paths:
             return
-        self.foreign_agents_edit.setText(paths[0])
+        self.foreign_agents_path = paths[0]
         self._update_foreign_agents_summary()
         self._set_default_outputs(force=True)
 
@@ -208,7 +189,7 @@ class MainWindowRunMixin:
             "Excel (*.xlsx *.xlsm);;Все файлы (*)",
         )
         if path:
-            self.foreign_agents_edit.setText(path)
+            self.foreign_agents_path = path
             self._update_foreign_agents_summary()
             self._set_default_outputs(force=True)
 
@@ -236,10 +217,9 @@ class MainWindowRunMixin:
         if self.thread and self.thread.isRunning():
             QMessageBox.warning(self, APP_TITLE, "Сначала дождитесь завершения операции.")
             return
-        self.database_edit.clear()
         self.database_list.clear()
         self._update_database_summary()
-        self.foreign_agents_edit.clear()
+        self.foreign_agents_path = ""
         self._update_foreign_agents_summary()
         self.excel_list.clear()
         self._update_excel_summary()
@@ -281,8 +261,8 @@ class MainWindowRunMixin:
         excel_paths = self._excel_paths()
         if excel_paths:
             return Path(excel_paths[0]).parent
-        if self.foreign_agents_edit.text():
-            return Path(self.foreign_agents_edit.text()).parent
+        if self.foreign_agents_path:
+            return Path(self.foreign_agents_path).parent
         if database_paths:
             return Path(database_paths[0]).parent
         return Path.home() / "Documents"
@@ -319,7 +299,7 @@ class MainWindowRunMixin:
 
     def _validate_inputs(self) -> tuple[list[str], str, list[str], str, str] | None:
         database_paths = self._database_paths()
-        foreign_agents_path = self.foreign_agents_edit.text().strip()
+        foreign_agents_path = self.foreign_agents_path.strip()
         excel_paths = self._excel_paths()
         create_report = bool(self.marker_settings["create_excel_report"])
         report_only = bool(self.marker_settings["report_only"])
@@ -332,7 +312,7 @@ class MainWindowRunMixin:
 
         if not database_paths:
             QMessageBox.warning(self, APP_TITLE, "Выберите хотя бы одну TXT-базу данных.")
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return None
         missing_databases = [path for path in database_paths if not Path(path).is_file()]
         if missing_databases:
@@ -348,7 +328,7 @@ class MainWindowRunMixin:
                 APP_TITLE,
                 "Выберите хотя бы один источник проверки: актуальный список НКП РГБ или локальный Excel-реестр.",
             )
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return None
         missing = [path for path in excel_paths if not Path(path).is_file()]
         if missing:
@@ -388,7 +368,7 @@ class MainWindowRunMixin:
         return database_paths, foreign_agents_path, excel_paths, output_path, modified_database_path
 
     def _validate_direct_inputs(self) -> tuple[str, list[str], str, dict[str, object]] | None:
-        foreign_agents_path = self.foreign_agents_edit.text().strip()
+        foreign_agents_path = self.foreign_agents_path.strip()
         excel_paths = self._excel_paths()
         create_report = bool(self.marker_settings["create_excel_report"])
         output_path = (self.output_edit.text().strip() or self._default_output_path()) if create_report else ""
@@ -396,11 +376,11 @@ class MainWindowRunMixin:
 
         if not str(params.get("login", "")).strip():
             QMessageBox.warning(self, APP_TITLE, "Введите логин каталогизатора ИРБИС.")
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return None
         if not str(params.get("database", "")).strip():
             QMessageBox.warning(self, APP_TITLE, "Выберите базу ИРБИС из списка.")
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return None
         use_nkp_live = bool(getattr(self, "nkp_live_check", None) and self.nkp_live_check.isChecked())
         use_nkp_foreign_live = bool(
@@ -412,7 +392,7 @@ class MainWindowRunMixin:
                 APP_TITLE,
                 "Выберите хотя бы один источник проверки: актуальный список НКП РГБ или локальный Excel-реестр.",
             )
-            self.workflow_tabs.setCurrentIndex(0)
+            self.workflow_tabs.setCurrentWidget(self.data_tab)
             return None
         missing = [path for path in excel_paths if not Path(path).is_file()]
         if missing:
@@ -457,7 +437,7 @@ class MainWindowRunMixin:
                     "Программа уже запустила проверку подключения. После появления "
                     "зелёного статуса повторите запуск.",
                 )
-                self.workflow_tabs.setCurrentIndex(0)
+                self.workflow_tabs.setCurrentWidget(self.data_tab)
                 return
             database_paths: list[str] = []
             modified_database_path = ""
@@ -485,7 +465,7 @@ class MainWindowRunMixin:
             selected_sources.append("локальный реестр иностранных агентов")
         sources_text = ", ".join(selected_sources)
 
-        self.workflow_tabs.setCurrentIndex(2)
+        self.workflow_tabs.setCurrentWidget(self.results_tab)
         self.result_summary_label.setText(
             "Проверка выполняется. Можно следить за общим состоянием здесь или открыть технический журнал."
         )
@@ -497,8 +477,6 @@ class MainWindowRunMixin:
         self.open_button.setEnabled(False)
         self.open_modified_database_button.setEnabled(False)
         self.start_button.setEnabled(False)
-        self.run_tab_start_button.setEnabled(False)
-        self.create_matches_excel_button.setEnabled(False)
         self.marker_settings_button.setEnabled(False)
         self.write_irbis_button.setEnabled(False)
         if hasattr(self, "cleanup_button"):
@@ -766,7 +744,7 @@ class MainWindowRunMixin:
                 bool(
                     len(modified_paths) == 1
                     and Path(modified_paths[0]).is_file()
-                    and Path(self.irbis_manifest_edit.text().strip()).is_file()
+                    and Path(self.irbis_manifest_path.strip()).is_file()
                 )
             )
             self._set_status(
@@ -852,7 +830,7 @@ class MainWindowRunMixin:
         self._set_status("Ошибка", "error")
         self.progress_dialog.finish("Ошибка. Подробности показаны ниже.", 0)
         self._append_progress(error_text)
-        self.workflow_tabs.setCurrentIndex(2)
+        self.workflow_tabs.setCurrentWidget(self.results_tab)
         self.log_toggle.setChecked(True)
         QMessageBox.critical(
             self,
@@ -876,8 +854,6 @@ class MainWindowRunMixin:
         self.worker = None
         self.thread = None
         self.start_button.setEnabled(True)
-        self.run_tab_start_button.setEnabled(True)
-        self.create_matches_excel_button.setEnabled(True)
         self.marker_settings_button.setEnabled(True)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(True)

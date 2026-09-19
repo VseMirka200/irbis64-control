@@ -1,14 +1,25 @@
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtCore import QEvent, QObject, QRectF, QTimer, Qt
+from PyQt6.QtGui import QColor, QPainter, QPainterPath, QPalette, QPen, QRegion
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QFrame,
+    QLabel,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
+    QWidget,
+)
 
 from irbis_control.application.settings import THEME_DARK, THEME_LIGHT, THEME_SYSTEM, VALID_THEMES
 
 _current_dark = False
 _system_palette: QPalette | None = None
 _system_color_scheme: Qt.ColorScheme | None = None
+_combo_popup_filter: QObject | None = None
 
 
 def _colors() -> dict[str, str]:
@@ -106,6 +117,186 @@ def review_approved_fill_color() -> QColor:
     return QColor(22, 131, 232, 55)
 
 
+
+class _ComboPopupBorderOverlay(QWidget):
+    """Рисует цельную антиалиасную границу поверх popup QComboBox."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("appComboPopupBorderOverlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(QColor(_colors()["border"]), 1.0))
+        # Полпикселя внутрь гарантирует, что маска top-level окна не срежет
+        # внешнюю половину линии. Поэтому граница видна целиком и на углах.
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        painter.drawRoundedRect(rect, 6.5, 6.5)
+
+
+class _RoundedComboItemDelegate(QStyledItemDelegate):
+    """Рисует hover/selection пунктов QComboBox без квадратной системной подложки."""
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:
+        prepared = QStyleOptionViewItem(option)
+        selected = bool(prepared.state & QStyle.StateFlag.State_Selected)
+        hovered = bool(prepared.state & QStyle.StateFlag.State_MouseOver)
+        if selected or hovered:
+            colors = _colors()
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(colors["selection"] if selected else colors["button_hover"]))
+            rect = QRectF(prepared.rect.adjusted(1, 1, -1, -1))
+            painter.drawRoundedRect(rect, 5.0, 5.0)
+            painter.restore()
+            # Базовый delegate оставляем только для текста, иконок и check-state.
+            # Иначе Fusion поверх нашей скруглённой подложки рисует свой квадрат.
+            prepared.state &= ~QStyle.StateFlag.State_Selected
+            prepared.state &= ~QStyle.StateFlag.State_MouseOver
+        super().paint(painter, prepared, index)
+
+
+def _rounded_widget_region(widget: QWidget, radius: float = 7.0) -> QRegion:
+    """Возвращает маску со скруглёнными углами для top-level popup Qt."""
+    if widget.width() <= 0 or widget.height() <= 0:
+        return QRegion()
+    path = QPainterPath()
+    path.addRoundedRect(QRectF(widget.rect()), radius, radius)
+    return QRegion(path.toFillPolygon().toPolygon())
+
+
+def _set_transparent_widget_background(widget: QWidget) -> None:
+    """Убирает собственную квадратную заливку, оставляя фон родительского popup."""
+    widget.setAutoFillBackground(False)
+    widget.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, False)
+    palette = QPalette(widget.palette())
+    transparent = QColor(0, 0, 0, 0)
+    palette.setColor(QPalette.ColorRole.Base, transparent)
+    palette.setColor(QPalette.ColorRole.Window, transparent)
+    widget.setPalette(palette)
+
+
+class _ComboPopupStyleFilter(QObject):
+    """Централизованно исправляет внутреннее окно раскрытого QComboBox."""
+
+    @staticmethod
+    def _is_combo_popup(widget: QWidget) -> bool:
+        try:
+            return widget.inherits("QComboBoxPrivateContainer")
+        except (AttributeError, RuntimeError):
+            return widget.metaObject().className() == "QComboBoxPrivateContainer"
+
+    def _prepare_combo_popup(self, combo: QComboBox, *, repolish: bool = True) -> None:
+        """Подготавливает private-container до первого showPopup().
+
+        Если QSS впервые применяется уже на событии Show, Qt успевает рассчитать
+        позицию popup по старым margins/sizeHint. На Windows это заметно как
+        смещение первого раскрытия; последующие открытия уже нормальные.
+        """
+        try:
+            view = combo.view()
+            popup = view.window()
+        except (AttributeError, RuntimeError):
+            return
+        if isinstance(popup, QWidget) and popup is not combo.window() and self._is_combo_popup(popup):
+            self._prepare_popup(popup, repolish=repolish)
+
+    @staticmethod
+    def _sync_border_overlay(popup: QWidget) -> None:
+        overlay = popup.findChild(_ComboPopupBorderOverlay, "appComboPopupBorderOverlay")
+        if overlay is None:
+            overlay = _ComboPopupBorderOverlay(popup)
+        overlay.setGeometry(popup.rect())
+        overlay.raise_()
+        overlay.show()
+        overlay.update()
+
+    def _prepare_popup(self, popup: QWidget, *, repolish: bool = True) -> None:
+        if not popup.property("appComboPopup"):
+            popup.setProperty("appComboPopup", True)
+            # Не делаем top-level popup прозрачным. На Windows прозрачное
+            # QComboBoxPrivateContainer может показывать чёрную системную
+            # подложку вместо цвета темы. Скругление обеспечивается маской
+            # окна, поэтому popup остаётся обычным непрозрачным виджетом.
+            popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+            popup.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            popup.setAutoFillBackground(True)
+            # На событии Polish свойство будет учтено текущим проходом QSS.
+            # Если popup обнаружен только при Show, принудительно обновляем стиль.
+            if repolish:
+                popup.style().unpolish(popup)
+                popup.style().polish(popup)
+
+        # Палитру синхронизируем при каждом показе: это важно при смене темы
+        # без перезапуска приложения. Внешний popup рисует единственный фон,
+        # а view/viewport остаются прозрачными относительно него.
+        popup_palette = QPalette(popup.palette())
+        popup_background = QColor(_colors()["card"])
+        popup_palette.setColor(QPalette.ColorRole.Window, popup_background)
+        popup_palette.setColor(QPalette.ColorRole.Base, popup_background)
+        popup.setPalette(popup_palette)
+        popup.setMask(_rounded_widget_region(popup))
+        self._sync_border_overlay(popup)
+        view = popup.findChild(QAbstractItemView)
+        if view is None:
+            return
+
+        if not view.property("appComboPopupView"):
+            view.setProperty("appComboPopupView", True)
+            view.setFrameShape(QFrame.Shape.NoFrame)
+            _set_transparent_widget_background(view)
+            viewport = view.viewport()
+            _set_transparent_widget_background(viewport)
+            # Это дочерний viewport, ему достаточно прозрачной палитры.
+            # WA_TranslucentBackground здесь не нужен и на Windows способен
+            # снова вовлечь системную чёрную подложку.
+            viewport.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+
+            delegate = view.itemDelegate()
+            # В штатных QComboBox используется стандартный delegate. Его можно
+            # безопасно заменить, сохранив текст, иконки и check-state модели.
+            if not isinstance(delegate, _RoundedComboItemDelegate):
+                view.setItemDelegate(_RoundedComboItemDelegate(view))
+
+            view.style().unpolish(view)
+            view.style().polish(view)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        event_type = event.type()
+
+        # Подготавливаем private popup заранее. Polish планируется через один тик,
+        # чтобы не провоцировать рекурсивную полировку самого QComboBox.
+        # Mouse/Key выполняются синхронно ДО стандартного showPopup(), поэтому
+        # даже самое первое раскрытие рассчитывается уже с финальными margins.
+        if isinstance(watched, QComboBox):
+            if event_type in (QEvent.Type.Polish, QEvent.Type.Show):
+                QTimer.singleShot(0, lambda combo=watched: self._prepare_combo_popup(combo))
+            elif event_type in (QEvent.Type.MouseButtonPress, QEvent.Type.KeyPress):
+                self._prepare_combo_popup(watched)
+
+        if event_type in (QEvent.Type.Polish, QEvent.Type.Show, QEvent.Type.Resize) and isinstance(watched, QWidget):
+            if self._is_combo_popup(watched):
+                self._prepare_popup(watched, repolish=event_type != QEvent.Type.Polish)
+        return False
+
+
+def _install_combo_popup_filter(app: QApplication) -> None:
+    """Устанавливает один общий обработчик popup-списков на всё приложение."""
+    global _combo_popup_filter
+    if _combo_popup_filter is not None:
+        return
+    _combo_popup_filter = _ComboPopupStyleFilter(app)
+    app.installEventFilter(_combo_popup_filter)
+
+
 def common_button_stylesheet() -> str:
     """Единые размеры и состояния кнопок для всех окон приложения."""
     colors = _colors()
@@ -189,7 +380,6 @@ def component_stylesheet() -> str:
     colors = _colors()
     return """
         QToolButton#embeddedToolButton { border: none; padding: 0; background: transparent; }
-        QFrame#listResizeGrip { background: @grip@; border-radius: 1px; }
         QLabel#errorLabel { color: @error@; }
     """.replace("@grip@", colors["grip"]).replace("@error@", colors["error"])
 
@@ -264,22 +454,36 @@ def application_stylesheet() -> str:
             background: @button_disabled@;
         }
         /*
-         * У выпадающего списка QComboBox есть собственный viewport и
-         * отдельная от поля отрисовка пунктов. Одного border-radius у
-         * QComboBox недостаточно: системный стиль рисует выбранную строку
-         * прямоугольником. Радиус и отступы задаём как popup, так и каждому
-         * пункту списка.
+         * Popup QComboBox состоит из отдельного top-level QFrame и
+         * QAbstractItemView с собственным viewport. Фон рисует только внешний
+         * контейнер: внутренние слои прозрачны, поэтому второго квадратного
+         * прямоугольника под скруглённым popup больше нет.
          */
-        QComboBox QAbstractItemView {
+        QFrame[appComboPopup="true"] {
             color: @text@;
             background: @card@;
-            border: 1px solid @border@;
+            border: none;
             border-radius: 7px;
-            padding: 4px;
+            padding: 5px;
+        }
+        /* Граница рисуется отдельным overlay поверх private-container: так
+           бинарная маска Windows не обрезает линию на скруглённых углах. */
+        QWidget#appComboPopupBorderOverlay {
+            background: transparent;
+            border: none;
+        }
+        QFrame[appComboPopup="true"] QAbstractItemView,
+        QComboBox QAbstractItemView {
+            color: @text@;
+            background: transparent;
+            border: none;
+            border-radius: 0px;
+            padding: 0px;
             outline: none;
             selection-background-color: transparent;
             selection-color: @text@;
         }
+        QFrame[appComboPopup="true"] QAbstractItemView::item,
         QComboBox QAbstractItemView::item {
             min-height: 22px;
             padding: 2px 7px;
@@ -289,19 +493,13 @@ def application_stylesheet() -> str:
             background: transparent;
             color: @text@;
         }
-        QComboBox QAbstractItemView::item:hover {
-            background: @button_hover@;
-            border-radius: 5px;
-        }
+        /* Hover/selection рисует общий delegate со скруглением. */
+        QFrame[appComboPopup="true"] QAbstractItemView::item:hover,
+        QFrame[appComboPopup="true"] QAbstractItemView::item:selected,
+        QComboBox QAbstractItemView::item:hover,
         QComboBox QAbstractItemView::item:selected {
-            background: @selection@;
+            background: transparent;
             color: @text@;
-            border-radius: 5px;
-        }
-        QComboBox QAbstractItemView::item:selected:!active {
-            background: @selection@;
-            color: @text@;
-            border-radius: 5px;
         }
         QCheckBox, QRadioButton { spacing: 6px; }
         QCheckBox::indicator, QRadioButton::indicator { width: 15px; height: 15px; }
@@ -407,6 +605,9 @@ def main_window_stylesheet() -> str:
         QLabel#sourceStateLabel[state="local"] { color: @muted@; }
         QLabel#fieldLabel { color: @text@; }
         QLabel#tabIntro, QLabel#cardDescription, QLabel#statusLabel { color: @muted@; }
+        QLabel#statusLabel[state="success"] { color: #218b45; }
+        QLabel#statusLabel[state="running"], QLabel#statusLabel[state="warning"] { color: #9a6800; }
+        QLabel#statusLabel[state="error"] { color: @error@; }
         QLabel:disabled { color: @disabled@; }
         QTextEdit#logEdit, QTextEdit#plainLogEdit { font-family: Consolas, monospace; }
         QLineEdit, QComboBox, QSpinBox { min-height: 23px; }
@@ -539,6 +740,7 @@ def prepare_application_ui() -> None:
 def apply_application_theme(app: QApplication, theme: str) -> None:
     """Применяет выбранную цветовую схему, не меняя геометрию и стиль элементов."""
     global _current_dark, _system_palette, _system_color_scheme
+    _install_combo_popup_filter(app)
     if _system_palette is None:
         _system_palette = QPalette(app.palette())
         _system_color_scheme = app.styleHints().colorScheme()

@@ -1,6 +1,6 @@
 [project]
 name = "irbis64-control"
-version = "0.0.20"
+version = "0.0.25"
 requires-python = ">=3.11"
 dependencies = [
     "PyQt6>=6.6,<7",
