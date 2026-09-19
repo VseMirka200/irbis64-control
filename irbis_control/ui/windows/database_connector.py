@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
@@ -36,11 +35,13 @@ from irbis_control.infrastructure.irbis_bridge import (
     replace_txt_storage,
 )
 from irbis_control.paths import icon_path
+from irbis_control.ui.message_box import AppMessageBox as QMessageBox
+from irbis_control.ui.context_menu import install_context_menu_manager
 from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
 from irbis_control.ui.storage_paths import application_settings_path
 from irbis_control.ui.storage_paths import database_connector_config_path as config_path
-from irbis_control.ui.theme import apply_application_theme, database_connector_stylesheet
+from irbis_control.ui.theme import apply_application_theme, database_connector_stylesheet, prepare_application_ui
 
 APP_TITLE = "ИРБИС64 Контроль — подключение к базе"
 
@@ -518,12 +519,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args(sys.argv[1:])
+    prepare_application_ui()
     app = QApplication(sys.argv)
     install_russian_ui(app)
     app.setApplicationName("IRBIS64ControlDB")
     app.setOrganizationName("IRBIS64Control")
     settings = load_application_settings(application_settings_path())
     apply_application_theme(app, settings.theme)
+    install_context_menu_manager(app)
     window = ConnectorWindow(args.database, args.modified)
     window.show()
     return app.exec()

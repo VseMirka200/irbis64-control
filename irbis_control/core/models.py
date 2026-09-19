@@ -62,6 +62,14 @@ class ForeignAgentEntry:
     inclusion_date: str = ""
     exclusion_date: str = ""
     raw_data: dict[str, Any] = field(default_factory=dict)
+    # В книжной выгрузке РГБ одна строка описывает не только иностранного
+    # агента, но и конкретное издание. Сохраняем эти поля отдельно, чтобы
+    # сравнивать запись ИРБИС по ISBN/заглавию, а не выбрасывать тысячи строк
+    # при дедупликации списка по одному автору.
+    title: str = ""
+    isbn: str = ""
+    role: str = ""
+    publication: str = ""
 
     @property
     def is_active(self) -> bool:

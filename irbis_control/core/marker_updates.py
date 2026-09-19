@@ -70,7 +70,9 @@ def _ordered_field_insert_index(lines: list[str], target_field: int) -> int:
 def _record_author_marker(raw_record: str) -> str:
     authors: list[str] = []
     for line in re.split(r"\r\n|\n|\r", raw_record):
-        match = re.match(r"^\s*#(?:700|701|702):\s*(.*)$", line)
+        # 702 содержит переводчиков, редакторов и других лиц вторичной
+        # ответственности — их не подставляем вместо автора произведения.
+        match = re.match(r"^\s*#(?:700|701):\s*(.*)$", line)
         if not match:
             continue
         value = match.group(1)
@@ -169,11 +171,25 @@ def _foreign_organization_marker_name(result: MatchResult) -> str:
     return re.sub(r"\s+", " ", result.matched_value).strip().upper()
 
 
+def _foreign_result_is_person(result: MatchResult) -> bool:
+    """Определяет, нужна ли персональная ``^AI`` или организационная ``^AO`` метка."""
+    # Совпадение по полю автора всегда относится к человеку, в том числе к
+    # участнику организации из общего реестра.
+    if result.method == "Реестр иностранных агентов: Автор":
+        return True
+    entry = result.foreign_agent
+    if entry is not None and "физичес" in normalize_author(entry.agent_type):
+        return True
+    return False
+
+
 def _result_is_eligible_for_txt_marker(result: MatchResult) -> bool:
     """Разрешает метку только для надёжно подтверждённого совпадения."""
     if result.status != "Совпадение" or result.confidence < 100.0 or result.database is None:
         return False
     if result.source_type != SOURCE_FOREIGN_AGENTS:
+        return True
+    if result.method.startswith("Список изданий иноагентов:"):
         return True
     return result.method in {
         "Реестр иностранных агентов: Автор",
@@ -686,7 +702,7 @@ def build_markers_by_record(
         if include_records_without_markers:
             markers_by_record.setdefault(record_number, [])
         if result.source_type == SOURCE_FOREIGN_AGENTS:
-            if result.method == "Реестр иностранных агентов: Автор":
+            if _foreign_result_is_person(result):
                 marker_name = _foreign_agent_marker_name(result)
                 marker = foreign_agent_marker_template.replace("{name}", marker_name)
                 marker_field = foreign_agent_marker_field

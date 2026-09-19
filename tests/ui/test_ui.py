@@ -9,10 +9,11 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication, QDialog
+from PyQt6.QtWidgets import QApplication, QDialog, QStyle, QStyleOptionViewItem
 
 from irbis_control.application.settings import THEME_DARK, THEME_SYSTEM, ApplicationSettings
-from irbis_control.core.models import ComparisonOptions
+from irbis_control.core.matcher import SOURCE_SUBSTANCES
+from irbis_control.core.models import ComparisonOptions, DatabaseRecord, ExcelEntry, MatchResult
 from irbis_control.ui import db_connector_window, main_window
 from irbis_control.ui.components import dialogs, widgets
 from irbis_control.ui.services import workers
@@ -88,6 +89,10 @@ class UiTests(unittest.TestCase):
         window.source_mode_combo.setCurrentIndex(window.source_mode_combo.findData("txt"))
         self.assertFalse(window.direct_irbis_checkbox.isChecked())
         self.assertIn("TXT", window.source_mode_hint.text())
+        self.assertEqual("Скачать реестры", window.download_registries_label.text())
+        self.assertTrue(window.download_registries_label.isHidden())
+        self.assertEqual("Полезные ссылки", window.source_useful_links_button.text())
+        self.assertIs(window.source_mode_combo.parentWidget(), window.source_useful_links_button.parentWidget())
 
         window.output_mode_combo.setCurrentIndex(window.output_mode_combo.findData("report"))
         self.assertTrue(window.create_excel_report_check.isChecked())
@@ -111,6 +116,28 @@ class UiTests(unittest.TestCase):
         self.assertEqual(settings_page.backup_check.isChecked(), defaults.create_database_backup)
         self.assertEqual(settings_page.auto_updates_check.isChecked(), defaults.check_updates_on_start)
         self.assertEqual(settings_page.theme_combo.currentData(), THEME_SYSTEM)
+
+    def test_match_rules_editor_is_managed_by_card_layout(self) -> None:
+        window = main_window.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+
+        # Регрессия: редактор правил раньше был только дочерним виджетом карточки,
+        # но отсутствовал в layout. После show() он появлялся в (0, 0) и
+        # перекрывал заголовок карточки.
+        body_widgets = [
+            window.match_settings_card.body.itemAt(index).widget()
+            for index in range(window.match_settings_card.body.count())
+        ]
+        self.assertIn(window.match_rules_editor, body_widgets)
+        self.assertIs(window.match_rules_editor.parentWidget(), window.match_settings_card)
+
+        window.open_advanced_settings()
+        self.app.processEvents()
+        title_rect = window.match_settings_card.title_label.geometry()
+        editor_rect = window.match_rules_editor.geometry()
+        self.assertGreaterEqual(editor_rect.top(), title_rect.bottom())
+        window.advanced_settings_dialog.close()
 
     def test_comparison_options_include_saved_match_rules(self) -> None:
         window = main_window.MainWindow()
@@ -332,10 +359,13 @@ class UiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(dialog.isVisible())
         self.assertEqual("Выполнено: %p%", dialog.progress.format())
+        self.assertFalse(dialog.progress.isTextVisible())
+        self.assertEqual("Выполнено: 0%", dialog.progress_label.text())
         self.assertFalse(dialog.close_button.isEnabled())
 
         dialog.set_progress(42, "Обработано 42 записи")
         self.assertEqual(42, dialog.progress.value())
+        self.assertEqual("Выполнено: 42%", dialog.progress_label.text())
         self.assertEqual("Обработано 42 записи", dialog.status_label.text())
 
         dialog.finish("Готово", 100)
@@ -352,8 +382,54 @@ class UiTests(unittest.TestCase):
 
         self.assertEqual("manualReviewTable", dialog.table.objectName())
         self.assertIn("QTableWidget#manualReviewTable::item:selected", window.styleSheet())
-        self.assertIn("QTableWidget#manualReviewTable::item:hover", window.styleSheet())
+        self.assertNotIn("QTableWidget#manualReviewTable::item:hover", window.styleSheet())
         self.assertIn("selection-background-color:", window.styleSheet())
+        option = QStyleOptionViewItem()
+        option.state |= QStyle.StateFlag.State_MouseOver
+        clean_option = dialog.table.itemDelegate()._without_hover(option)
+        self.assertFalse(clean_option.state & QStyle.StateFlag.State_MouseOver)
+
+    def test_manual_review_confirms_all_copies_of_the_same_book(self) -> None:
+        entry = ExcelEntry(1, "substances.xlsx", "Книги", 2, author="Прилепин З. Захар", title="Обитель")
+        rows = []
+        for index, mfn in enumerate((3604, 5283)):
+            record = DatabaseRecord(
+                record_number=mfn,
+                titles=["Обитель"],
+                authors=["Прилепин З. Захар"],
+                primary_authors=["Прилепин З. Захар"],
+            )
+            rows.append(
+                (
+                    index,
+                    MatchResult(
+                        status="Возможное совпадение",
+                        method="Название и неполные данные автора",
+                        confidence=90.0,
+                        excel=entry,
+                        database=record,
+                        source_type=SOURCE_SUBSTANCES,
+                        matched_value=entry.title,
+                    ),
+                )
+            )
+        dialog = dialogs.ManualMatchReviewDialog(rows)
+        self.addCleanup(dialog.deleteLater)
+        self.addCleanup(dialog.close)
+
+        dialog._set_decision(0, True)
+
+        self.assertEqual({0: True, 1: True}, dialog._decisions)
+        self.assertEqual("✓ Подтверждено", dialog._action_buttons[1][0].text())
+        self.assertIn("background-color", dialog._action_containers[0].styleSheet())
+        self.assertGreater(dialog.table.item(0, 1).background().color().alpha(), 0)
+        self.assertNotIn("border: 2px", dialog._action_containers[0].styleSheet())
+
+        dialog._set_decision(1, False)
+
+        self.assertEqual(1, dialog.table.rowCount())
+        self.assertEqual(False, dialog._decisions[1])
+        self.assertNotIn(1, dialog._result_table_rows)
 
     def test_manual_review_temporarily_releases_progress_dialog_modality(self) -> None:
         window = main_window.MainWindow()

@@ -6,6 +6,13 @@ from unittest.mock import Mock, patch
 from openpyxl import Workbook, load_workbook
 
 from irbis_control.core.matcher import compare_and_export
+from irbis_control.core.models import DatabaseRecord, ExcelEntry, ForeignAgentEntry, MatchResult
+from irbis_control.core.report_export import (
+    COMBINED_MATCH_HEADERS,
+    _combined_match_row,
+    _foreign_agent_match_row,
+    _substance_match_row,
+)
 from irbis_control.reporting.result_diff import _iter_xlsx_rows, compare_result_files, compare_text_files
 
 
@@ -18,6 +25,116 @@ class ReportingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "broken sheet"):
                 _iter_xlsx_rows(Path("report.xlsx"))
         workbook.close.assert_called_once()
+
+
+    def test_foreign_agent_report_removes_duplicate_values_inside_cells(self) -> None:
+        record = DatabaseRecord(394, authors=["Акунин Б. Борис"], titles=["Шпионский роман"])
+        entries = [
+            ForeignAgentEntry(
+                entry_id=1,
+                source_file="publication-foreign-agent.xlsx",
+                sheet_name="Список Книг",
+                row_number=1966,
+                registry_number="743",
+                name='Чхартишвили Григорий Шалвович "Борис Акунин"',
+                agent_type="Физическое лицо",
+                role="авт.",
+            ),
+            ForeignAgentEntry(
+                entry_id=2,
+                source_file="publication-foreign-agent.xlsx",
+                sheet_name="Список Книг",
+                row_number=2733,
+                registry_number="743",
+                name='Чхартишвили Григорий Шалвович "Борис Акунин"',
+                agent_type="Физическое лицо",
+                role="авт.",
+            ),
+            ForeignAgentEntry(
+                entry_id=3,
+                source_file="publication-foreign-agent.xlsx",
+                sheet_name="Список Книг",
+                row_number=2892,
+                registry_number="743",
+                name='Чхартишвили Григорий Шалвович "Борис Акунин"',
+                agent_type="Физическое лицо",
+                role="авт.",
+            ),
+        ]
+        results = [
+            MatchResult(
+                status="Совпадение",
+                method="Список изданий иноагентов: Название и автор",
+                confidence=100.0,
+                excel=ExcelEntry(index + 1, entry.source_file, entry.sheet_name, entry.row_number),
+                database=record,
+                note="Роль: авт.",
+                source_type="Иностранные агенты",
+                matched_value=entry.name,
+                foreign_agent=entry,
+            )
+            for index, entry in enumerate(entries)
+        ]
+        results[1].method = "Список изданий иноагентов: ISBN"
+
+        row = _foreign_agent_match_row(1, record, results)
+
+        self.assertEqual(row[7], "Название и автор\nISBN")
+        self.assertEqual(row[8], entries[0].name)
+        self.assertEqual(row[9], "743")
+        self.assertEqual(row[10], entries[0].name)
+        self.assertEqual(row[11], "Физическое лицо")
+        self.assertEqual(row[13], "Роль: авт.")
+        self.assertEqual(row[14], "publication-foreign-agent.xlsx")
+        self.assertEqual(row[15], "Список Книг")
+        self.assertEqual(row[16], "1966, 2733, 2892")
+
+    def test_substance_report_removes_duplicate_values_inside_cells(self) -> None:
+        record = DatabaseRecord(10, authors=["Автор"], titles=["Книга"])
+        results = [
+            MatchResult(
+                status="Совпадение",
+                method="Название и автор",
+                confidence=100.0,
+                excel=ExcelEntry(1, "publication-drugs.xlsx", "Список", 100),
+                database=record,
+                matched_value="Книга",
+            ),
+            MatchResult(
+                status="Совпадение",
+                method="Название и автор",
+                confidence=100.0,
+                excel=ExcelEntry(2, "publication-drugs.xlsx", "Список", 120),
+                database=record,
+                matched_value="Книга",
+            ),
+        ]
+
+        row = _substance_match_row(1, record, results)
+
+        self.assertEqual(row[7], "Название и автор — Книга")
+        self.assertEqual(row[8], "publication-drugs.xlsx")
+        self.assertEqual(row[9], "Список")
+        self.assertEqual(row[10], "100, 120")
+
+    def test_combined_report_row_matches_header_count_and_deduplicates(self) -> None:
+        record = DatabaseRecord(10, authors=["Автор"], titles=["Книга"])
+        result = MatchResult(
+            status="Совпадение",
+            method="ISBN",
+            confidence=100.0,
+            excel=ExcelEntry(1, "list.xlsx", "Лист1", 2),
+            database=record,
+            source_type="Вещества",
+            matched_value="9780000000000",
+        )
+
+        row = _combined_match_row(1, record, [result, result])
+
+        self.assertEqual(len(row), len(COMBINED_MATCH_HEADERS))
+        self.assertEqual(row[7], "Вещества")
+        self.assertEqual(row[8], "ISBN")
+        self.assertEqual(row[9], "9780000000000")
 
     def test_local_comparison_exports_reports_and_modified_database(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

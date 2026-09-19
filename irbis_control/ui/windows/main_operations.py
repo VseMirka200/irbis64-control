@@ -7,9 +7,10 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QApplication, QFileDialog, QListWidgetItem, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QListWidgetItem
 
 from irbis_control import APP_TITLE, __version__
+from irbis_control.ui.message_box import AppMessageBox as QMessageBox
 from irbis_control.application.updater import (
     GitHubRelease,
     ReleaseAsset,

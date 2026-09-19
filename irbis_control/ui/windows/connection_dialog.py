@@ -34,7 +34,8 @@ class IrbisConnectionDialog(QDialog):
         self.connect_requested = False
         self.setWindowTitle("Подключение к ИРБИС")
         self.setModal(True)
-        self.setFixedWidth(460)
+        self.resize(520, 500)
+        self.setMinimumWidth(460)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(7)
@@ -155,7 +156,7 @@ class IrbisConnectionDialog(QDialog):
             button.setFixedHeight(control_height)
         layout.activate()
         self.adjustSize()
-        self.setFixedSize(self.size())
+        self.resize(max(520, self.width()), max(self.minimumSizeHint().height(), self.height()))
 
     def values(self) -> dict[str, object]:
         database_data = self.database_combo.currentData()

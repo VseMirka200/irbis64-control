@@ -47,6 +47,7 @@ from irbis_control.infrastructure.irbis_bridge import (
     create_irbis_snapshot,
 )
 from irbis_control.infrastructure.irbis_models import IrbisError, IrbisField, IrbisRecord
+from irbis_control.infrastructure.nkp_source import fetch_nkp_drug_registry, fetch_nkp_foreign_agents_registry
 from irbis_control.ui.storage_paths import app_data_dir, manual_review_memory_path
 
 
@@ -80,6 +81,31 @@ class UpdateWorker(QObject):
             self.failed.emit(str(exc))
 
 
+class NkpRegistryRefreshWorker(QObject):
+    """Обновляет один официальный реестр НКП вне GUI-потока."""
+
+    finished = pyqtSignal(str, object)
+    failed = pyqtSignal(str, str)
+
+    def __init__(self, registry: str) -> None:
+        super().__init__()
+        self.registry = registry
+
+    @pyqtSlot()
+    def run(self) -> None:
+        try:
+            cache = app_data_dir() / "registries"
+            if self.registry == "drug":
+                result = fetch_nkp_drug_registry(cache)
+            elif self.registry == "foreign":
+                result = fetch_nkp_foreign_agents_registry(cache)
+            else:
+                raise ValueError(f"Неизвестный реестр НКП: {self.registry}")
+            self.finished.emit(self.registry, result)
+        except Exception as exc:
+            self.failed.emit(self.registry, str(exc))
+
+
 # Запускает сравнение локальных файлов и передаёт прогресс через сигналы Qt.
 class ComparisonWorker(QObject):
     progress = pyqtSignal(int, str)
@@ -105,6 +131,8 @@ class ComparisonWorker(QObject):
         age_marker_field: int,
         foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
         foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+        use_nkp_drug_registry: bool = False,
+        use_nkp_foreign_agents_registry: bool = False,
     ) -> None:
         super().__init__()
         self.database_path = database_path
@@ -122,6 +150,8 @@ class ComparisonWorker(QObject):
         self.foreign_agent_marker_field = foreign_agent_marker_field
         self.foreign_organization_marker_field = foreign_organization_marker_field
         self.age_marker_field = age_marker_field
+        self.use_nkp_drug_registry = bool(use_nkp_drug_registry)
+        self.use_nkp_foreign_agents_registry = bool(use_nkp_foreign_agents_registry)
         self.cancel_event = Event()
         self.review_event = Event()
         self.review_decisions: dict[int, bool] | None = None
@@ -164,13 +194,35 @@ class ComparisonWorker(QObject):
         removed = len(self.review_decisions) - approved
         self.progress.emit(84, f"Ручная проверка завершена: подтверждено {approved:,}, убрано {removed:,}")
 
+    def _resolved_excel_paths(self) -> list[str]:
+        paths = list(self.excel_paths)
+        if not self.use_nkp_drug_registry:
+            return paths
+        self.progress.emit(1, "Получение актуального реестра литературы с НКП РГБ…")
+        result = fetch_nkp_drug_registry(app_data_dir() / "registries")
+        self.progress.emit(2, f"НКП РГБ: {result.detail}")
+        live = str(result.path)
+        if live not in paths:
+            paths.insert(0, live)
+        return paths
+
+    def _resolved_foreign_agents_path(self) -> str:
+        if not self.use_nkp_foreign_agents_registry:
+            return self.foreign_agents_path
+        self.progress.emit(2, "Получение актуального реестра изданий иностранных агентов с НКП РГБ…")
+        result = fetch_nkp_foreign_agents_registry(app_data_dir() / "registries")
+        self.progress.emit(3, f"НКП РГБ — иноагенты: {result.detail}")
+        return str(result.path)
+
     @pyqtSlot()
     def run(self) -> None:
         try:
+            excel_paths = self._resolved_excel_paths()
+            foreign_agents_path = self._resolved_foreign_agents_path()
             results, summary = compare_files(
                 self.database_path,
-                self.excel_paths,
-                foreign_agents_path=self.foreign_agents_path or None,
+                excel_paths,
+                foreign_agents_path=foreign_agents_path or None,
                 options=self.comparison_options,
                 progress_cb=lambda percent, text: self.progress.emit(percent, text),
                 cancel_cb=self.cancel_event.is_set,
@@ -245,6 +297,8 @@ class DirectIrbisComparisonWorker(QObject):
         create_backup: bool = True,
         foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
         foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+        use_nkp_drug_registry: bool = False,
+        use_nkp_foreign_agents_registry: bool = False,
     ) -> None:
         super().__init__()
         self.host = host
@@ -269,6 +323,8 @@ class DirectIrbisComparisonWorker(QObject):
         self.age_marker_field = int(age_marker_field)
         self.backup_dir = Path(backup_dir)
         self.create_backup = bool(create_backup)
+        self.use_nkp_drug_registry = bool(use_nkp_drug_registry)
+        self.use_nkp_foreign_agents_registry = bool(use_nkp_foreign_agents_registry)
         self.cancel_event = Event()
         self.review_event = Event()
         self.review_decisions: dict[int, bool] | None = None
@@ -319,9 +375,31 @@ class DirectIrbisComparisonWorker(QObject):
         )
         return target
 
+    def _resolved_excel_paths(self) -> list[str]:
+        paths = list(self.excel_paths)
+        if not self.use_nkp_drug_registry:
+            return paths
+        self.progress.emit(1, "Получение актуального реестра литературы с НКП РГБ…")
+        result = fetch_nkp_drug_registry(app_data_dir() / "registries")
+        self.progress.emit(2, f"НКП РГБ: {result.detail}")
+        live = str(result.path)
+        if live not in paths:
+            paths.insert(0, live)
+        return paths
+
+    def _resolved_foreign_agents_path(self) -> str:
+        if not self.use_nkp_foreign_agents_registry:
+            return self.foreign_agents_path
+        self.progress.emit(2, "Получение актуального реестра изданий иностранных агентов с НКП РГБ…")
+        result = fetch_nkp_foreign_agents_registry(app_data_dir() / "registries")
+        self.progress.emit(3, f"НКП РГБ — иноагенты: {result.detail}")
+        return str(result.path)
+
     @pyqtSlot()
     def run(self) -> None:
         try:
+            excel_paths = self._resolved_excel_paths()
+            foreign_agents_path = self._resolved_foreign_agents_path()
             client = IrbisClient(
                 self.host,
                 self.port,
@@ -363,9 +441,9 @@ class DirectIrbisComparisonWorker(QObject):
 
                 results, summary = compare_database_records(
                     records,
-                    self.excel_paths,
+                    excel_paths,
                     database_label=source_label,
-                    foreign_agents_path=self.foreign_agents_path or None,
+                    foreign_agents_path=foreign_agents_path or None,
                     options=self.comparison_options,
                     progress_cb=lambda percent, message: self.progress.emit(percent, message),
                     cancel_cb=self._cancelled,

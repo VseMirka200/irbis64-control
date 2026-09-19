@@ -2,6 +2,7 @@ import unittest
 
 from irbis_control.core.matcher import (
     SOURCE_FOREIGN_AGENTS,
+    SOURCE_SUBSTANCES,
     DatabaseRecord,
     ExcelEntry,
     ForeignAgentEntry,
@@ -14,6 +15,42 @@ from irbis_control.core.matcher import (
 
 
 class ForeignAgentMarkerDeduplicationTests(unittest.TestCase):
+    def test_substance_and_foreign_agent_markers_are_both_kept_for_one_record(self) -> None:
+        database = DatabaseRecord(record_number=651, authors=["Берсенева Анна"])
+        foreign = ForeignAgentEntry(
+            entry_id=1,
+            source_file="publication-foreign-agent.xlsx",
+            sheet_name="Список Книг",
+            row_number=4,
+            registry_number="651",
+            name="Берсенева Анна",
+            agent_type="Физическое лицо",
+        )
+        substance_result = MatchResult(
+            status="Совпадение",
+            method="Название и автор",
+            confidence=100.0,
+            excel=ExcelEntry(1, "publication-drugs.xlsx", "Список Книг", 4),
+            database=database,
+            source_type=SOURCE_SUBSTANCES,
+        )
+        foreign_result = MatchResult(
+            status="Совпадение",
+            method="Реестр иностранных агентов: Автор",
+            confidence=100.0,
+            excel=ExcelEntry(2, "publication-foreign-agent.xlsx", "Список Книг", 4),
+            database=database,
+            source_type=SOURCE_FOREIGN_AGENTS,
+            matched_value=foreign.name,
+            foreign_agent=foreign,
+        )
+
+        markers = build_markers_by_record([substance_result, foreign_result])
+        fields, changed = apply_markers_to_tag_values([], markers[651], age_marker="")
+
+        self.assertTrue(changed)
+        self.assertEqual([(333, "^AIII"), (333, "^AI^@БЕРСЕНЕВА АННА")], fields)
+
     def test_same_pseudonym_with_typo_in_legal_name_is_one_marker(self) -> None:
         correct = "^AI^@ЧХАРТИШВИЛИ ГРИГОРИЙ ШАЛВОВИЧ (ПСЕВДОНИМ: БОРИС АКУНИН)"
         typo = "^AI^@ЧХАРТИШВИЛЛИ ГРИГОРИЙ ШАЛВОВИЧ (ПСЕВДОНИМ: БОРИС АКУНИН)"

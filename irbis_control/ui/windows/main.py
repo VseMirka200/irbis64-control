@@ -5,10 +5,11 @@ import re
 import subprocess
 import sys
 from collections import deque
+from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QRect, QStandardPaths, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QObject, QRect, QStandardPaths, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -21,7 +22,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QSpinBox,
     QTextBrowser,
@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 )
 
 from irbis_control import APP_TITLE as APP_TITLE
+from irbis_control.ui.message_box import AppMessageBox as QMessageBox
 from irbis_control import __version__
 from irbis_control.application.marker_settings import (
     DEFAULT_MARKER_SETTINGS as DEFAULT_MARKER_SETTINGS,
@@ -65,6 +66,14 @@ from irbis_control.core.matcher import (
 )
 from irbis_control.core.models import ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
+from irbis_control.infrastructure.nkp_source import (
+    DRUG_CACHE_FILENAME,
+    DRUG_META_FILENAME,
+    FOREIGN_AGENTS_CACHE_FILENAME,
+    FOREIGN_AGENTS_META_FILENAME,
+    NKP_DRUG_PAGE_URL,
+    NKP_FOREIGN_AGENTS_PAGE_URL,
+)
 from irbis_control.paths import icon_path, project_root
 from irbis_control.ui.components.dialogs import (
     DEFAULT_USEFUL_LINKS as DEFAULT_USEFUL_LINKS,
@@ -105,6 +114,7 @@ from irbis_control.ui.components.widgets import (
 from irbis_control.ui.components.widgets import (
     SectionCard as SectionCard,
 )
+from irbis_control.ui.context_menu import install_context_menu_manager
 from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.services.workers import (
     ComparisonWorker as ComparisonWorker,
@@ -118,6 +128,9 @@ from irbis_control.ui.services.workers import (
 from irbis_control.ui.services.workers import (
     UpdateWorker as UpdateWorker,
 )
+from irbis_control.ui.services.workers import (
+    NkpRegistryRefreshWorker as NkpRegistryRefreshWorker,
+)
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
 from irbis_control.ui.storage_paths import application_settings_path, manual_review_memory_path
 from irbis_control.ui.storage_paths import database_connector_config_path as database_connector_config_path
@@ -126,6 +139,7 @@ from irbis_control.ui.theme import (
     about_page_stylesheet,
     apply_about_title_font,
     apply_application_theme,
+    prepare_application_ui,
 )
 from irbis_control.ui.windows.main_build import MainWindowBuildMixin
 from irbis_control.ui.windows.main_layout import MainWindowLayoutMixin
@@ -456,6 +470,35 @@ class ApplicationSettingsPage(QWidget):
         theme_row.addWidget(self.theme_combo, 1)
         appearance_card.body.addLayout(theme_row)
 
+        sources_card = SectionCard("Онлайн-реестры НКП РГБ", "")
+        layout.addWidget(sources_card)
+        source_hint = QLabel(
+            "Выберите, какие официальные реестры обновлять автоматически перед проверкой. "
+            "Последняя успешно загруженная копия хранится локально и используется при недоступности сайта."
+        )
+        source_hint.setObjectName("cardDescription")
+        source_hint.setWordWrap(True)
+        sources_card.body.addWidget(source_hint)
+        self.nkp_drug_check = QCheckBox("Реестр литературы по наркотическим веществам")
+        self.nkp_drug_check.setChecked(settings.use_nkp_drug_registry)
+        self.nkp_foreign_check = QCheckBox("Реестр изданий иностранных агентов")
+        self.nkp_foreign_check.setChecked(settings.use_nkp_foreign_agents_registry)
+        sources_card.body.addWidget(self.nkp_drug_check)
+        sources_card.body.addWidget(self.nkp_foreign_check)
+        source_actions = QHBoxLayout()
+        source_actions.setSpacing(7)
+        self.open_registry_cache_button = QPushButton("Открыть кэш")
+        self.open_registry_cache_button.setObjectName("mutedButton")
+        self.clear_registry_cache_button = QPushButton("Очистить кэш")
+        self.clear_registry_cache_button.setObjectName("mutedButton")
+        if parent is not None:
+            self.open_registry_cache_button.clicked.connect(parent.open_registry_cache_folder)
+            self.clear_registry_cache_button.clicked.connect(parent.clear_registry_cache)
+        source_actions.addWidget(self.open_registry_cache_button)
+        source_actions.addWidget(self.clear_registry_cache_button)
+        source_actions.addStretch()
+        sources_card.body.addLayout(source_actions)
+
         updates_card = SectionCard("Обновления", "")
         layout.addWidget(updates_card)
         self.auto_updates_check = QCheckBox("Проверять обновления на GitHub при запуске")
@@ -498,6 +541,8 @@ class ApplicationSettingsPage(QWidget):
         self.backup_check.setChecked(defaults.create_database_backup)
         self.auto_updates_check.setChecked(defaults.check_updates_on_start)
         self.theme_combo.setCurrentIndex(self.theme_combo.findData(defaults.theme))
+        self.nkp_drug_check.setChecked(defaults.use_nkp_drug_registry)
+        self.nkp_foreign_check.setChecked(defaults.use_nkp_foreign_agents_registry)
 
     def _show_about(self) -> None:
         dialog = QDialog(self)
@@ -571,6 +616,8 @@ class ApplicationSettingsPage(QWidget):
             create_database_backup=self.backup_check.isChecked(),
             check_updates_on_start=self.auto_updates_check.isChecked(),
             theme=str(self.theme_combo.currentData()),
+            use_nkp_drug_registry=self.nkp_drug_check.isChecked(),
+            use_nkp_foreign_agents_registry=self.nkp_foreign_check.isChecked(),
         )
         self.saved.emit(settings)
 
@@ -623,6 +670,9 @@ class MainWindow(
         self._pending_update_asset: ReleaseAsset | None = None
         self._installing_update = False
         self.progress_dialog = ProgressDialog("Ход выполнения", self)
+        self.progress_dialog.cancel_requested.connect(self._cancel_current_comparison)
+        self.nkp_refresh_thread: QThread | None = None
+        self.nkp_refresh_worker: NkpRegistryRefreshWorker | None = None
         self._journal_lines: deque[str] = deque(maxlen=self.RUN_JOURNAL_MAX_LINES)
         self._journal_save_timer = QTimer(self)
         self._journal_save_timer.setSingleShot(True)
@@ -766,7 +816,13 @@ class MainWindow(
             self._apply_marker_settings_to_ui()
 
     def open_application_settings(self) -> None:
-        self.workflow_tabs.setCurrentWidget(self.application_settings_page)
+        page = self.application_settings_page
+        page.backup_check.setChecked(self.app_settings.create_database_backup)
+        page.auto_updates_check.setChecked(self.app_settings.check_updates_on_start)
+        page.theme_combo.setCurrentIndex(page.theme_combo.findData(self.app_settings.theme))
+        page.nkp_drug_check.setChecked(self.app_settings.use_nkp_drug_registry)
+        page.nkp_foreign_check.setChecked(self.app_settings.use_nkp_foreign_agents_registry)
+        self.workflow_tabs.setCurrentWidget(page)
         self.marker_settings_button.setChecked(True)
 
     def _settings_navigation_changed(self, _index: int) -> None:
@@ -786,6 +842,15 @@ class MainWindow(
             )
             return
         self.app_settings = settings
+        if hasattr(self, "nkp_live_check"):
+            self.nkp_live_check.blockSignals(True)
+            self.nkp_live_check.setChecked(settings.use_nkp_drug_registry)
+            self.nkp_live_check.blockSignals(False)
+        if hasattr(self, "nkp_foreign_live_check"):
+            self.nkp_foreign_live_check.blockSignals(True)
+            self.nkp_foreign_live_check.setChecked(settings.use_nkp_foreign_agents_registry)
+            self.nkp_foreign_live_check.blockSignals(False)
+        self._update_nkp_source_controls()
         app = QApplication.instance()
         if app is not None:
             apply_application_theme(app, settings.theme)
@@ -798,7 +863,180 @@ class MainWindow(
         page.backup_check.setChecked(self.app_settings.create_database_backup)
         page.auto_updates_check.setChecked(self.app_settings.check_updates_on_start)
         page.theme_combo.setCurrentIndex(page.theme_combo.findData(self.app_settings.theme))
+        page.nkp_drug_check.setChecked(self.app_settings.use_nkp_drug_registry)
+        page.nkp_foreign_check.setChecked(self.app_settings.use_nkp_foreign_agents_registry)
         self.workflow_tabs.setCurrentWidget(self._settings_return_page)
+
+    def _cancel_current_comparison(self) -> None:
+        worker = self.worker
+        request_cancel = getattr(worker, "request_cancel", None)
+        if callable(request_cancel):
+            request_cancel()
+            self._set_status("Отмена операции запрошена…", "warning")
+            self.progress_dialog.set_progress(self.progress.value(), "Отмена запрошена. Завершаем текущий этап…")
+
+    def _registry_cache_dir(self) -> Path:
+        path = self._app_data_dir() / "registries"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _format_registry_meta(path: Path, cache_path: Path) -> str:
+        if not cache_path.is_file():
+            return "Кэш НКП ещё не загружен"
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+            return f"Кэш сохранён: {cache_path.name}"
+        fetched = str(payload.get("fetched_at") or "").strip()
+        try:
+            fetched_text = datetime.fromisoformat(fetched.replace("Z", "+00:00")).astimezone().strftime("%d.%m.%Y %H:%M")
+        except ValueError:
+            fetched_text = fetched or "дата неизвестна"
+        try:
+            rows = int(payload.get("rows", 0))
+        except (TypeError, ValueError):
+            rows = 0
+        rows_text = f" · {rows:,} строк".replace(",", " ") if rows else ""
+        return f"Кэш обновлён {fetched_text}{rows_text}"
+
+    def _refresh_registry_cache_status(self) -> None:
+        cache = self._registry_cache_dir()
+        if hasattr(self, "nkp_drug_status_label"):
+            self.nkp_drug_status_label.setText(
+                self._format_registry_meta(cache / DRUG_META_FILENAME, cache / DRUG_CACHE_FILENAME)
+            )
+        if hasattr(self, "nkp_foreign_status_label"):
+            self.nkp_foreign_status_label.setText(
+                self._format_registry_meta(
+                    cache / FOREIGN_AGENTS_META_FILENAME,
+                    cache / FOREIGN_AGENTS_CACHE_FILENAME,
+                )
+            )
+
+    def _update_nkp_source_controls(self, *_args) -> None:
+        if not hasattr(self, "nkp_foreign_live_check"):
+            return
+        foreign_online = self.nkp_foreign_live_check.isChecked()
+        # Онлайн-реестр заменяет локальный файл иноагентов. Серый список явно показывает,
+        # что выбранный локальный файл сейчас не участвует в сравнении.
+        for widget in (self.foreign_agents_list, self.foreign_agents_button):
+            widget.setEnabled(not foreign_online)
+        self.clear_foreign_agents_button.setEnabled(bool(self.foreign_agents_edit.text().strip()))
+        self.foreign_agents_list.setToolTip(
+            "Онлайн-реестр НКП включён: локальный файл временно не используется."
+            if foreign_online
+            else "Перетащите сюда реестр .xlsx/.xlsm или нажмите «Добавить Excel»"
+        )
+
+    def _nkp_source_preference_changed(self, *_args) -> None:
+        if not hasattr(self, "nkp_live_check"):
+            return
+        self.app_settings.use_nkp_drug_registry = self.nkp_live_check.isChecked()
+        self.app_settings.use_nkp_foreign_agents_registry = self.nkp_foreign_live_check.isChecked()
+        try:
+            save_application_settings(application_settings_path(), self.app_settings)
+        except Exception as exc:
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось сохранить выбор источников НКП:\n{exc}")
+        page = getattr(self, "application_settings_page", None)
+        if page is not None:
+            page.nkp_drug_check.setChecked(self.app_settings.use_nkp_drug_registry)
+            page.nkp_foreign_check.setChecked(self.app_settings.use_nkp_foreign_agents_registry)
+
+    def open_nkp_registry_page(self, registry: str) -> None:
+        url = NKP_FOREIGN_AGENTS_PAGE_URL if registry == "foreign" else NKP_DRUG_PAGE_URL
+        if not QDesktopServices.openUrl(QUrl(url)):
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось открыть страницу НКП РГБ:\n{url}")
+
+    def open_registry_cache_folder(self) -> None:
+        folder = self._registry_cache_dir()
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))):
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось открыть папку кэша:\n{folder}")
+
+    def clear_registry_cache(self) -> None:
+        if self.nkp_refresh_thread is not None and self.nkp_refresh_thread.isRunning():
+            QMessageBox.information(self, APP_TITLE, "Сначала дождитесь завершения обновления реестра НКП.")
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Удалить локальный кэш обоих реестров НКП?\n\n"
+            "При следующей проверке программа заново загрузит данные с сайта. Встроенная резервная копия останется доступна.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        folder = self._registry_cache_dir()
+        removed = 0
+        for filename in (
+            DRUG_CACHE_FILENAME,
+            DRUG_META_FILENAME,
+            FOREIGN_AGENTS_CACHE_FILENAME,
+            FOREIGN_AGENTS_META_FILENAME,
+        ):
+            target = folder / filename
+            if target.exists():
+                target.unlink(missing_ok=True)
+                removed += 1
+        self._refresh_registry_cache_status()
+        self._set_status("Кэш реестров НКП очищен", "idle")
+        if removed == 0:
+            QMessageBox.information(self, APP_TITLE, "Локальный кэш реестров уже пуст.")
+
+    def refresh_nkp_registry(self, registry: str) -> None:
+        if self.thread is not None and self.thread.isRunning():
+            QMessageBox.information(self, APP_TITLE, "Сначала дождитесь завершения текущей проверки.")
+            return
+        if self.nkp_refresh_thread is not None and self.nkp_refresh_thread.isRunning():
+            QMessageBox.information(self, APP_TITLE, "Обновление реестра НКП уже выполняется.")
+            return
+        if registry not in {"drug", "foreign"}:
+            return
+        button = self.refresh_nkp_foreign_button if registry == "foreign" else self.refresh_nkp_drug_button
+        label = self.nkp_foreign_status_label if registry == "foreign" else self.nkp_drug_status_label
+        button.setEnabled(False)
+        label.setText("Обновление с НКП РГБ…")
+        self._set_status("Обновление реестра НКП РГБ…", "running")
+
+        thread = QThread(self)
+        worker = NkpRegistryRefreshWorker(registry)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._nkp_registry_refresh_finished)
+        worker.failed.connect(self._nkp_registry_refresh_failed)
+        worker.finished.connect(worker.deleteLater)
+        worker.failed.connect(worker.deleteLater)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._nkp_registry_refresh_thread_finished)
+        self.nkp_refresh_thread = thread
+        self.nkp_refresh_worker = worker
+        thread.start()
+
+    def _nkp_registry_refresh_finished(self, registry: str, result: object) -> None:
+        self._refresh_registry_cache_status()
+        detail = str(getattr(result, "detail", "")).strip()
+        used_cache = bool(getattr(result, "used_cache", False))
+        self._set_status(
+            ("НКП: используется сохранённая копия" if used_cache else "Реестр НКП обновлён")
+            + (f" · {detail}" if detail else ""),
+            "warning" if used_cache else "success",
+        )
+        button = self.refresh_nkp_foreign_button if registry == "foreign" else self.refresh_nkp_drug_button
+        button.setEnabled(True)
+
+    def _nkp_registry_refresh_failed(self, registry: str, error: str) -> None:
+        self._refresh_registry_cache_status()
+        button = self.refresh_nkp_foreign_button if registry == "foreign" else self.refresh_nkp_drug_button
+        button.setEnabled(True)
+        self._set_status("Не удалось обновить реестр НКП", "error")
+        QMessageBox.warning(self, APP_TITLE, f"Не удалось обновить реестр НКП РГБ:\n{error}")
+
+    def _nkp_registry_refresh_thread_finished(self) -> None:
+        self.nkp_refresh_thread = None
+        self.nkp_refresh_worker = None
 
     def open_database_connector(self) -> None:
         """Запускает отдельную утилиту прямого подключения к хранилищу/ИРБИС."""
@@ -1056,12 +1294,14 @@ def main() -> int:
             # AppUserModelID поддерживается только подходящими версиями Windows.
             pass
 
+    prepare_application_ui()
     app = QApplication(sys.argv)
     install_russian_ui(app)
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
     startup_settings = load_application_settings(application_settings_path())
     apply_application_theme(app, startup_settings.theme)
+    install_context_menu_manager(app)
     app.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
     window = MainWindow()
     window.show()

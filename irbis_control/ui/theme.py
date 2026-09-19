@@ -99,6 +99,13 @@ def result_diff_fill_colors() -> dict[str, QColor]:
     }
 
 
+def review_approved_fill_color() -> QColor:
+    """Фон подтверждённой строки ручной проверки из общей палитры UI."""
+    if _current_dark:
+        return QColor(52, 125, 190, 72)
+    return QColor(22, 131, 232, 55)
+
+
 def common_button_stylesheet() -> str:
     """Единые размеры и состояния кнопок для всех окон приложения."""
     colors = _colors()
@@ -123,6 +130,15 @@ def common_button_stylesheet() -> str:
             color: @disabled@;
             background: @button_disabled@;
             border-color: @border@;
+        }
+        QPushButton#mutedButton, QPushButton#secondaryButton, QPushButton#secondary {
+            color: @text@;
+            background: transparent;
+            border-color: @border@;
+        }
+        QPushButton#mutedButton:hover, QPushButton#secondaryButton:hover, QPushButton#secondary:hover {
+            background: @button_hover@;
+            border-color: @accent@;
         }
         QPushButton#primaryButton, QPushButton#primary {
             color: #ffffff;
@@ -176,6 +192,185 @@ def component_stylesheet() -> str:
         QFrame#listResizeGrip { background: @grip@; border-radius: 1px; }
         QLabel#errorLabel { color: @error@; }
     """.replace("@grip@", colors["grip"]).replace("@error@", colors["error"])
+
+
+def application_stylesheet() -> str:
+    """Глобальный QSS приложения: все окна и диалоги получают один визуальный язык."""
+    colors = _colors()
+    stylesheet = r"""
+        QWidget { color: @text@; }
+        QMainWindow, QDialog, QMessageBox, QWidget#root, QWidget#centralPage, QWidget#tabPage {
+            background: @page@;
+            color: @text@;
+        }
+        QToolTip {
+            color: @text@;
+            background: @card@;
+            border: 1px solid @border@;
+            padding: 4px 6px;
+        }
+        QLabel { color: @text@; }
+        QLabel#mainTitle, QLabel#dialogTitle { color: @title@; font-weight: 600; }
+        QLabel#cardTitle { font-size: 13px; font-weight: 600; color: @accent@; }
+        QLabel#pageSectionTitle { font-size: 14px; font-weight: 600; color: @text@; margin-top: 4px; }
+        QLabel#tabIntro, QLabel#cardDescription, QLabel#statusLabel, QLabel#subtitle, QLabel#hint { color: @muted@; }
+        QLabel:disabled { color: @disabled@; }
+
+        QFrame#sectionCard, QFrame#actionCard, QFrame#card {
+            border: 1px solid @border@;
+            border-radius: 6px;
+            background: @card@;
+        }
+        QFrame#dangerCard { border: 1px solid @danger_border@; border-radius: 6px; background: @card@; }
+        QWidget#approvedReviewActionCell { background-color: rgba(22, 131, 232, 55); border: none; }
+        QFrame#headerCard, QFrame#irbisActions, QFrame#workflowFooter { border: none; background: transparent; }
+
+        QLineEdit, QComboBox, QSpinBox, QTextEdit, QTextBrowser, QListWidget, QTableWidget, QTreeWidget {
+            color: @text@;
+            background: @card@;
+            border: 1px solid @border@;
+            border-radius: 6px;
+            selection-background-color: @selection@;
+            selection-color: @text@;
+        }
+        QLineEdit, QSpinBox { min-height: 23px; padding: 1px 5px; }
+        QComboBox {
+            min-height: 23px;
+            padding: 1px 30px 1px 7px;
+            border-radius: 7px;
+        }
+        /*
+         * Fusion/Windows отрисовывает область стрелки QComboBox отдельным
+         * прямоугольным sub-control. Если его не стилизовать, правые углы
+         * остаются квадратными даже при border-radius самого поля.
+         */
+        QComboBox::drop-down {
+            subcontrol-origin: border;
+            subcontrol-position: top right;
+            width: 27px;
+            border: none;
+            background: transparent;
+            border-top-right-radius: 7px;
+            border-bottom-right-radius: 7px;
+        }
+        QComboBox::drop-down:hover { background: @button_hover@; }
+        QComboBox::drop-down:pressed { background: @button_pressed@; }
+        QComboBox:disabled::drop-down { background: transparent; }
+        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus, QListWidget:focus, QTableWidget:focus {
+            border-color: @accent@;
+        }
+        QLineEdit:disabled, QComboBox:disabled, QSpinBox:disabled, QTextEdit:disabled, QListWidget:disabled {
+            color: @disabled@;
+            background: @button_disabled@;
+        }
+        /*
+         * У выпадающего списка QComboBox есть собственный viewport и
+         * отдельная от поля отрисовка пунктов. Одного border-radius у
+         * QComboBox недостаточно: системный стиль рисует выбранную строку
+         * прямоугольником. Радиус и отступы задаём как popup, так и каждому
+         * пункту списка.
+         */
+        QComboBox QAbstractItemView {
+            color: @text@;
+            background: @card@;
+            border: 1px solid @border@;
+            border-radius: 7px;
+            padding: 4px;
+            outline: none;
+            selection-background-color: transparent;
+            selection-color: @text@;
+        }
+        QComboBox QAbstractItemView::item {
+            min-height: 22px;
+            padding: 2px 7px;
+            margin: 1px 0px;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            background: transparent;
+            color: @text@;
+        }
+        QComboBox QAbstractItemView::item:hover {
+            background: @button_hover@;
+            border-radius: 5px;
+        }
+        QComboBox QAbstractItemView::item:selected {
+            background: @selection@;
+            color: @text@;
+            border-radius: 5px;
+        }
+        QComboBox QAbstractItemView::item:selected:!active {
+            background: @selection@;
+            color: @text@;
+            border-radius: 5px;
+        }
+        QCheckBox, QRadioButton { spacing: 6px; }
+        QCheckBox::indicator, QRadioButton::indicator { width: 15px; height: 15px; }
+
+        QTabWidget::pane { border: 1px solid @border@; border-radius: 5px; background: @card@; }
+        QTabBar::tab { padding: 6px 10px; margin-right: 2px; }
+        QTabBar::tab:selected { color: @accent@; }
+
+        QHeaderView::section {
+            color: @text@;
+            background: @button@;
+            border: none;
+            border-right: 1px solid @border@;
+            border-bottom: 1px solid @border@;
+            padding: 4px 6px;
+        }
+        QTableCornerButton::section { background: @button@; border: 1px solid @border@; }
+
+        QMenu {
+            color: @text@;
+            background: @card@;
+            border: 1px solid @border@;
+            border-radius: 7px;
+            padding: 5px;
+        }
+        QMenu::item {
+            min-height: 20px;
+            padding: 5px 30px 5px 9px;
+            margin: 1px 0px;
+            border: 1px solid transparent;
+            border-radius: 5px;
+        }
+        QMenu::item:selected {
+            color: @text@;
+            background: @selection@;
+            border-color: transparent;
+        }
+        QMenu::item:disabled { color: @disabled@; background: transparent; }
+        QMenu::separator {
+            height: 1px;
+            background: @border@;
+            margin: 4px 8px;
+        }
+        QMenu#appContextMenu { padding: 5px; }
+
+        QMessageBox#appMessageBox { background: @page@; }
+        QMessageBox#appMessageBox QLabel#qt_msgbox_label { min-width: 320px; }
+        QMessageBox#appMessageBox QPushButton, QDialogButtonBox QPushButton { min-width: 88px; }
+
+        QProgressBar {
+            border: 1px solid @border@;
+            border-radius: 4px;
+            background: @track@;
+            text-align: center;
+        }
+        QProgressBar::chunk { background: @accent@; border-radius: 3px; }
+
+        QScrollBar:vertical { background: transparent; width: 12px; margin: 0; }
+        QScrollBar::handle:vertical { background: @grip@; min-height: 24px; border-radius: 5px; margin: 2px; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar:horizontal { background: transparent; height: 12px; margin: 0; }
+        QScrollBar::handle:horizontal { background: @grip@; min-width: 24px; border-radius: 5px; margin: 2px; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+
+        QTextEdit#logEdit, QTextEdit#plainLogEdit, QTextEdit#log { font-family: Consolas, monospace; }
+    """
+    for name, color in colors.items():
+        stylesheet = stylesheet.replace(f"@{name}@", color)
+    return common_button_stylesheet() + component_stylesheet() + stylesheet
 
 
 def main_window_stylesheet() -> str:
@@ -235,8 +430,7 @@ def main_window_stylesheet() -> str:
             selection-background-color: @card@;
             selection-color: @text@;
         }
-        QTableWidget#manualReviewTable::item:selected,
-        QTableWidget#manualReviewTable::item:hover {
+        QTableWidget#manualReviewTable::item:selected {
             background: @card@;
             color: @text@;
             border: none;
@@ -306,23 +500,12 @@ def main_window_stylesheet() -> str:
     """
     for name, color in colors.items():
         stylesheet = stylesheet.replace(f"@{name}@", color)
-    return common_button_stylesheet() + component_stylesheet() + stylesheet
+    return application_stylesheet() + stylesheet
 
 
 def database_connector_stylesheet() -> str:
-    """Стиль отдельного окна работы с базой."""
-    return (
-        common_button_stylesheet()
-        + component_stylesheet()
-        + """
-        QMainWindow, QWidget#root, QWidget#tabPage { background: palette(window); color: palette(window-text); }
-        QFrame#card { border: none; background: transparent; }
-        QLabel#title, QLabel#cardTitle { font-weight: 600; }
-        QLabel#subtitle, QLabel#hint { color: palette(mid); }
-        QTextEdit#log { font-family: Consolas, monospace; }
-        QProgressBar { min-height: 10px; max-height: 10px; }
-    """
-    )
+    """Совместимый вызов: отдельное окно использует тот же глобальный стиль."""
+    return application_stylesheet()
 
 
 def about_page_stylesheet() -> str:
@@ -343,12 +526,27 @@ def about_document_stylesheet() -> str:
     )
 
 
+def prepare_application_ui() -> None:
+    """Включает единый Qt-интерфейс до создания QApplication."""
+    attribute = getattr(Qt.ApplicationAttribute, "AA_DontUseNativeDialogs", None)
+    if attribute is not None:
+        try:
+            QApplication.setAttribute(attribute, True)
+        except (AttributeError, RuntimeError):
+            pass
+
+
 def apply_application_theme(app: QApplication, theme: str) -> None:
     """Применяет выбранную цветовую схему, не меняя геометрию и стиль элементов."""
     global _current_dark, _system_palette, _system_color_scheme
     if _system_palette is None:
         _system_palette = QPalette(app.palette())
         _system_color_scheme = app.styleHints().colorScheme()
+    # Fusion даёт одинаковые размеры и состояния контролов на Windows/Linux.
+    try:
+        app.setStyle("Fusion")
+    except Exception:
+        pass
     if theme not in VALID_THEMES:
         theme = THEME_SYSTEM
 
@@ -366,6 +564,7 @@ def apply_application_theme(app: QApplication, theme: str) -> None:
         if not dark:
             _current_dark = False
             app.setPalette(QPalette(_system_palette))
+            app.setStyleSheet(application_stylesheet())
             return
     else:
         dark = theme == THEME_DARK
@@ -411,6 +610,7 @@ def apply_application_theme(app: QApplication, theme: str) -> None:
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Base, QColor(colors["button_disabled"]))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Button, QColor(colors["button_disabled"]))
     app.setPalette(palette)
+    app.setStyleSheet(application_stylesheet())
 
 
 def apply_light_palette(app: QApplication) -> None:

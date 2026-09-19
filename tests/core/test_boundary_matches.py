@@ -30,13 +30,15 @@ from irbis_control.core.matcher import (
     normalize_author,
     normalize_publication_year,
     normalize_title,
+    primary_author_contributor,
     parse_match_rule,
+    read_foreign_agent_entries,
 )
 
 
 class BoundaryMatchTests(unittest.TestCase):
     def test_repeated_initial_before_full_name_is_the_same_author(self) -> None:
-        variants = ("Фаулз Д. Джон", "Фаулз, Джон", "Фаулз Джон")
+        variants = ("Фаулз Д. Джон", "Фаулз Дж. Джон", "Фаулз, Джон", "Фаулз Джон")
 
         self.assertEqual({"фаулз джон"}, {normalize_author(value) for value in variants})
         record = DatabaseRecord(record_number=1, authors=[variants[0]])
@@ -89,7 +91,7 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual(95.0, result.confidence)
         self.assertIn("противоречием", result.method)
 
-    def test_fuzzy_title_match_is_only_a_manual_review_candidate(self) -> None:
+    def test_fuzzy_title_and_exact_author_allow_automatic_marker(self) -> None:
         record = DatabaseRecord(record_number=1, titles=["Коллекционер"], authors=["Фаулз Джон"])
         entry = ExcelEntry(
             1,
@@ -102,8 +104,45 @@ class BoundaryMatchTests(unittest.TestCase):
 
         result = DatabaseIndex([record]).match(entry, True, True, True, 92)[0]
 
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual(100.0, result.confidence)
+        self.assertIn("точный автор", result.method)
+        self.assertEqual({1: [(333, "^AIII")]}, build_markers_by_record([result]))
+
+    def test_fuzzy_title_marks_all_copies_of_the_same_book(self) -> None:
+        records = [
+            DatabaseRecord(record_number=1, titles=["Коллекционер"], authors=["Фаулз Джон"]),
+            DatabaseRecord(record_number=2, titles=["Коллекционер"], authors=["Фаулз Джон"]),
+        ]
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            title="Колекционер",
+            author="Фаулз, Джон",
+        )
+
+        results = DatabaseIndex(records).match(entry, True, True, True, 92)
+
+        self.assertEqual(2, len(results))
+        self.assertTrue(all(result.status == "Совпадение" for result in results))
+        self.assertEqual({1: [(333, "^AIII")], 2: [(333, "^AIII")]}, build_markers_by_record(results))
+
+    def test_fuzzy_title_with_partial_author_requires_review(self) -> None:
+        record = DatabaseRecord(record_number=1, titles=["Коллекционер"], authors=["Фаулз Д."])
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            title="Колекционер",
+            author="Фаулз Джон",
+        )
+
+        result = DatabaseIndex([record]).match(entry, True, True, True, 92)[0]
+
         self.assertEqual("Возможное совпадение", result.status)
-        self.assertIn("Приблизительно", result.method)
         self.assertEqual({}, build_markers_by_record([result]))
 
     def test_publisher_legal_form_does_not_prevent_exact_publication_match(self) -> None:
@@ -127,32 +166,57 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual("Совпадение", result.status)
         self.assertEqual("Название + издательство + год", result.method)
 
-    def test_secondary_author_requires_manual_review(self) -> None:
+    def test_translator_in_field_702_is_not_compared_as_author(self) -> None:
         record = database_record_from_tag_values(
             1,
             [
                 (200, "^AКоллекционер"),
-                (700, "^AФаулз^BДжон"),
-                (702, "^AИванов^BИван"),
+                (700, "^AФаулз^BДж.^GДжон"),
+                (702, "^AБессмертной^BИ.М.^4пер."),
             ],
         )
-        secondary_entry = ExcelEntry(
+        translator_entry = ExcelEntry(
             1,
             "books.xlsx",
             "Книги",
             2,
             title="Коллекционер",
-            author="Иванов Иван",
+            author="Бессмертной И.М.",
         )
-        primary_entry = replace(secondary_entry, author="Фаулз Джон")
+        primary_entry = replace(translator_entry, author="Фаулз Джон")
 
-        secondary = DatabaseIndex([record]).match(secondary_entry, True, True, False, 90)[0]
+        translator = DatabaseIndex([record]).match(translator_entry, True, True, False, 90)[0]
         primary = DatabaseIndex([record]).match(primary_entry, True, True, False, 90)[0]
 
-        self.assertEqual("Возможное совпадение", secondary.status)
-        self.assertIn("дополнительный автор", secondary.method)
-        self.assertEqual({}, build_markers_by_record([secondary]))
+        self.assertEqual(["Фаулз Дж. Джон"], record.authors)
+        self.assertEqual("Не найдено", translator.status)
+        self.assertEqual({}, build_markers_by_record([translator]))
         self.assertEqual("Совпадение", primary.status)
+        self.assertEqual({1: [(333, "^AIII")]}, build_markers_by_record([primary]))
+
+    def test_first_registry_contributor_is_used_as_primary_author(self) -> None:
+        self.assertEqual(
+            "Брэдбери, Рэй",
+            primary_author_contributor("Брэдбери, Рэй Бабенко, Виталий Тимофеевич"),
+        )
+        self.assertEqual(
+            "Мураками Харуки",
+            primary_author_contributor("Мураками Харуки Чинарева, Юлия"),
+        )
+        record = DatabaseRecord(1, titles=["451 по Фаренгейту"], authors=["Брэдбери Р. Рэй"])
+        entry = ExcelEntry(
+            1,
+            "books.xlsx",
+            "Книги",
+            2,
+            author="Брэдбери, Рэй Бабенко, Виталий Тимофеевич",
+            title="451 по Фаренгейту",
+        )
+
+        result = DatabaseIndex([record]).match(entry, False, True, False, 90)[0]
+
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual("Название и автор", result.method)
 
     def test_new_rules_match_independently_and_can_be_disabled(self) -> None:
         record = database_record_from_tag_values(
@@ -400,8 +464,24 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertEqual("текст", normalize_title("Текст : роман : [18+]"))
         self.assertEqual("рассказы", normalize_title("Рассказы"))
         self.assertNotEqual(normalize_title("Я (не) робот"), normalize_title("Я робот"))
+        self.assertNotEqual(normalize_title("Избранные рассказы"), normalize_title("Избранные романы"))
 
-    def test_incomplete_author_initials_require_review(self) -> None:
+    def test_database_uses_961_primary_author_when_700_701_are_missing(self) -> None:
+        record = database_record_from_tag_values(
+            1,
+            [
+                (200, "^AСад смерти"),
+                (961, "^ZДА^AСандему^BМ.^GМаргит"),
+                (961, "^4340 ред.^AРедактор^BР."),
+            ],
+        )
+
+        self.assertEqual(["Сандему М. Маргит"], record.authors)
+        entry = ExcelEntry(1, "books.xlsx", "Книги", 2, author="Сандему, Маргит", title="Сад смерти")
+        result = DatabaseIndex([record]).match(entry, False, True, False, 90)[0]
+        self.assertEqual("Совпадение", result.status)
+
+    def test_exact_title_and_matching_first_author_initial_are_automatic(self) -> None:
         record = DatabaseRecord(1, titles=["Общее название"], authors=["Иванов И."])
         entry = ExcelEntry(
             1,
@@ -414,9 +494,9 @@ class BoundaryMatchTests(unittest.TestCase):
 
         result = DatabaseIndex([record]).match(entry, False, True, False, 90)[0]
 
-        self.assertEqual("Возможное совпадение", result.status)
-        self.assertEqual("Название и неполные данные автора", result.method)
-        self.assertEqual({}, build_markers_by_record([result]))
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual("Название и автор (сокращённое имя)", result.method)
+        self.assertEqual({1: [(333, "^AIII")]}, build_markers_by_record([result]))
 
     def test_substance_report_contains_match_reason_and_source_location(self) -> None:
         result = MatchResult(
@@ -521,14 +601,14 @@ class BoundaryMatchTests(unittest.TestCase):
         self.assertTrue(all(result.confidence == 90.0 for result in results))
         self.assertEqual({}, build_markers_by_record(results))
 
-    def test_single_initial_is_not_automatic_even_for_one_candidate(self) -> None:
+    def test_single_initial_is_automatic_for_one_registry_person(self) -> None:
         record = DatabaseRecord(record_number=11, authors=["Иванов И."])
 
         results = compare_foreign_agents([record], [self._foreign_entry(1, "Иванов Иван Петрович")])
 
-        self.assertEqual("Возможное совпадение", results[0].status)
-        self.assertEqual(90.0, results[0].confidence)
-        self.assertEqual({}, build_markers_by_record(results))
+        self.assertEqual("Совпадение", results[0].status)
+        self.assertEqual(100.0, results[0].confidence)
+        self.assertEqual({11: [(333, "^AI^@ИВАНОВ ИВАН ПЕТРОВИЧ")]}, build_markers_by_record(results))
 
     def test_foreign_agents_use_the_same_author_comparison_as_substances(self) -> None:
         record = DatabaseRecord(record_number=12, titles=["Тестовая книга"], authors=["Иванов И."])
@@ -546,6 +626,92 @@ class BoundaryMatchTests(unittest.TestCase):
 
         self.assertEqual(substance_result.status, foreign_result.status)
         self.assertEqual(substance_result.confidence, foreign_result.confidence)
+
+    def test_foreign_agent_publication_list_preserves_each_book_row(self) -> None:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Список Книг"
+        sheet.append(["Перечень изданий иностранных агентов"])
+        sheet.append(["Дата обновления списка:"])
+        sheet.append(["№ в реестре", "Автор", "Роль относительно произведения", "ISBN", "Заглавие"])
+        sheet.append(["123", "Берсенева, Анна", "Автор", "978-5-00-000001-1", "Первая книга"])
+        sheet.append(["123", "Берсенева, Анна", "Автор", "978-5-00-000002-8", "Вторая книга"])
+
+        with tempfile.TemporaryDirectory(dir=Path.cwd()) as temp_dir:
+            source = Path(temp_dir) / "publication-foreign-agent.xlsx"
+            workbook.save(source)
+            entries, warnings = read_foreign_agent_entries(source)
+
+        self.assertEqual([], warnings)
+        self.assertEqual(2, len(entries))
+        self.assertEqual("Берсенева, Анна", entries[0].name)
+        self.assertEqual("Физическое лицо", entries[0].agent_type)
+        self.assertEqual("Первая книга", entries[0].title)
+        self.assertEqual("978-5-00-000001-1", entries[0].isbn)
+
+        record = DatabaseRecord(record_number=1, authors=["Берсенева Анна"])
+        results = compare_foreign_agents([record], entries)
+        result = next(item for item in results if item.method == "Реестр иностранных агентов: Автор")
+        self.assertEqual("Совпадение", result.status)
+        self.assertEqual(
+            {1: [(333, "^AI^@БЕРСЕНЕВА АННА")]},
+            build_markers_by_record([result]),
+        )
+
+    def test_foreign_agent_publication_is_matched_by_isbn_even_for_non_author_role(self) -> None:
+        entry = ForeignAgentEntry(
+            entry_id=1,
+            source_file="publication-foreign-agent.xlsx",
+            sheet_name="Список Книг",
+            row_number=10,
+            registry_number="777",
+            name="Иванова Мария Петровна",
+            agent_type="Физическое лицо",
+            title="Другая книга",
+            isbn="978-5-04-244068-7",
+            role="пер.",
+        )
+        record = DatabaseRecord(
+            record_number=77,
+            isbns=["978-5-04-244068-7"],
+            titles=["Другая книга"],
+            authors=["Петров Петр"],
+        )
+
+        results = compare_foreign_agents([record], [entry])
+        publication = next(item for item in results if item.method == "Список изданий иноагентов: ISBN")
+
+        self.assertEqual("Совпадение", publication.status)
+        self.assertEqual(
+            {77: [(333, "^AI^@ИВАНОВА МАРИЯ ПЕТРОВНА")]},
+            build_markers_by_record([publication]),
+        )
+
+    def test_foreign_agent_publication_organization_uses_organization_marker(self) -> None:
+        entry = ForeignAgentEntry(
+            entry_id=1,
+            source_file="publication-foreign-agent.xlsx",
+            sheet_name="Список Книг",
+            row_number=4,
+            registry_number="860",
+            name="Общество с ограниченной ответственностью «Собеседник-Медиа»",
+            agent_type="Организация",
+            title="Филворды",
+            isbn="978-5-04-244068-7",
+            role="изд.",
+        )
+        record = DatabaseRecord(record_number=5, isbns=["978-5-04-244068-7"], titles=["Филворды"])
+
+        publication = next(
+            item
+            for item in compare_foreign_agents([record], [entry])
+            if item.method == "Список изданий иноагентов: ISBN"
+        )
+
+        self.assertEqual(
+            {5: [(333, "^AO^@ОБЩЕСТВО С ОГРАНИЧЕННОЙ ОТВЕТСТВЕННОСТЬЮ «СОБЕСЕДНИК-МЕДИА»")]},
+            build_markers_by_record([publication]),
+        )
 
     def test_exact_title_without_author_requires_review(self) -> None:
         record = DatabaseRecord(

@@ -80,12 +80,15 @@ HEADER_SYNONYMS = {
 
 
 FOREIGN_AGENT_HEADER_SYNONYMS = {
-    "registry_number": {"№ п/п", "номер", "номер п/п"},
+    "registry_number": {"№ п/п", "номер", "номер п/п", "№ в реестре"},
     "name": {
         "полное наименование прежнее наименование в случае его изменения фио псевдоним при наличии прежние фио в случае их изменения",
         "полное наименование фио псевдоним",
         "полное наименование фио",
         "наименование фио",
+        # Книжная выгрузка РГБ по иностранным агентам использует краткий
+        # заголовок «Автор», а не заголовок общего реестра Минюста.
+        "автор",
     },
     "participants": {"полное наименование или фио участников", "участники"},
     "agent_type": {"тип иностранного агента", "тип иноагента"},
@@ -97,6 +100,12 @@ FOREIGN_AGENT_HEADER_SYNONYMS = {
         "дата принятия минюстом россии решения об исключении из реестра при наличии",
         "дата исключения из реестра",
     },
+    # Поля книжной выгрузки РГБ «Список изданий, выпущенных иностранными
+    # агентами». Они нужны для поиска именно книги, а не только имени агента.
+    "title": HEADER_SYNONYMS["title"],
+    "isbn": HEADER_SYNONYMS["isbn"],
+    "role": {"роль относительно произведения", "роль"},
+    "publication": {"выходные данные", "выходные сведения"},
 }
 
 SOURCE_SUBSTANCES = "Вещества"
@@ -165,35 +174,20 @@ DEFAULT_FOREIGN_AGENT_MARKER_FIELD = 333
 DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD = 333
 DEFAULT_AGE_MARKER_FIELD = 900
 
-TITLE_STOP_WORDS = {
-    "роман",
-    "романы",
-    "повесть",
-    "повести",
-    "рассказ",
-    "рассказы",
-    "сборник",
-    "издание",
-    "изд",
-    "учебник",
-    "учебное",
-    "пособие",
-    "текст",
-    "перевод",
-    "английского",
-    "англ",
-    "русского",
-    "рус",
-    "книга",
-    "кн",
-    "том",
-    "часть",
-    "16",
-    "18",
-    "12",
-    "6",
-    "0",
-}
+_BIBLIOGRAPHIC_TITLE_SEGMENT_RE = re.compile(
+    r"^(?:\[?\s*)?(?:"
+    r"роман(?:ы)?|повест(?:ь|и)|рассказ(?:ы)?|сборник|издание|учебник|"
+    r"учебное\s+пособие|пособие|текст|перевод(?:\s+с\s+\w+)?|"
+    r"книга|кн\.?|том|т\.?|часть|ч\.?)\b",
+    flags=re.IGNORECASE,
+)
+
+_FOREIGN_ORGANIZATION_HINT_RE = re.compile(
+    r"\b(?:ооо|ао|пао|нко|ано|общество|организация|фонд|ассоциация|союз|движение|"
+    r"проект|издание|газета|журнал|редакция|компания|агентство|центр|институт|"
+    r"телеканал|радио|издательский\s+дом|автономная\s+некоммерческая)\b",
+    flags=re.IGNORECASE,
+)
 
 
 class ComparisonCancelled(RuntimeError):
@@ -270,46 +264,108 @@ def normalize_isbn(value: Any) -> str:
 
 
 def normalize_title(value: Any) -> str:
-    text = unicodedata.normalize("NFKC", safe_text(value)).lower().replace("ё", "е")
-    # Содержимое скобок может быть частью настоящего названия (например,
-    # «Я (не) робот»). Убираем сами скобки, а возрастные пометы удаляем ниже.
-    text = re.sub(r"[\[\]()]", " ", text)
-    text = re.sub(r"\b\d+\+\b", " ", text)
-    text = re.sub(r"[^0-9a-zа-я]+", " ", text)
-    tokens = text.split()
-    filtered = [token for token in tokens if token not in TITLE_STOP_WORDS]
-    if filtered:
-        return " ".join(filtered)
+    """Нормализует заглавие, сохраняя слова, которые могут быть частью названия.
 
-    # Иногда служебным словом является само название произведения: «Текст»,
-    # «Роман», «Рассказы». В таком случае сохраняем главный сегмент до
-    # первого двоеточия, иначе книга становится принципиально ненахожимой.
-    main_part = re.split(r"[:;/]", unicodedata.normalize("NFKC", safe_text(value)), maxsplit=1)[0]
-    main_part = main_part.lower().replace("ё", "е")
-    main_part = re.sub(r"[\[\]()]|\b\d+\+\b", " ", main_part)
-    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zа-я]+", " ", main_part)).strip()
+    Старый вариант удалял ``роман``, ``рассказы``, ``книга`` и похожие слова
+    повсюду. Из-за этого разные книги вроде «Избранные рассказы» и
+    «Избранные романы» превращались в один ключ ``избранные``. Теперь
+    библиографические пометы отсекаются только как отдельные хвостовые
+    сегменты после двоеточия/косой черты, а внутри самого названия остаются.
+    """
+    raw = unicodedata.normalize("NFKC", safe_text(value)).strip().replace("ё", "е").replace("Ё", "Е")
+    if not raw:
+        return ""
+
+    # Удаляем только явно служебные квадратные пометы. Произвольный текст в
+    # скобках сохраняем: «Я (не) робот» и «Я робот» должны различаться.
+    raw = re.sub(r"\[\s*(?:текст|электронный\s+ресурс|звукозапись)\s*\]", " ", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\[?\s*\d{1,2}\+\s*\]?", " ", raw)
+
+    # Ответственность после « / Автор ...» не является заглавием.
+    raw = re.split(r"\s+/\s+", raw, maxsplit=1)[0]
+
+    # Срезаем библиографический хвост только если он действительно начинается
+    # с обозначения вида/жанра. Само название «Роман с кокаином» не меняется.
+    segments = raw.split(":")
+    kept = [segments[0]]
+    for segment in segments[1:]:
+        candidate = re.sub(r"^[\s,;\[\]()]+", "", segment).strip()
+        if not candidate:
+            continue
+        if _BIBLIOGRAPHIC_TITLE_SEGMENT_RE.match(candidate):
+            break
+        kept.append(segment)
+    text = ":".join(kept)
+
+    # Хвост в квадратных скобках без двоеточия: «Название [роман]».
+    text = re.sub(
+        r"\s*\[\s*(?:роман|повесть|рассказы?|сборник|учебник|пособие|текст)\s*\]\s*$",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.lower()
+    # Убираем сами скобки, но не их содержимое.
+    text = re.sub(r"[\[\]()]", " ", text)
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zа-я]+", " ", text)).strip()
+
+
+def looks_like_foreign_organization(value: Any) -> bool:
+    """Отличает организацию/проект от ФИО в книжной выгрузке иноагентов."""
+    normalized = normalize_header(value)
+    return bool(_FOREIGN_ORGANIZATION_HINT_RE.search(normalized))
 
 
 def normalize_author(value: Any) -> str:
     text = unicodedata.normalize("NFKC", safe_text(value)).lower().replace("ё", "е")
-    text = re.sub(r"[^a-zа-я]+", " ", text)
-    tokens = text.split()
+    token_parts = re.findall(r"([a-zа-я]+)(\.)?", text)
+    tokens = [token for token, _dot in token_parts]
 
     # В ИРБИС полное имя иногда хранится вместе с собственным инициалом:
-    # «Фаулз Д. Джон», «Акунин Б. Борис». Такой инициал не является вторым
-    # именем и не должен отличать запись от «Фаулз, Джон».
+    # «Фаулз Д. Джон», «Фаулз Дж. Джон», «Акунин Б. Борис». Такое сокращение
+    # не является вторым именем и не должно отличать запись от полного ФИО.
     normalized_tokens = [
         token
-        for index, token in enumerate(tokens)
+        for index, (token, dot) in enumerate(token_parts)
         if not (
             index > 0
-            and len(token) == 1
+            and (bool(dot) or len(token) == 1)
+            and len(token) <= 2
             and index + 1 < len(tokens)
             and len(tokens[index + 1]) > 1
             and tokens[index + 1].startswith(token)
         )
     ]
     return " ".join(normalized_tokens)
+
+
+_NEXT_CONTRIBUTOR_RE = re.compile(
+    r"\s+(?=(?:[A-ZА-ЯЁ][0-9A-Za-zА-Яа-яЁё'’\-]*),\s)"
+)
+
+
+def primary_author_contributor(value: Any) -> str:
+    """Отделяет первого автора от приписанных к нему переводчиков/редакторов.
+
+    В перечне изданий РГБ роли не разделены по столбцам: несколько лиц записаны
+    подряд как ``Фамилия, Имя Фамилия, Имя``. Первым идёт автор произведения.
+    """
+    raw = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", safe_text(value))).strip()
+    first_comma = raw.find(",")
+    if first_comma < 0:
+        return raw
+
+    next_contributor = _NEXT_CONTRIBUTOR_RE.search(raw, first_comma + 1)
+    if next_contributor is not None:
+        return raw[: next_contributor.start()].strip()
+
+    # Иногда имя первого автора дано без запятой: ``Мураками Харуки
+    # Чинарева, Юлия``. Последнее слово перед единственной запятой тогда уже
+    # является фамилией следующего участника.
+    prefix_tokens = raw[:first_comma].split()
+    if len(prefix_tokens) >= 3:
+        return " ".join(prefix_tokens[:-1]).strip()
+    return raw
 
 
 def _author_identity(value: Any) -> tuple[str, tuple[str, ...]] | None:
@@ -470,7 +526,10 @@ def database_record_from_tag_values(
 
     authors: list[str] = []
     primary_authors: list[str] = []
-    for tag in ("700", "701", "702"):
+    # 700/701 содержат авторов и соавторов. Поле 702 предназначено для лиц
+    # вторичной ответственности (переводчиков, редакторов и т. п.), поэтому
+    # оно не должно участвовать в авторском сопоставлении и мешать меткам.
+    for tag in ("700", "701"):
         for item in fields.get(tag, []):
             parts = [
                 _extract_subfield(item, "A"),
@@ -480,8 +539,25 @@ def database_record_from_tag_values(
             author = " ".join(part for part in parts if part).strip()
             if author:
                 authors.append(author)
-                if tag in {"700", "701"}:
-                    primary_authors.append(author)
+                primary_authors.append(author)
+
+    # В некоторых связанных/многотомных записях ИРБИС основной автор
+    # переносится в 961 и помечается ``^ZДА``. Без этого тома одного и того же
+    # произведения выглядят как записи «без автора» и не получают метку даже
+    # при точном совпадении названия.
+    if not authors:
+        for item in fields.get("961", []):
+            if _extract_subfield(item, "Z").strip().upper() != "ДА":
+                continue
+            parts = [
+                _extract_subfield(item, "A"),
+                _extract_subfield(item, "B"),
+                _extract_subfield(item, "G"),
+            ]
+            author = " ".join(part for part in parts if part).strip()
+            if author:
+                authors.append(author)
+                primary_authors.append(author)
 
     organizations: list[str] = []
     for tag in ("710", "711", "712"):
@@ -842,6 +918,10 @@ def _read_foreign_agents_xlsx(
             except ValueError as exc:
                 warnings.append(f"{path.name}, лист «{worksheet.title}»: {exc}")
                 continue
+            name_header = normalize_header(headers[mapping["name"]])
+            is_publication_list = name_header == normalize_header("Автор") and any(
+                key in mapping for key in ("title", "isbn", "role", "publication")
+            )
 
             for row_number, row in enumerate(
                 worksheet.iter_rows(min_row=header_index + 2, values_only=True),
@@ -870,10 +950,21 @@ def _read_foreign_agents_xlsx(
                     registry_number=_mapped_value(values, mapping, "registry_number"),
                     name=name,
                     participants=_split_registry_participants(_mapped_value(values, mapping, "participants")),
-                    agent_type=_mapped_value(values, mapping, "agent_type"),
+                    agent_type=(
+                        _mapped_value(values, mapping, "agent_type")
+                        or (
+                            "Организация"
+                            if is_publication_list and looks_like_foreign_organization(name)
+                            else "Физическое лицо" if is_publication_list else ""
+                        )
+                    ),
                     inclusion_date=_mapped_value(values, mapping, "inclusion_date"),
                     exclusion_date=_mapped_value(values, mapping, "exclusion_date"),
                     raw_data=raw_data,
+                    title=_mapped_value(values, mapping, "title"),
+                    isbn=_mapped_value(values, mapping, "isbn"),
+                    role=_mapped_value(values, mapping, "role"),
+                    publication=_mapped_value(values, mapping, "publication"),
                 )
                 # Для проверки используются только действующие записи. Исключённые остаются
                 # в исходном файле, но не должны приводить к новым меткам в библиотечной базе.

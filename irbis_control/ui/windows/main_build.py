@@ -173,6 +173,11 @@ class MainWindowBuildMixin:
                 widget.textChanged.connect(self._queue_marker_settings_autosave)
             else:
                 widget.valueChanged.connect(self._queue_marker_settings_autosave)
+        self.nkp_live_check.toggled.connect(self._nkp_source_preference_changed)
+        self.nkp_foreign_live_check.toggled.connect(self._nkp_source_preference_changed)
+        self.nkp_foreign_live_check.toggled.connect(self._update_nkp_source_controls)
+        self._update_nkp_source_controls()
+        self._refresh_registry_cache_status()
         self._update_database_summary()
         self._update_foreign_agents_summary()
         self._update_excel_summary()
@@ -499,6 +504,29 @@ class MainWindowBuildMixin:
         sources_row.setVerticalSpacing(5)
         self.sources_grid = sources_row
         self.foreign_agents_card = SectionCard("Реестр иностранных агентов", "")
+        self.nkp_foreign_live_check = QCheckBox("Брать актуальный список с НКП РГБ при каждом запуске")
+        self.nkp_foreign_live_check.setChecked(bool(self.app_settings.use_nkp_foreign_agents_registry))
+        self.nkp_foreign_live_check.setToolTip(
+            "Список загружается с https://nkp.rsl.ru/foreign-agents-registry. "
+            "При временной недоступности сайта используется последняя сохранённая копия."
+        )
+        self.foreign_agents_card.body.addWidget(self.nkp_foreign_live_check)
+        self.nkp_foreign_status_label = QLabel("Кэш НКП ещё не загружен")
+        self.nkp_foreign_status_label.setObjectName("cardDescription")
+        self.nkp_foreign_status_label.setWordWrap(True)
+        self.foreign_agents_card.body.addWidget(self.nkp_foreign_status_label)
+        foreign_online_actions = QHBoxLayout()
+        foreign_online_actions.setSpacing(4)
+        self.refresh_nkp_foreign_button = QPushButton("Обновить сейчас")
+        self.refresh_nkp_foreign_button.setObjectName("mutedButton")
+        self.refresh_nkp_foreign_button.clicked.connect(lambda: self.refresh_nkp_registry("foreign"))
+        self.open_nkp_foreign_button = QPushButton("Открыть сайт")
+        self.open_nkp_foreign_button.setObjectName("mutedButton")
+        self.open_nkp_foreign_button.clicked.connect(lambda: self.open_nkp_registry_page("foreign"))
+        foreign_online_actions.addWidget(self.refresh_nkp_foreign_button)
+        foreign_online_actions.addWidget(self.open_nkp_foreign_button)
+        foreign_online_actions.addStretch()
+        self.foreign_agents_card.body.addLayout(foreign_online_actions)
         self.foreign_agents_edit = QLineEdit()
         self.foreign_agents_edit.hide()
         self.foreign_agents_list = FileDropListWidget(extensions=(".xlsx", ".xlsm"), allow_multiple=False)
@@ -530,6 +558,29 @@ class MainWindowBuildMixin:
         sources_row.addWidget(self.foreign_agents_card, 0, 0)
 
         self.excel_card = SectionCard("Реестр по наркотическим веществам", "")
+        self.nkp_live_check = QCheckBox("Брать актуальный список с НКП РГБ при каждом запуске")
+        self.nkp_live_check.setChecked(bool(self.app_settings.use_nkp_drug_registry))
+        self.nkp_live_check.setToolTip(
+            "Список загружается с https://nkp.rsl.ru/drug-literature-recommendations. "
+            "При временной недоступности сайта используется последняя сохранённая копия."
+        )
+        self.excel_card.body.addWidget(self.nkp_live_check)
+        self.nkp_drug_status_label = QLabel("Кэш НКП ещё не загружен")
+        self.nkp_drug_status_label.setObjectName("cardDescription")
+        self.nkp_drug_status_label.setWordWrap(True)
+        self.excel_card.body.addWidget(self.nkp_drug_status_label)
+        drug_online_actions = QHBoxLayout()
+        drug_online_actions.setSpacing(4)
+        self.refresh_nkp_drug_button = QPushButton("Обновить сейчас")
+        self.refresh_nkp_drug_button.setObjectName("mutedButton")
+        self.refresh_nkp_drug_button.clicked.connect(lambda: self.refresh_nkp_registry("drug"))
+        self.open_nkp_drug_button = QPushButton("Открыть сайт")
+        self.open_nkp_drug_button.setObjectName("mutedButton")
+        self.open_nkp_drug_button.clicked.connect(lambda: self.open_nkp_registry_page("drug"))
+        drug_online_actions.addWidget(self.refresh_nkp_drug_button)
+        drug_online_actions.addWidget(self.open_nkp_drug_button)
+        drug_online_actions.addStretch()
+        self.excel_card.body.addLayout(drug_online_actions)
         self.excel_list = FileDropListWidget(extensions=(".xlsx", ".xlsm", ".xls"), allow_multiple=True)
         self.excel_list.setObjectName("compactList")
         self.excel_list.setFixedHeight(84)
@@ -565,16 +616,21 @@ class MainWindowBuildMixin:
 
         match_settings_card = SectionCard("Порядок сравнения", "")
         self.match_settings_card = match_settings_card
-        self.match_rules_editor = MatchRulesEditor(match_settings_card)
+        # Редактор правил обязан находиться в layout карточки. Раньше он
+        # создавался дочерним виджетом SectionCard, но не добавлялся в body:
+        # после show() Qt оставлял ему геометрию (0, 0, ...), и поле выбора
+        # перекрывало заголовок «Порядок сравнения».
+        self.match_rules_editor = MatchRulesEditor()
         self.match_rules_editor.hide()
-        self.fuzzy_match_check = QCheckBox("Предлагать похожие названия с опечатками для ручной проверки")
+        match_settings_card.body.addWidget(self.match_rules_editor)
+        self.fuzzy_match_check = QCheckBox("Искать похожие названия с опечатками")
         self.fuzzy_match_check.hide()
         match_settings_card.body.addWidget(self.fuzzy_match_check)
         match_order = QLabel(
             "1. Точное совпадение по ISBN.\n"
             "2. Точное название книги и фамилия единственного автора.\n"
             "3. Если автора нет или их несколько — точное название, издательство и год.\n"
-            "4. Опечатки в названии предлагаются только для ручной проверки."
+            "4. Похожее название и точный основной автор считаются совпадением, если кандидат один."
         )
         match_order.setObjectName("cardDescription")
         match_order.setWordWrap(True)
@@ -852,10 +908,6 @@ class MainWindowBuildMixin:
         self.actions_buttons_layout.setVerticalSpacing(4)
         # Служебные объекты остаются для логики состояния, но эти действия
         # больше не выводятся в интерфейсе блока запуска.
-        self.cancel_button = QPushButton("Отменить", self.actions_card)
-        self.cancel_button.setEnabled(False)
-        self.cancel_button.clicked.connect(self.cancel_comparison)
-        self.cancel_button.hide()
         self.open_button = QPushButton("Открыть Excel-отчёт", self.actions_card)
         self.open_button.setEnabled(False)
         self.open_button.hide()
@@ -868,6 +920,7 @@ class MainWindowBuildMixin:
         self.write_irbis_button.setEnabled(False)
         self.write_irbis_button.clicked.connect(self.apply_results_to_irbis)
         self.clear_all_button = QPushButton("Очистить всё", self.actions_card)
+        self.clear_all_button.clicked.connect(self.reset_workspace)
         self.clear_all_button.hide()
         action_buttons = [self.open_modified_database_button, self.write_irbis_button]
         for i, button in enumerate(action_buttons):
