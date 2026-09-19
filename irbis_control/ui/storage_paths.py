@@ -23,3 +23,8 @@ def app_data_dir() -> Path:
 
 def database_connector_config_path() -> Path:
     return app_data_dir() / "database_connector.json"
+
+
+def manual_review_memory_path() -> Path:
+    """Локальная память подтверждённых вручную совпадений иноагентов."""
+    return app_data_dir() / "manual_review_confirmations.json"

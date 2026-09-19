@@ -12,6 +12,8 @@ from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     DEFAULT_SUBSTANCE_MARKER,
     DEFAULT_SUBSTANCE_MARKER_FIELD,
     SOURCE_FOREIGN_AGENTS,
@@ -156,13 +158,28 @@ def _foreign_agent_marker_name(result: MatchResult) -> str:
     return _record_author_marker(result.database.raw_record) if result.database else ""
 
 
+def _foreign_organization_marker_name(result: MatchResult) -> str:
+    """Возвращает каноническое название совпавшей организации или проекта."""
+    # Если совпал именно участник организации/проекта, в метку записываем
+    # участника, а не название родительской записи реестра.
+    if result.note.startswith("Участник") and result.matched_value:
+        return re.sub(r"\s+", " ", result.matched_value).strip().upper()
+    if result.foreign_agent is not None and result.foreign_agent.name:
+        return re.sub(r"\s+", " ", result.foreign_agent.name).strip().upper()
+    return re.sub(r"\s+", " ", result.matched_value).strip().upper()
+
+
 def _result_is_eligible_for_txt_marker(result: MatchResult) -> bool:
-    """Для иноагентов разрешает TXT-пометку только при совпадении по автору."""
+    """Разрешает метку только для надёжно подтверждённого совпадения."""
     if result.status != "Совпадение" or result.confidence < 100.0 or result.database is None:
         return False
     if result.source_type != SOURCE_FOREIGN_AGENTS:
         return True
-    return result.method == "Реестр иностранных агентов: Автор"
+    return result.method in {
+        "Реестр иностранных агентов: Автор",
+        "Реестр иностранных агентов: Организация",
+        "Реестр иностранных агентов: Название",
+    }
 
 
 def _normalized_marker_text(value: str) -> str:
@@ -188,7 +205,7 @@ def _normalized_marker_text(value: str) -> str:
 
 
 def _foreign_marker_identity(value: str) -> str | None:
-    """Ключ короткой авторской метки ^AI^@... для удаления повторов.
+    """Ключ метки иноагента ^AI/^AO для удаления повторов.
 
     Если в метке явно указан псевдоним, используем его как идентификатор
     персоны. В реестре встречаются дубли строк с опечаткой в настоящей
@@ -201,10 +218,11 @@ def _foreign_marker_identity(value: str) -> str | None:
     символах, попавших из реестра/Excel. Другие значения поля 333 не трогаем.
     """
     normalized = _normalized_marker_text(value)
-    prefix = "^ai^@"
-    if not normalized.startswith(prefix):
+    prefix_match = re.match(r"^\^a([io])\^@", normalized)
+    if prefix_match is None:
         return None
-    name = normalized[len(prefix) :].strip()
+    marker_kind = prefix_match.group(1)
+    name = normalized[prefix_match.end() :].strip()
     if not name:
         return None
     pseudonym_match = re.search(r"\(\s*псевдоним\s*:\s*([^)]+)\)", name, flags=re.IGNORECASE)
@@ -216,10 +234,11 @@ def _foreign_marker_identity(value: str) -> str | None:
             flags=re.IGNORECASE,
         )
         if pseudonym:
-            return pseudonym
+            return f"{marker_kind}:{pseudonym}"
     # Пунктуация и пробелы в ФИО/псевдониме не должны превращать одного
     # автора в две отдельные метки. Буквы и цифры сохраняем.
-    return re.sub(r"[^0-9a-zа-я]+", "", name, flags=re.IGNORECASE)
+    identity = re.sub(r"[^0-9a-zа-я]+", "", name, flags=re.IGNORECASE)
+    return f"{marker_kind}:{identity}" if identity else None
 
 
 def _marker_only_repeat_count(value: str, marker: str) -> int:
@@ -462,9 +481,11 @@ def remove_markers_from_tag_values(
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     age_marker: str = DEFAULT_AGE_MARKER,
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
 ) -> tuple[list[tuple[int, str]], bool]:
     """Удаляет настроенные метки прямо из набора полей записи ИРБИС.
@@ -479,6 +500,10 @@ def remove_markers_from_tag_values(
     classification_removals: dict[int, list[tuple[str, bool]]] = defaultdict(list)
     substance_fields = {DEFAULT_SUBSTANCE_MARKER_FIELD, int(substance_marker_field)}
     foreign_fields = {DEFAULT_FOREIGN_AGENT_MARKER_FIELD, int(foreign_agent_marker_field)}
+    organization_fields = {
+        DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+        int(foreign_organization_marker_field),
+    }
     age_fields = {DEFAULT_AGE_MARKER_FIELD, int(age_marker_field)}
 
     for field_number in substance_fields:
@@ -489,6 +514,13 @@ def remove_markers_from_tag_values(
         patterns = [
             (DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE, True),
             (foreign_agent_marker_template, True),
+        ]
+        removals[field_number].extend(patterns)
+        classification_removals[field_number].extend(patterns)
+    for field_number in organization_fields:
+        patterns = [
+            (DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE, True),
+            (foreign_organization_marker_template, True),
         ]
         removals[field_number].extend(patterns)
         classification_removals[field_number].extend(patterns)
@@ -509,7 +541,7 @@ def remove_markers_from_tag_values(
 
     conditional_age_removals: dict[int, list[tuple[str, bool]]] = defaultdict(list)
     if has_classification_marker:
-        for field_number in substance_fields | foreign_fields:
+        for field_number in substance_fields | foreign_fields | organization_fields:
             conditional_age_removals[field_number].append(("^A18+", False))
 
     changed = False
@@ -538,9 +570,11 @@ def remove_database_markers(
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     age_marker: str = DEFAULT_AGE_MARKER,
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
 ) -> tuple[Path, int]:
     """Создаёт TXT-копию без стандартных и текущих настроенных пометок."""
@@ -553,6 +587,10 @@ def remove_database_markers(
     classification_removals: dict[int, list[tuple[str, bool]]] = defaultdict(list)
     substance_fields = {DEFAULT_SUBSTANCE_MARKER_FIELD, substance_marker_field}
     foreign_fields = {DEFAULT_FOREIGN_AGENT_MARKER_FIELD, foreign_agent_marker_field}
+    organization_fields = {
+        DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+        foreign_organization_marker_field,
+    }
     age_fields = {DEFAULT_AGE_MARKER_FIELD, age_marker_field}
     for field_number in substance_fields:
         patterns = [
@@ -568,6 +606,13 @@ def remove_database_markers(
         ]
         removals[field_number].extend(patterns)
         classification_removals[field_number].extend(patterns)
+    for field_number in organization_fields:
+        patterns = [
+            (DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE, True),
+            (foreign_organization_marker_template, True),
+        ]
+        removals[field_number].extend(patterns)
+        classification_removals[field_number].extend(patterns)
     for field_number in age_fields:
         removals[field_number].extend(
             [
@@ -579,7 +624,7 @@ def remove_database_markers(
     # Старая пометка ^A18+ удаляется только из записей, где действительно была
     # пометка вещества или иноагента. Самостоятельные ^A18+ в базе сохраняются.
     conditional_age_removals: dict[int, list[tuple[str, bool]]] = defaultdict(list)
-    for field_number in substance_fields | foreign_fields:
+    for field_number in substance_fields | foreign_fields | organization_fields:
         conditional_age_removals[field_number].append(("^A18+", False))
 
     text, encoding = _read_text_file_with_encoding(source)
@@ -613,8 +658,11 @@ def build_markers_by_record(
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    include_records_without_markers: bool = False,
 ) -> dict[int, list[tuple[int, str]]]:
     """Готовит метки по MFN/номеру записи для TXT и прямой записи в ИРБИС."""
     markers_by_record: dict[int, list[tuple[int, str]]] = defaultdict(list)
@@ -622,10 +670,17 @@ def build_markers_by_record(
         if not _result_is_eligible_for_txt_marker(result) or result.database is None:
             continue
         record_number = result.database.source_record_number or result.database.record_number
+        if include_records_without_markers:
+            markers_by_record.setdefault(record_number, [])
         if result.source_type == SOURCE_FOREIGN_AGENTS:
-            agent_name = _foreign_agent_marker_name(result)
-            marker = foreign_agent_marker_template.replace("{name}", agent_name)
-            marker_field = foreign_agent_marker_field
+            if result.method == "Реестр иностранных агентов: Автор":
+                marker_name = _foreign_agent_marker_name(result)
+                marker = foreign_agent_marker_template.replace("{name}", marker_name)
+                marker_field = foreign_agent_marker_field
+            else:
+                marker_name = _foreign_organization_marker_name(result)
+                marker = foreign_organization_marker_template.replace("{name}", marker_name)
+                marker_field = foreign_organization_marker_field
         else:
             marker = substance_marker
             marker_field = substance_marker_field
@@ -809,9 +864,11 @@ def export_modified_database(
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     age_marker: str = DEFAULT_AGE_MARKER,
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
 ) -> Path:
     """Сохраняет копию TXT-базы и помечает только найденные записи."""
@@ -824,13 +881,6 @@ def export_modified_database(
     if progress_cb:
         progress_cb(94, "Добавление меток в найденные записи TXT")
 
-    matched_numbers = {
-        result.database.source_record_number or result.database.record_number
-        for result in results
-        if _result_is_eligible_for_txt_marker(result)
-        and result.database is not None
-        and (not result.database.source_file or Path(result.database.source_file).resolve() == source_path.resolve())
-    }
     source_results = [
         result
         for result in results
@@ -841,9 +891,18 @@ def export_modified_database(
         source_results,
         substance_marker=substance_marker,
         foreign_agent_marker_template=foreign_agent_marker_template,
+        foreign_organization_marker_template=foreign_organization_marker_template,
         substance_marker_field=substance_marker_field,
         foreign_agent_marker_field=foreign_agent_marker_field,
+        foreign_organization_marker_field=foreign_organization_marker_field,
     )
+    matched_numbers = set(markers_by_record)
+    if age_marker.strip():
+        matched_numbers.update(
+            result.database.source_record_number or result.database.record_number
+            for result in source_results
+            if _result_is_eligible_for_txt_marker(result) and result.database is not None
+        )
     text, encoding = _read_text_file_with_encoding(source_path)
     newline = _detect_newline(text)
 
@@ -899,9 +958,11 @@ def export_modified_databases(
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     age_marker: str = DEFAULT_AGE_MARKER,
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
 ) -> list[Path]:
     output = Path(output_path)
@@ -921,9 +982,11 @@ def export_modified_databases(
             cancel_cb,
             substance_marker=substance_marker,
             foreign_agent_marker_template=foreign_agent_marker_template,
+            foreign_organization_marker_template=foreign_organization_marker_template,
             age_marker=age_marker,
             substance_marker_field=substance_marker_field,
             foreign_agent_marker_field=foreign_agent_marker_field,
+            foreign_organization_marker_field=foreign_organization_marker_field,
             age_marker_field=age_marker_field,
         )
         written.append(target)
@@ -936,4 +999,3 @@ def export_modified_databases(
 
 
 # Сверяет файлы по переданным настройкам и возвращает результаты со сводкой после сохранения выбранных выходных файлов.
-

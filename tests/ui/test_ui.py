@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from irbis_control.application.settings import ApplicationSettings
+from irbis_control.application.settings import THEME_DARK, THEME_SYSTEM
 from irbis_control.ui import db_connector_window, main_window
 from irbis_control.ui.components import dialogs, widgets
 from irbis_control.ui.services import workers
@@ -59,7 +60,7 @@ class UiTests(unittest.TestCase):
         self.assertEqual(len(window.section_cards), 8)
         self.assertEqual(
             [window.workflow_tabs.tabText(index) for index in range(3)],
-            ["1  Данные", "2  Параметры", "3  Результат"],
+            ["Данные", "Параметры", "Результат"],
         )
         for index in range(3):
             window.workflow_tabs.setCurrentIndex(index)
@@ -70,6 +71,12 @@ class UiTests(unittest.TestCase):
         self.assertIs(window.workflow_tabs.currentWidget(), window.application_settings_page)
         window._close_application_settings()
         self.assertIs(window.workflow_tabs.currentWidget(), window.results_tab)
+
+        window.maintenance_dialog.show()
+        self.app.processEvents()
+        self.assertTrue(window.cleanup_button.isVisible())
+        self.assertGreaterEqual(window.cleanup_button.width(), 190)
+        window.maintenance_dialog.close()
 
     def test_simplified_workflow_controls_existing_settings(self) -> None:
         window = main_window.MainWindow()
@@ -90,6 +97,113 @@ class UiTests(unittest.TestCase):
         self.assertFalse(window.connection_settings_button.isCheckable())
         self.assertTrue(window.connection_card.isHidden())
         self.assertTrue(window.base_card.isHidden())
+
+        settings_page = window.application_settings_page
+        settings_page.backup_check.setChecked(False)
+        settings_page.auto_updates_check.setChecked(False)
+        settings_page.theme_combo.setCurrentIndex(settings_page.theme_combo.findData(THEME_DARK))
+        settings_page.reset_settings_button.click()
+        defaults = ApplicationSettings()
+        self.assertEqual(settings_page.backup_check.isChecked(), defaults.create_database_backup)
+        self.assertEqual(settings_page.auto_updates_check.isChecked(), defaults.check_updates_on_start)
+        self.assertEqual(settings_page.theme_combo.currentData(), THEME_SYSTEM)
+
+    def test_window_geometry_is_restored_without_disabling_resize(self) -> None:
+        first = main_window.MainWindow()
+        self.addCleanup(first.deleteLater)
+        first.show()
+        self.app.processEvents()
+        first.resize(700, 600)
+        first.move(40, 50)
+        self.app.processEvents()
+        saved_state: list[str] = []
+        with patch.object(
+            main_window,
+            "atomic_write_text",
+            side_effect=lambda _path, text, **_kwargs: saved_state.append(text),
+        ):
+            first._save_window_state()
+        first.close()
+
+        state_path = Mock()
+        state_path.read_text.return_value = saved_state[0]
+        with patch.object(main_window, "window_state_path", return_value=state_path):
+            second = main_window.MainWindow()
+        self.addCleanup(second.deleteLater)
+        self.addCleanup(second.close)
+        second.show()
+        self.app.processEvents()
+
+        self.assertEqual(second.size().width(), 700)
+        self.assertEqual(second.size().height(), 600)
+        self.assertGreater(second.maximumWidth(), second.width())
+        self.assertGreater(second.maximumHeight(), second.height())
+
+    def test_source_registries_have_room_and_do_not_leave_stale_window_space(self) -> None:
+        window = main_window.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        window.show()
+        self.app.processEvents()
+
+        window._update_foreign_agents_summary()
+        window._update_excel_summary()
+        self.app.processEvents()
+        window._fit_scroll_content()
+        self.app.processEvents()
+
+        self.assertEqual(window.foreign_agents_list.height(), 84)
+        self.assertEqual(window.excel_list.height(), 84)
+        for card in (window.foreign_agents_card, window.excel_card):
+            self.assertEqual(card.height(), card.sizeHint().height())
+            self.assertLessEqual(
+                card.height() - card.body.geometry().bottom(),
+                card.outer_layout.contentsMargins().bottom() + 2,
+            )
+        page_layout = window.data_tab.layout()
+        last_card_bottom = max(
+            window.foreign_agents_card.geometry().bottom(),
+            window.excel_card.geometry().bottom(),
+        )
+        self.assertLessEqual(
+            window.data_tab.height() - last_card_bottom,
+            page_layout.contentsMargins().bottom() + 3,
+        )
+
+        self.assertGreater(window.maximumWidth(), window.width())
+        self.assertGreater(window.maximumHeight(), window.height())
+
+        old_window_height = window.height()
+        window.excel_resize_handle._set_height(144)
+        self.app.processEvents()
+        window._fit_scroll_content()
+        self.app.processEvents()
+        self.assertEqual(window.excel_list.height(), 144)
+        self.assertGreater(window.height(), old_window_height)
+
+        window._update_excel_summary()
+        self.assertEqual(window.excel_list.height(), 144)
+
+        window.excel_resize_handle._set_height(58)
+        window.foreign_agents_resize_handle._set_height(58)
+        self.app.processEvents()
+        window._resize_height_to_current_page()
+        self.app.processEvents()
+        last_card_bottom = max(
+            window.foreign_agents_card.geometry().bottom(),
+            window.excel_card.geometry().bottom(),
+        )
+        self.assertLessEqual(
+            window.data_tab.height() - last_card_bottom,
+            page_layout.contentsMargins().bottom() + 3,
+        )
+
+        window.resize(900, 700)
+        self.app.processEvents()
+        window.excel_resize_handle._set_height(164)
+        self.app.processEvents()
+        self.assertEqual(window.size().width(), 900)
+        self.assertEqual(window.size().height(), 700)
 
     def test_connection_dialog_returns_edited_values(self) -> None:
         dialog = IrbisConnectionDialog(

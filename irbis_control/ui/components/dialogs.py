@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import base64
 import json
+import subprocess
+import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QSize, QStandardPaths, Qt, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices, QIcon
+from PyQt6.QtGui import QDesktopServices, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -17,6 +22,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMenu,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -30,6 +36,13 @@ from PyQt6.QtWidgets import (
 )
 
 from irbis_control import APP_TITLE as APP_TITLE
+from irbis_control.core.models import MatchResult
+from irbis_control.core.manual_review_memory import (
+    clear_approved_review_memory,
+    load_approved_review_rows,
+    remove_approved_review_keys,
+    review_identity,
+)
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.paths import icon_path
 from irbis_control.reporting.models import ResultDiffRow, ResultDiffSummary
@@ -37,6 +50,618 @@ from irbis_control.reporting.result_diff import (
     compare_result_files,
     compare_text_files,
 )
+from irbis_control.ui.theme import result_diff_fill_colors, useful_link_foreground
+
+
+class CopyableTableWidget(QTableWidget):
+    """QTableWidget с копированием выделенных ячеек через Ctrl+C и контекстное меню."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_copy_menu)
+
+    def keyPressEvent(self, event) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy):
+            self.copy_selection_to_clipboard()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def copy_selection_to_clipboard(self) -> None:
+        indexes = sorted(self.selectedIndexes(), key=lambda index: (index.row(), index.column()))
+        if not indexes:
+            current = self.currentIndex()
+            if current.isValid():
+                indexes = [current]
+        if not indexes:
+            return
+
+        selected = {(index.row(), index.column()) for index in indexes}
+        rows = sorted({row for row, _column in selected})
+        columns = sorted({column for _row, column in selected})
+        lines: list[str] = []
+        for row in rows:
+            values: list[str] = []
+            for column in columns:
+                if (row, column) not in selected:
+                    values.append("")
+                    continue
+                item = self.item(row, column)
+                values.append(item.text() if item is not None else "")
+            lines.append("\t".join(values))
+        QApplication.clipboard().setText("\n".join(lines))
+
+    def _show_copy_menu(self, position) -> None:
+        menu = QMenu(self)
+        copy_action = menu.addAction("Копировать")
+        copy_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Copy))
+        copy_action.setEnabled(bool(self.selectedIndexes()) or self.currentIndex().isValid())
+        if menu.exec(self.viewport().mapToGlobal(position)) == copy_action:
+            self.copy_selection_to_clipboard()
+
+
+
+def _powershell_literal(value: str) -> str:
+    """Экранирует строку для одинарных литералов PowerShell."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _open_excel_at_source(
+    source_file: str,
+    sheet_name: str,
+    row_number: int,
+    parent: QWidget | None = None,
+) -> None:
+    """Открывает исходную таблицу и, когда возможно, переводит Excel на нужную строку."""
+    path = Path(source_file).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        path = path.absolute()
+
+    if not path.exists():
+        QMessageBox.warning(
+            parent,
+            APP_TITLE,
+            f"Исходный файл не найден:\n{path}",
+        )
+        return
+
+    row_number = max(1, int(row_number or 1))
+
+    # На Windows используем COM через встроенный PowerShell: это позволяет не только
+    # открыть книгу, но и активировать исходный лист и выделить нужную строку.
+    if sys.platform.startswith("win"):
+        path_ps = _powershell_literal(str(path))
+        sheet_ps = _powershell_literal(str(sheet_name or ""))
+        script = f"""
+$ErrorActionPreference = 'Stop'
+$path = {path_ps}
+$sheetName = {sheet_ps}
+$rowNumber = {row_number}
+try {{
+    try {{
+        $excel = [Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
+    }} catch {{
+        $excel = New-Object -ComObject Excel.Application
+    }}
+    $excel.Visible = $true
+    $workbook = $null
+    foreach ($wb in @($excel.Workbooks)) {{
+        try {{
+            if ($wb.FullName -ieq $path) {{
+                $workbook = $wb
+                break
+            }}
+        }} catch {{ }}
+    }}
+    if ($null -eq $workbook) {{
+        $workbook = $excel.Workbooks.Open($path)
+    }}
+    $worksheet = $null
+    if ($sheetName) {{
+        try {{ $worksheet = $workbook.Worksheets.Item($sheetName) }} catch {{ }}
+    }}
+    if ($null -eq $worksheet) {{
+        $worksheet = $workbook.ActiveSheet
+    }}
+    $worksheet.Activate() | Out-Null
+    $worksheet.Rows.Item($rowNumber).Select() | Out-Null
+    try {{
+        $excel.ActiveWindow.ScrollRow = [Math]::Max(1, $rowNumber - 4)
+    }} catch {{ }}
+    try {{ $excel.WindowState = -4137 }} catch {{ }}
+    $excel.Visible = $true
+}} catch {{
+    try {{ Start-Process -FilePath $path }} catch {{ }}
+}}
+"""
+        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+        try:
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    encoded,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+            )
+            return
+        except OSError:
+            # Если PowerShell недоступен, ниже откроем файл стандартным приложением.
+            pass
+
+    # На других ОС (или без PowerShell) открываем исходный файл ассоциированным
+    # табличным редактором. Переход на строку зависит от возможностей приложения.
+    if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+        QMessageBox.warning(
+            parent,
+            APP_TITLE,
+            f"Не удалось открыть исходный файл:\n{path}\n\nЛист: {sheet_name}\nСтрока: {row_number}",
+        )
+
+
+class ManualMatchReviewDialog(QDialog):
+    """Построчно подтверждает или отклоняет сомнительные совпадения."""
+
+    def __init__(self, rows: list[tuple[int, MatchResult]], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Ручная проверка подозрительных совпадений")
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
+        self.resize(1500, 720)
+        self.setMinimumSize(1000, 520)
+        self._rows = list(rows)
+        self._decisions: dict[int, bool | None] = {result_index: None for result_index, _result in rows}
+        self._action_buttons: dict[int, tuple[QPushButton, QPushButton]] = {}
+        self._decision_group_keys: dict[int, str] = {}
+        self._decision_groups: dict[str, list[int]] = {}
+        self._source_locations: dict[int, tuple[str, str, int]] = {}
+        self._source_column = 10
+        self._last_source_open: tuple[tuple[str, str, int], float] | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        title = QLabel("Программа не смогла определить совпадение однозначно")
+        title.setObjectName("dialogTitle")
+        root.addWidget(title)
+        description = QLabel(
+            "Для каждой подозрительной записи выберите «Подтвердить», если метку нужно поставить, "
+            "или «Убрать», если совпадение ложное. Подтверждённые строки будут считаться точными "
+            "и попадут в постановку меток; убранные строки останутся только как результат ручной проверки. "
+            "Любую ячейку можно выделить и скопировать через Ctrl+C или правой кнопкой мыши. "
+            "Щёлкните по «Файл / лист / строка» или дважды по любой ячейке записи, чтобы открыть "
+            "исходный Excel сразу на нужной строке. Если один и тот же автор найден в нескольких "
+            "записях и относится к тому же кандидату реестра, подтверждение одной строки сразу "
+            "подтвердит всю такую группу. Подтверждение также запоминается для следующих запусков."
+        )
+        description.setObjectName("cardDescription")
+        description.setWordWrap(True)
+        root.addWidget(description)
+
+        self.progress_label = QLabel()
+        self.progress_label.setObjectName("cardDescription")
+        root.addWidget(self.progress_label)
+
+        headers = [
+            "Решение",
+            "Источник",
+            "MFN",
+            "Название ИРБИС",
+            "Авторы ИРБИС",
+            "Организации ИРБИС",
+            "ISBN",
+            "Совпавшее значение",
+            "Данные реестра / перечня",
+            "Тип / № реестра",
+            "Файл / лист / строка",
+            "Способ совпадения",
+            "Причина сомнения",
+        ]
+        self.table = CopyableTableWidget(len(rows), len(headers))
+        self.table.setObjectName("resultsTable")
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(True)
+
+        for row, (result_index, result) in enumerate(rows):
+            identity = review_identity(result)
+            if identity is not None:
+                self._decision_group_keys[result_index] = identity.key
+                self._decision_groups.setdefault(identity.key, []).append(result_index)
+
+            confirm_button = QPushButton("Подтвердить")
+            confirm_button.setObjectName("primaryButton")
+            confirm_button.setToolTip("Считать совпадение подтверждённым и разрешить постановку метки")
+            remove_button = QPushButton("Убрать")
+            remove_button.setObjectName("dangerButton")
+            remove_button.setToolTip("Отклонить совпадение и не ставить по нему метку")
+            confirm_button.clicked.connect(
+                lambda _checked=False, index=result_index: self._set_decision(index, True)
+            )
+            remove_button.clicked.connect(
+                lambda _checked=False, index=result_index: self._set_decision(index, False)
+            )
+            self._action_buttons[result_index] = (confirm_button, remove_button)
+            action_container = QWidget()
+            action_layout = QVBoxLayout(action_container)
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            action_layout.setSpacing(4)
+            confirm_button.setMinimumWidth(130)
+            remove_button.setMinimumWidth(130)
+            action_layout.addWidget(confirm_button)
+            action_layout.addWidget(remove_button)
+            self.table.setCellWidget(row, 0, action_container)
+
+            record = result.database
+            foreign = result.foreign_agent
+            excel = result.excel
+            title_text = " | ".join(record.titles) if record is not None else ""
+            authors_text = " | ".join(record.authors) if record is not None else ""
+            organizations_text = " | ".join(record.organizations) if record is not None else ""
+            isbn_text = " | ".join(record.isbns) if record is not None else ""
+            if foreign is not None:
+                registry_data = foreign.name
+                type_number = " · ".join(
+                    part for part in (foreign.agent_type, f"№ {foreign.registry_number}" if foreign.registry_number else "") if part
+                )
+            else:
+                registry_data = " | ".join(part for part in (excel.author, excel.title, excel.isbn) if part)
+                type_number = " | ".join(part for part in (excel.publisher, excel.year) if part)
+
+            source_location = f"{Path(excel.source_file).name} / {excel.sheet_name} / {excel.row_number}"
+            self._source_locations[row] = (excel.source_file, excel.sheet_name, excel.row_number)
+            values = [
+                result.source_type,
+                str(record.record_number if record is not None else ""),
+                title_text,
+                authors_text,
+                organizations_text,
+                isbn_text,
+                result.matched_value,
+                registry_data,
+                type_number,
+                source_location,
+                result.method,
+                result.note or "Недостаточно данных для автоматического решения",
+            ]
+            raw_source = json.dumps(excel.raw_data, ensure_ascii=False, indent=2, default=str) if excel.raw_data else ""
+            tooltip = "\n".join(
+                [
+                    f"Источник: {result.source_type}",
+                    f"MFN: {record.record_number if record is not None else ''}",
+                    f"Название: {title_text}",
+                    f"Авторы: {authors_text}",
+                    f"Организации: {organizations_text}",
+                    f"ISBN: {isbn_text}",
+                    f"Совпавшее значение: {result.matched_value}",
+                    f"Способ: {result.method}",
+                    f"Точность: {result.confidence:g}%",
+                    f"Причина: {result.note}",
+                    f"Файл/лист/строка: {source_location}",
+                ]
+            )
+            if raw_source:
+                tooltip += "\n\nИсходные данные строки:\n" + raw_source
+            for column, value in enumerate(values, start=1):
+                item = QTableWidgetItem(str(value))
+                item.setToolTip(tooltip)
+                if column == self._source_column:
+                    font = item.font()
+                    font.setUnderline(True)
+                    item.setFont(font)
+                    item.setForeground(useful_link_foreground())
+                    item.setToolTip(
+                        tooltip
+                        + "\n\nЩёлкните здесь, чтобы открыть исходный Excel на этой строке."
+                    )
+                self.table.setItem(row, column, item)
+
+        for group_members in self._decision_groups.values():
+            if len(group_members) <= 1:
+                continue
+            for result_index in group_members:
+                confirm_button, _remove_button = self._action_buttons[result_index]
+                confirm_button.setToolTip(
+                    f"Подтвердить этого автора сразу во всех одинаковых найденных записях: {len(group_members)}"
+                )
+
+        self.table.cellClicked.connect(self._on_cell_clicked)
+        self.table.cellDoubleClicked.connect(self._on_cell_double_clicked)
+
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.resizeSection(3, 260)
+        header.resizeSection(4, 240)
+        header.resizeSection(5, 220)
+        header.resizeSection(6, 170)
+        header.resizeSection(7, 240)
+        header.resizeSection(8, 280)
+        header.resizeSection(9, 220)
+        header.resizeSection(10, 240)
+        header.resizeSection(11, 260)
+        header.resizeSection(12, 360)
+        self.table.resizeRowsToContents()
+        for row in range(self.table.rowCount()):
+            if self.table.rowHeight(row) < 74:
+                self.table.setRowHeight(row, 74)
+        root.addWidget(self.table, 1)
+
+        buttons = QHBoxLayout()
+        reject_unresolved = QPushButton("Убрать все нерешённые")
+        reject_unresolved.setObjectName("dangerButton")
+        reject_unresolved.clicked.connect(self._reject_unresolved)
+        buttons.addWidget(reject_unresolved)
+        buttons.addStretch()
+        cancel_button = QPushButton("Отменить запуск")
+        cancel_button.setObjectName("mutedButton")
+        cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(cancel_button)
+        self.continue_button = QPushButton("Продолжить")
+        self.continue_button.setObjectName("primaryButton")
+        self.continue_button.setEnabled(False)
+        self.continue_button.clicked.connect(self.accept)
+        buttons.addWidget(self.continue_button)
+        root.addLayout(buttons)
+        self._refresh_progress()
+
+    def _open_source_for_table_row(self, table_row: int) -> None:
+        source = self._source_locations.get(table_row)
+        if source is None:
+            return
+        now = time.monotonic()
+        if self._last_source_open is not None:
+            last_source, last_time = self._last_source_open
+            if source == last_source and now - last_time < 0.8:
+                return
+        self._last_source_open = (source, now)
+        source_file, sheet_name, row_number = source
+        _open_excel_at_source(source_file, sheet_name, row_number, self)
+
+    def _on_cell_clicked(self, row: int, column: int) -> None:
+        # Одинарный щелчок открывает файл только по специально оформленной колонке,
+        # чтобы обычное выделение остальных ячеек и Ctrl+C не запускали Excel.
+        if column == self._source_column:
+            self._open_source_for_table_row(row)
+
+    def _on_cell_double_clicked(self, row: int, _column: int) -> None:
+        self._open_source_for_table_row(row)
+
+    def _set_single_decision(self, result_index: int, approved: bool) -> None:
+        self._decisions[result_index] = approved
+        confirm_button, remove_button = self._action_buttons[result_index]
+        if approved:
+            confirm_button.setText("✓ Подтверждено")
+            remove_button.setText("Убрать")
+        else:
+            confirm_button.setText("Подтвердить")
+            remove_button.setText("✓ Убрано")
+
+    def _set_decision(self, result_index: int, approved: bool) -> None:
+        # Подтверждение распространяем только на действительно одну и ту же пару
+        # «значение автора в ИРБИС -> кандидат реестра». Простая одинаковая фамилия
+        # не является основанием для массового решения.
+        if approved:
+            group_key = self._decision_group_keys.get(result_index)
+            group_members = self._decision_groups.get(group_key, []) if group_key else []
+            if group_members:
+                for member_index in group_members:
+                    self._set_single_decision(member_index, True)
+            else:
+                self._set_single_decision(result_index, True)
+        else:
+            self._set_single_decision(result_index, False)
+        self._refresh_progress()
+
+    def _reject_unresolved(self) -> None:
+        for result_index, decision in list(self._decisions.items()):
+            if decision is None:
+                self._set_decision(result_index, False)
+
+    def _refresh_progress(self) -> None:
+        total = len(self._decisions)
+        approved = sum(decision is True for decision in self._decisions.values())
+        removed = sum(decision is False for decision in self._decisions.values())
+        resolved = approved + removed
+        self.progress_label.setText(
+            f"Решено: {resolved} из {total} · подтверждено: {approved} · убрано: {removed}"
+        )
+        self.continue_button.setEnabled(resolved == total)
+
+    def decisions(self) -> dict[int, bool]:
+        if self.result() != QDialog.DialogCode.Accepted:
+            return {}
+        return {index: bool(decision) for index, decision in self._decisions.items() if decision is not None}
+
+    def approved_indices(self) -> set[int]:
+        """Совместимость со старым интерфейсом диалога."""
+        return {index for index, approved in self.decisions().items() if approved}
+
+
+class ConfirmationMemoryDialog(QDialog):
+    """Просмотр и удаление сохранённых ручных подтверждений."""
+
+    def __init__(self, memory_path: str | Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._memory_path = Path(memory_path)
+        self._row_keys: list[str] = []
+        self.setWindowTitle("Память подтверждений")
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
+        self.resize(1050, 560)
+        self.setMinimumSize(760, 420)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(7)
+
+        title = QLabel("Сохранённые подтверждения")
+        title.setObjectName("dialogTitle")
+        root.addWidget(title)
+
+        description = QLabel(
+            "Здесь хранятся соответствия, которые вы раньше подтвердили вручную. "
+            "При следующей проверке программа автоматически применяет их к такому же автору "
+            "и тому же кандидату реестра. Удалённое соответствие снова будет показано для ручной проверки."
+        )
+        description.setObjectName("cardDescription")
+        description.setWordWrap(True)
+        root.addWidget(description)
+
+        self.count_label = QLabel()
+        self.count_label.setObjectName("statusLabel")
+        root.addWidget(self.count_label)
+
+        headers = [
+            "Значение в ИРБИС",
+            "Подтверждённый кандидат",
+            "№ реестра",
+            "Способ совпадения",
+            "Подтверждено",
+            "Действие",
+        ]
+        self.table = CopyableTableWidget(0, len(headers))
+        self.table.setObjectName("resultsTable")
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setWordWrap(True)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.resizeSection(0, 260)
+        header.resizeSection(1, 260)
+        header.resizeSection(2, 110)
+        header.resizeSection(3, 240)
+        header.resizeSection(4, 170)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        root.addWidget(self.table, 1)
+
+        buttons = QHBoxLayout()
+        self.delete_selected_button = QPushButton("Удалить выбранные")
+        self.delete_selected_button.setObjectName("dangerButton")
+        self.delete_selected_button.clicked.connect(self._delete_selected)
+        buttons.addWidget(self.delete_selected_button)
+
+        self.clear_button = QPushButton("Очистить всю память")
+        self.clear_button.setObjectName("dangerButton")
+        self.clear_button.clicked.connect(self._clear_all)
+        buttons.addWidget(self.clear_button)
+        buttons.addStretch()
+
+        close_button = QPushButton("Закрыть")
+        close_button.setObjectName("primaryButton")
+        close_button.clicked.connect(self.accept)
+        buttons.addWidget(close_button)
+        root.addLayout(buttons)
+
+        self._refresh()
+
+    @staticmethod
+    def _format_confirmed_at(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text
+        return parsed.astimezone().strftime("%d.%m.%Y %H:%M")
+
+    def _refresh(self) -> None:
+        rows = load_approved_review_rows(self._memory_path)
+        self._row_keys = [row.get("key", "") for row in rows]
+        self.table.clearContents()
+        self.table.setRowCount(len(rows))
+
+        for table_row, row in enumerate(rows):
+            values = [
+                row.get("database_value", ""),
+                row.get("registry_value", ""),
+                row.get("registry_number", ""),
+                row.get("method", ""),
+                self._format_confirmed_at(row.get("confirmed_at", "")),
+            ]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, row.get("key", ""))
+                self.table.setItem(table_row, column, item)
+
+            delete_button = QPushButton("Удалить")
+            delete_button.setObjectName("dangerButton")
+            delete_button.setToolTip("Удалить это сохранённое подтверждение")
+            delete_button.clicked.connect(
+                lambda _checked=False, key=row.get("key", ""): self._delete_keys({key})
+            )
+            self.table.setCellWidget(table_row, 5, delete_button)
+
+        self.table.resizeRowsToContents()
+        count = len(rows)
+        self.count_label.setText(f"Сохранено подтверждений: {count}")
+        self.delete_selected_button.setEnabled(count > 0)
+        self.clear_button.setEnabled(count > 0)
+
+    def _delete_keys(self, keys: set[str]) -> None:
+        keys = {key for key in keys if key}
+        if not keys:
+            return
+        try:
+            remove_approved_review_keys(self._memory_path, keys)
+        except OSError as exc:
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось изменить память подтверждений:\n{exc}")
+            return
+        self._refresh()
+
+    def _delete_selected(self) -> None:
+        selected_rows = sorted({index.row() for index in self.table.selectedIndexes()})
+        keys = {
+            self._row_keys[row]
+            for row in selected_rows
+            if 0 <= row < len(self._row_keys) and self._row_keys[row]
+        }
+        if not keys:
+            QMessageBox.information(self, APP_TITLE, "Выберите одну или несколько строк для удаления.")
+            return
+        self._delete_keys(keys)
+
+    def _clear_all(self) -> None:
+        if not self._row_keys:
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_TITLE,
+            "Удалить все сохранённые подтверждения?\n\n"
+            "При следующей проверке эти совпадения снова потребуют ручного подтверждения.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            clear_approved_review_memory(self._memory_path)
+        except OSError as exc:
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось очистить память подтверждений:\n{exc}")
+            return
+        self._refresh()
 
 
 # Показывает прогресс и журнал, не позволяя случайно закрыть активную операцию.
@@ -274,7 +899,7 @@ class UsefulLinksDialog(QDialog):
             item = QListWidgetItem(f"{link['title']}\n{link['url']}")
             item.setData(Qt.ItemDataRole.UserRole, link["url"])
             item.setToolTip(link["url"])
-            item.setForeground(QColor("#000000"))
+            item.setForeground(useful_link_foreground())
             item.setSizeHint(QSize(0, 62))
             self.list_widget.addItem(item)
         if self.list_widget.count():
@@ -426,33 +1051,33 @@ class ResultComparisonDialog(QDialog):
         self.old_edit.setObjectName("filePath")
         self.old_edit.setReadOnly(True)
         self.old_edit.setPlaceholderText("Старый Excel-отчёт не выбран")
-        files_layout.addWidget(self.old_edit, 0, 1, 1, 2)
-        old_button = QPushButton("Выбрать старый…")
+        files_layout.addWidget(self.old_edit, 0, 1)
+        old_button = QPushButton("Выбрать…")
         old_button.setObjectName("secondaryButton")
         old_button.clicked.connect(self.select_old)
-        files_layout.addWidget(old_button, 1, 1, 1, 2)
+        files_layout.addWidget(old_button, 0, 2)
 
-        files_layout.addWidget(QLabel("Новый результат:"), 2, 0)
+        files_layout.addWidget(QLabel("Новый результат:"), 1, 0)
         self.new_edit = QLineEdit()
         self.new_edit.setObjectName("filePath")
         self.new_edit.setReadOnly(True)
         self.new_edit.setPlaceholderText("Новый Excel-отчёт не выбран")
-        files_layout.addWidget(self.new_edit, 2, 1, 1, 2)
-        new_button = QPushButton("Выбрать новый…")
+        files_layout.addWidget(self.new_edit, 1, 1)
+        new_button = QPushButton("Выбрать…")
         new_button.setObjectName("secondaryButton")
         new_button.clicked.connect(self.select_new)
-        files_layout.addWidget(new_button, 3, 1, 1, 2)
+        files_layout.addWidget(new_button, 1, 2)
 
-        files_layout.addWidget(QLabel("Файл изменений:"), 4, 0)
+        files_layout.addWidget(QLabel("Файл изменений:"), 2, 0)
         self.output_edit = QLineEdit()
         self.output_edit.setObjectName("filePath")
         self.output_edit.setReadOnly(True)
         self.output_edit.setPlaceholderText("Путь будет выбран автоматически")
-        files_layout.addWidget(self.output_edit, 4, 1, 1, 2)
-        output_button = QPushButton("Изменить путь…")
+        files_layout.addWidget(self.output_edit, 2, 1)
+        output_button = QPushButton("Изменить…")
         output_button.setObjectName("mutedButton")
         output_button.clicked.connect(self.select_output)
-        files_layout.addWidget(output_button, 5, 1, 1, 2)
+        files_layout.addWidget(output_button, 2, 2)
         files_layout.setColumnStretch(1, 1)
         root.addWidget(files_card)
 
@@ -477,7 +1102,8 @@ class ResultComparisonDialog(QDialog):
         self.table.setObjectName("resultsTable")
         self.table.setHorizontalHeaderLabels(["Изменение", "Раздел", "Автор", "Название", "ISBN", "Изменённые поля"])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
         table_header = self.table.horizontalHeader()
         table_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -605,11 +1231,7 @@ class ResultComparisonDialog(QDialog):
     def _fill_preview(self, differences: list[ResultDiffRow]) -> None:
         preview = differences[:1000]
         self.table.setRowCount(len(preview))
-        fills = {
-            "Добавлено": QColor("#E2F0D9"),
-            "Удалено": QColor("#FCE4D6"),
-            "Изменено": QColor("#FFF2CC"),
-        }
+        fills = result_diff_fill_colors()
         for row_index, difference in enumerate(preview):
             values = [
                 difference.change_type,
@@ -712,7 +1334,8 @@ class TextComparisonDialog(QDialog):
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Изменение", "Запись"])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)

@@ -22,6 +22,8 @@ from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     DEFAULT_SUBSTANCE_MARKER,
     DEFAULT_SUBSTANCE_MARKER_FIELD,
     remove_database_markers,
@@ -157,6 +159,8 @@ class MainWindowOperationsMixin:
                 widget.setEnabled(not direct and not report_only)
         if hasattr(self, "action_buttons"):
             self._reflow_actions(2)
+        if hasattr(self, "result_files_layout"):
+            self._reflow_result_files()
         if hasattr(self, "marker_card"):
             self.marker_card.title_label.setText("Метки в ИРБИС" if direct else "Метки в TXT-копии")
         if hasattr(self, "cleanup_button"):
@@ -281,12 +285,20 @@ class MainWindowOperationsMixin:
             "foreign_agent_marker_template": self.marker_settings.get(
                 "foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE
             ),
+            "foreign_organization_marker_template": self.marker_settings.get(
+                "foreign_organization_marker_template", DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE
+            ),
             "age_marker": self.marker_settings.get("age_marker", DEFAULT_AGE_MARKER),
             "substance_marker_field": int(
                 self.marker_settings.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)
             ),
             "foreign_agent_marker_field": int(
                 self.marker_settings.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
+            ),
+            "foreign_organization_marker_field": int(
+                self.marker_settings.get(
+                    "foreign_organization_marker_field", DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD
+                )
             ),
             "age_marker_field": int(self.marker_settings.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
         }
@@ -782,9 +794,15 @@ class MainWindowOperationsMixin:
                 output_path,
                 substance_marker=str(self.marker_settings["substance_marker"]),
                 foreign_agent_marker_template=str(self.marker_settings["foreign_agent_marker_template"]),
+                foreign_organization_marker_template=str(
+                    self.marker_settings["foreign_organization_marker_template"]
+                ),
                 age_marker=str(self.marker_settings["age_marker"]),
                 substance_marker_field=int(self.marker_settings["substance_marker_field"]),
                 foreign_agent_marker_field=int(self.marker_settings["foreign_agent_marker_field"]),
+                foreign_organization_marker_field=int(
+                    self.marker_settings["foreign_organization_marker_field"]
+                ),
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
             )
         except Exception as exc:

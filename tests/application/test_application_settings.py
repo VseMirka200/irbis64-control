@@ -4,6 +4,8 @@ from pathlib import Path
 
 from irbis_control.application.settings import (
     ApplicationSettings,
+    THEME_DARK,
+    THEME_SYSTEM,
     load_application_settings,
     save_application_settings,
 )
@@ -24,6 +26,7 @@ class ApplicationSettingsTests(unittest.TestCase):
 
         self.assertTrue(settings.create_database_backup)
         self.assertTrue(settings.check_updates_on_start)
+        self.assertEqual(settings.theme, THEME_SYSTEM)
 
     def test_settings_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -31,12 +34,13 @@ class ApplicationSettingsTests(unittest.TestCase):
             expected = ApplicationSettings(
                 create_database_backup=False,
                 check_updates_on_start=False,
+                theme=THEME_DARK,
             )
             save_application_settings(path, expected)
 
             self.assertEqual(expected, load_application_settings(path))
 
-    def test_legacy_theme_setting_is_ignored(self) -> None:
+    def test_theme_setting_is_loaded(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "settings.json"
             path.write_text(
@@ -47,16 +51,25 @@ class ApplicationSettingsTests(unittest.TestCase):
             settings = load_application_settings(path)
 
         self.assertFalse(settings.create_database_backup)
-        self.assertFalse(hasattr(settings, "theme"))
+        self.assertEqual(settings.theme, THEME_DARK)
 
-    def test_saved_settings_do_not_contain_theme(self) -> None:
+    def test_saved_settings_contain_theme(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "settings.json"
             save_application_settings(path, ApplicationSettings())
 
             payload = path.read_text(encoding="utf-8")
 
-        self.assertNotIn('"theme"', payload)
+        self.assertIn('"theme": "system"', payload)
+
+    def test_invalid_theme_uses_system(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings.json"
+            path.write_text('{"theme": "blue"}', encoding="utf-8")
+
+            settings = load_application_settings(path)
+
+        self.assertEqual(settings.theme, THEME_SYSTEM)
 
 
 if __name__ == "__main__":

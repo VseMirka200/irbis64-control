@@ -37,8 +37,9 @@ from irbis_control.infrastructure.irbis_bridge import (
 from irbis_control.paths import icon_path
 from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
-from irbis_control.ui.storage_paths import database_connector_config_path as config_path
-from irbis_control.ui.theme import apply_light_palette, common_button_stylesheet
+from irbis_control.application.settings import load_application_settings
+from irbis_control.ui.storage_paths import application_settings_path, database_connector_config_path as config_path
+from irbis_control.ui.theme import apply_application_theme, database_connector_stylesheet
 
 APP_TITLE = "ИРБИС64 Контроль — подключение к базе"
 
@@ -128,7 +129,7 @@ class ConnectorWindow(QMainWindow):
         form_card = QFrame()
         form_card.setObjectName("card")
         form_outer = QVBoxLayout(form_card)
-        form_outer.setContentsMargins(4, 3, 4, 4)
+        form_outer.setContentsMargins(4, 4, 4, 4)
         form_outer.setSpacing(4)
         form_title = QLabel("1. Параметры подключения")
         form_title.setObjectName("cardTitle")
@@ -194,7 +195,7 @@ class ConnectorWindow(QMainWindow):
         work_box = QFrame()
         work_box.setObjectName("card")
         work_layout = QVBoxLayout(work_box)
-        work_layout.setContentsMargins(4, 3, 4, 4)
+        work_layout.setContentsMargins(4, 4, 4, 4)
         work_layout.setSpacing(4)
         work_title = QLabel("2. Файлы")
         work_title.setObjectName("cardTitle")
@@ -215,7 +216,7 @@ class ConnectorWindow(QMainWindow):
         action_card = QFrame()
         action_card.setObjectName("card")
         action_layout = QVBoxLayout(action_card)
-        action_layout.setContentsMargins(4, 3, 4, 4)
+        action_layout.setContentsMargins(4, 4, 4, 4)
         action_layout.setSpacing(4)
         action_title = QLabel("3. Действия")
         action_title.setObjectName("cardTitle")
@@ -254,7 +255,7 @@ class ConnectorWindow(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(4, 3, 4, 4)
+        card_layout.setContentsMargins(4, 4, 4, 4)
         card_layout.setSpacing(4)
         title = QLabel("TXT-хранилище")
         title.setObjectName("cardTitle")
@@ -278,17 +279,7 @@ class ConnectorWindow(QMainWindow):
         return page
 
     def _apply_style(self) -> None:
-        self.setStyleSheet(
-            common_button_stylesheet()
-            + """
-            QMainWindow, QWidget#root, QWidget#tabPage { background: palette(window); color: palette(window-text); }
-            QFrame#card { border: none; background: transparent; }
-            QLabel#title, QLabel#cardTitle { font-weight: 600; }
-            QLabel#subtitle, QLabel#hint { color: palette(mid); }
-            QTextEdit#log { font-family: Consolas, monospace; }
-            QProgressBar { min-height: 10px; max-height: 10px; }
-            """
-        )
+        self.setStyleSheet(database_connector_stylesheet())
 
     def _load_config(self) -> dict:
         try:
@@ -528,7 +519,8 @@ def main() -> int:
     install_russian_ui(app)
     app.setApplicationName("IRBIS64ControlDB")
     app.setOrganizationName("IRBIS64Control")
-    apply_light_palette(app)
+    settings = load_application_settings(application_settings_path())
+    apply_application_theme(app, settings.theme)
     window = ConnectorWindow(args.database, args.modified)
     window.show()
     return app.exec()

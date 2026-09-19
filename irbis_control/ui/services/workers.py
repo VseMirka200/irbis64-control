@@ -20,18 +20,26 @@ from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
     DEFAULT_SUBSTANCE_MARKER,
     DEFAULT_SUBSTANCE_MARKER_FIELD,
     ComparisonCancelled,
+    apply_manual_review_decisions,
     apply_markers_to_tag_values,
     build_markers_by_record,
-    compare_and_export,
     compare_database_records,
+    compare_files,
     database_record_from_tag_values,
+    export_modified_databases,
     export_results,
     remove_markers_from_tag_values,
 )
-from irbis_control.core.models import MarkerApplicationStats
+from irbis_control.core.models import ComparisonOptions, MarkerApplicationStats
+from irbis_control.core.manual_review_memory import (
+    apply_remembered_confirmations,
+    remember_approved_results,
+)
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.infrastructure.irbis_bridge import (
     IrbisClient,
@@ -39,7 +47,7 @@ from irbis_control.infrastructure.irbis_bridge import (
     create_irbis_snapshot,
 )
 from irbis_control.infrastructure.irbis_models import IrbisError, IrbisField, IrbisRecord
-from irbis_control.ui.storage_paths import app_data_dir
+from irbis_control.ui.storage_paths import app_data_dir, manual_review_memory_path
 
 
 # Выполняет проверку и загрузку обновления вне потока интерфейса.
@@ -78,6 +86,7 @@ class ComparisonWorker(QObject):
     finished = pyqtSignal(object, object)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal(str)
+    review_requested = pyqtSignal(object)
 
     def __init__(
         self,
@@ -86,10 +95,7 @@ class ComparisonWorker(QObject):
         excel_paths: list[str],
         output_path: str,
         modified_database_path: str,
-        use_isbn_matching: bool,
-        use_title_fallback: bool,
-        use_fuzzy: bool,
-        fuzzy_threshold: int,
+        comparison_options: ComparisonOptions,
         report_options: dict[str, object],
         substance_marker: str,
         foreign_agent_marker_template: str,
@@ -97,7 +103,8 @@ class ComparisonWorker(QObject):
         substance_marker_field: int,
         foreign_agent_marker_field: int,
         age_marker_field: int,
-        match_rules: dict[str, bool] | None = None,
+        foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
+        foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     ) -> None:
         super().__init__()
         self.database_path = database_path
@@ -105,47 +112,93 @@ class ComparisonWorker(QObject):
         self.excel_paths = excel_paths
         self.output_path = output_path
         self.modified_database_path = modified_database_path
-        self.use_isbn_matching = use_isbn_matching
-        self.use_title_fallback = use_title_fallback
-        self.match_rules = dict(match_rules or {})
-        self.use_fuzzy = use_fuzzy
-        self.fuzzy_threshold = fuzzy_threshold
+        self.comparison_options = comparison_options
         self.report_options = dict(report_options)
         self.substance_marker = substance_marker
         self.foreign_agent_marker_template = foreign_agent_marker_template
+        self.foreign_organization_marker_template = foreign_organization_marker_template
         self.age_marker = age_marker
         self.substance_marker_field = substance_marker_field
         self.foreign_agent_marker_field = foreign_agent_marker_field
+        self.foreign_organization_marker_field = foreign_organization_marker_field
         self.age_marker_field = age_marker_field
         self.cancel_event = Event()
+        self.review_event = Event()
+        self.review_decisions: dict[int, bool] | None = None
 
     def request_cancel(self) -> None:
         self.cancel_event.set()
+        self.review_event.set()
+
+    def confirm_review(self, decisions: dict[int, bool] | None) -> None:
+        self.review_decisions = dict(decisions) if decisions is not None else None
+        self.review_event.set()
+
+    def _review_if_needed(self, results, summary) -> None:
+        memory_path = manual_review_memory_path()
+        remembered = apply_remembered_confirmations(results, summary, memory_path)
+        if remembered:
+            self.progress.emit(82, f"По сохранённым подтверждениям автоматически принято: {remembered:,}")
+
+        review_rows = [
+            (index, result)
+            for index, result in enumerate(results)
+            if result.status == "Возможное совпадение" and result.database is not None
+        ]
+        if not review_rows:
+            return
+        self.progress.emit(83, f"Требуется ручная проверка: {len(review_rows):,} записей")
+        self.review_event.clear()
+        self.review_decisions = None
+        self.review_requested.emit(review_rows)
+        self.review_event.wait()
+        if self.cancel_event.is_set() or self.review_decisions is None:
+            raise ComparisonCancelled("Ручная проверка отменена пользователем")
+        approved_indices = {index for index, approved in self.review_decisions.items() if approved}
+        remember_approved_results(memory_path, results, approved_indices)
+        apply_manual_review_decisions(results, summary, self.review_decisions)
+        approved = sum(self.review_decisions.values())
+        removed = len(self.review_decisions) - approved
+        self.progress.emit(84, f"Ручная проверка завершена: подтверждено {approved:,}, убрано {removed:,}")
 
     @pyqtSlot()
     def run(self) -> None:
         try:
-            results, summary = compare_and_export(
+            results, summary = compare_files(
                 self.database_path,
                 self.excel_paths,
-                self.output_path,
-                self.modified_database_path,
                 foreign_agents_path=self.foreign_agents_path or None,
-                use_isbn_matching=self.use_isbn_matching,
-                use_title_fallback=self.use_title_fallback,
-                match_rules=self.match_rules,
-                use_fuzzy=self.use_fuzzy,
-                fuzzy_threshold=self.fuzzy_threshold,
-                report_options=self.report_options,
-                substance_marker=self.substance_marker,
-                foreign_agent_marker_template=self.foreign_agent_marker_template,
-                age_marker=self.age_marker,
-                substance_marker_field=self.substance_marker_field,
-                foreign_agent_marker_field=self.foreign_agent_marker_field,
-                age_marker_field=self.age_marker_field,
+                options=self.comparison_options,
                 progress_cb=lambda percent, text: self.progress.emit(percent, text),
                 cancel_cb=self.cancel_event.is_set,
             )
+            self._review_if_needed(results, summary)
+            if self.report_options.get("enabled", True):
+                export_results(
+                    self.output_path,
+                    results,
+                    summary,
+                    progress_cb=lambda percent, text: self.progress.emit(percent, text),
+                    cancel_cb=self.cancel_event.is_set,
+                    report_options=self.report_options,
+                )
+            if not self.report_options.get("report_only", False):
+                export_modified_databases(
+                    self.database_path,
+                    self.modified_database_path,
+                    results,
+                    summary,
+                    progress_cb=lambda percent, text: self.progress.emit(percent, text),
+                    cancel_cb=self.cancel_event.is_set,
+                    substance_marker=self.substance_marker,
+                    foreign_agent_marker_template=self.foreign_agent_marker_template,
+                    foreign_organization_marker_template=self.foreign_organization_marker_template,
+                    age_marker=self.age_marker,
+                    substance_marker_field=self.substance_marker_field,
+                    foreign_agent_marker_field=self.foreign_agent_marker_field,
+                    foreign_organization_marker_field=self.foreign_organization_marker_field,
+                    age_marker_field=self.age_marker_field,
+                )
             self.finished.emit(results, summary)
         except ComparisonCancelled as exc:
             self.cancelled.emit(str(exc))
@@ -161,6 +214,7 @@ class DirectIrbisComparisonWorker(QObject):
     finished = pyqtSignal(object, object)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal(str)
+    review_requested = pyqtSignal(object)
     preview_requested = pyqtSignal(object)
 
     def __init__(
@@ -176,10 +230,7 @@ class DirectIrbisComparisonWorker(QObject):
         foreign_agents_path: str,
         excel_paths: list[str],
         output_path: str,
-        use_isbn_matching: bool,
-        use_title_fallback: bool,
-        use_fuzzy: bool,
-        fuzzy_threshold: int,
+        comparison_options: ComparisonOptions,
         report_options: dict[str, object],
         substance_marker: str,
         foreign_agent_marker_template: str,
@@ -189,7 +240,8 @@ class DirectIrbisComparisonWorker(QObject):
         age_marker_field: int,
         backup_dir: str,
         create_backup: bool = True,
-        match_rules: dict[str, bool] | None = None,
+        foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
+        foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
     ) -> None:
         super().__init__()
         self.host = host
@@ -202,27 +254,32 @@ class DirectIrbisComparisonWorker(QObject):
         self.foreign_agents_path = foreign_agents_path
         self.excel_paths = list(excel_paths)
         self.output_path = output_path
-        self.use_isbn_matching = use_isbn_matching
-        self.use_title_fallback = use_title_fallback
-        self.match_rules = dict(match_rules or {})
-        self.use_fuzzy = use_fuzzy
-        self.fuzzy_threshold = fuzzy_threshold
+        self.comparison_options = comparison_options
         self.report_options = dict(report_options)
         self.substance_marker = substance_marker
         self.foreign_agent_marker_template = foreign_agent_marker_template
+        self.foreign_organization_marker_template = foreign_organization_marker_template
         self.age_marker = age_marker
         self.substance_marker_field = int(substance_marker_field)
         self.foreign_agent_marker_field = int(foreign_agent_marker_field)
+        self.foreign_organization_marker_field = int(foreign_organization_marker_field)
         self.age_marker_field = int(age_marker_field)
         self.backup_dir = Path(backup_dir)
         self.create_backup = bool(create_backup)
         self.cancel_event = Event()
+        self.review_event = Event()
+        self.review_decisions: dict[int, bool] | None = None
         self.preview_event = Event()
         self.preview_approved = False
 
     def request_cancel(self) -> None:
         self.cancel_event.set()
+        self.review_event.set()
         self.preview_event.set()
+
+    def confirm_review(self, decisions: dict[int, bool] | None) -> None:
+        self.review_decisions = dict(decisions) if decisions is not None else None
+        self.review_event.set()
 
     def confirm_preview(self, approved: bool) -> None:
         self.preview_approved = bool(approved)
@@ -306,14 +363,36 @@ class DirectIrbisComparisonWorker(QObject):
                     self.excel_paths,
                     database_label=source_label,
                     foreign_agents_path=self.foreign_agents_path or None,
-                    use_isbn_matching=self.use_isbn_matching,
-                    use_title_fallback=self.use_title_fallback,
-                    match_rules=self.match_rules,
-                    use_fuzzy=self.use_fuzzy,
-                    fuzzy_threshold=self.fuzzy_threshold,
+                    options=self.comparison_options,
                     progress_cb=lambda percent, message: self.progress.emit(percent, message),
                     cancel_cb=self._cancelled,
                 )
+
+                memory_path = manual_review_memory_path()
+                remembered = apply_remembered_confirmations(results, summary, memory_path)
+                if remembered:
+                    self.progress.emit(82, f"По сохранённым подтверждениям автоматически принято: {remembered:,}")
+
+                review_rows = [
+                    (index, result)
+                    for index, result in enumerate(results)
+                    if result.status == "Возможное совпадение" and result.database is not None
+                ]
+                if review_rows:
+                    self.progress.emit(83, f"Требуется ручная проверка: {len(review_rows):,} записей")
+                    self.review_event.clear()
+                    self.review_decisions = None
+                    self.review_requested.emit(review_rows)
+                    self.review_event.wait()
+                    if self._cancelled() or self.review_decisions is None:
+                        raise ComparisonCancelled("Ручная проверка отменена пользователем")
+                    approved_indices = {index for index, approved in self.review_decisions.items() if approved}
+                    remember_approved_results(memory_path, results, approved_indices)
+                    apply_manual_review_decisions(results, summary, self.review_decisions)
+                    approved = sum(self.review_decisions.values())
+                    removed = len(self.review_decisions) - approved
+                    self.progress.emit(84, f"Ручная проверка завершена: подтверждено {approved:,}, убрано {removed:,}")
+
                 if self.report_options.get("enabled", True):
                     export_results(
                         self.output_path,
@@ -335,8 +414,11 @@ class DirectIrbisComparisonWorker(QObject):
                     results,
                     substance_marker=self.substance_marker,
                     foreign_agent_marker_template=self.foreign_agent_marker_template,
+                    foreign_organization_marker_template=self.foreign_organization_marker_template,
                     substance_marker_field=self.substance_marker_field,
                     foreign_agent_marker_field=self.foreign_agent_marker_field,
+                    foreign_organization_marker_field=self.foreign_organization_marker_field,
+                    include_records_without_markers=bool(self.age_marker.strip()),
                 )
                 if self._cancelled():
                     raise ComparisonCancelled("Операция отменена пользователем")
@@ -623,12 +705,24 @@ class IrbisOperationWorker(QObject):
                                         "foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE
                                     )
                                 ),
+                                foreign_organization_marker_template=str(
+                                    self.params.get(
+                                        "foreign_organization_marker_template",
+                                        DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
+                                    )
+                                ),
                                 age_marker=str(self.params.get("age_marker", DEFAULT_AGE_MARKER)),
                                 substance_marker_field=int(
                                     self.params.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)
                                 ),
                                 foreign_agent_marker_field=int(
                                     self.params.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
+                                ),
+                                foreign_organization_marker_field=int(
+                                    self.params.get(
+                                        "foreign_organization_marker_field",
+                                        DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+                                    )
                                 ),
                                 age_marker_field=int(self.params.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
                             )
@@ -663,12 +757,24 @@ class IrbisOperationWorker(QObject):
                             foreign_agent_marker_template=str(
                                 self.params.get("foreign_agent_marker_template", DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
                             ),
+                            foreign_organization_marker_template=str(
+                                self.params.get(
+                                    "foreign_organization_marker_template",
+                                    DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
+                                )
+                            ),
                             age_marker=str(self.params.get("age_marker", DEFAULT_AGE_MARKER)),
                             substance_marker_field=int(
                                 self.params.get("substance_marker_field", DEFAULT_SUBSTANCE_MARKER_FIELD)
                             ),
                             foreign_agent_marker_field=int(
                                 self.params.get("foreign_agent_marker_field", DEFAULT_FOREIGN_AGENT_MARKER_FIELD)
+                            ),
+                            foreign_organization_marker_field=int(
+                                self.params.get(
+                                    "foreign_organization_marker_field",
+                                    DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+                                )
                             ),
                             age_marker_field=int(self.params.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
                         )

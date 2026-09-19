@@ -26,7 +26,9 @@ from irbis_control.paths import icon_path
 from irbis_control.ui.components.widgets import (
     CompactTabWidget,
     DatabaseComboBox,
+    FileDropListWidget,
     LayoutHintWidget,
+    ListResizeHandle,
     MatchRulesEditor,
     SectionCard,
 )
@@ -41,6 +43,7 @@ class MainWindowBuildMixin:
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.viewport().installEventFilter(self)
         self.setCentralWidget(self.scroll_area)
 
         central = LayoutHintWidget()
@@ -112,13 +115,13 @@ class MainWindowBuildMixin:
         self.workflow_tabs.tabBar().setDrawBase(False)
         self.workflow_tabs.tabBar().setMovable(False)
         self.workflow_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
-        self.workflow_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        self.workflow_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Maximum)
         # Кнопка настроек остаётся справа от вкладок и доступна с любой страницы.
         self.workflow_tabs.setCornerWidget(
             self.marker_settings_button,
             Qt.Corner.TopRightCorner,
         )
-        self.root_layout.addWidget(self.workflow_tabs, 1)
+        self.root_layout.addWidget(self.workflow_tabs)
 
         self.section_cards: list[SectionCard] = []
         self._build_connection_tab()
@@ -150,14 +153,23 @@ class MainWindowBuildMixin:
         self._marker_autosave_timer.timeout.connect(self._autosave_marker_settings)
         self.match_rules_editor.changed.connect(self._queue_marker_settings_autosave)
         for widget in (
+            self.substance_marker_check,
+            self.foreign_marker_check,
+            self.foreign_organization_marker_check,
+            self.age_marker_check,
             self.substance_marker_edit,
             self.foreign_marker_edit,
+            self.foreign_organization_marker_edit,
             self.age_marker_edit,
             self.substance_field_spin,
             self.foreign_field_spin,
+            self.foreign_organization_field_spin,
             self.age_field_spin,
         ):
-            if isinstance(widget, QLineEdit):
+            if isinstance(widget, QCheckBox):
+                widget.toggled.connect(self._queue_marker_settings_autosave)
+                widget.toggled.connect(self._update_marker_control_states)
+            elif isinstance(widget, QLineEdit):
                 widget.textChanged.connect(self._queue_marker_settings_autosave)
             else:
                 widget.valueChanged.connect(self._queue_marker_settings_autosave)
@@ -461,14 +473,6 @@ class MainWindowBuildMixin:
         source_summary_row.setContentsMargins(0, 0, 0, 0)
         source_summary_row.setSpacing(7)
         source_summary_row.addLayout(source_left, 1)
-        self.source_useful_links_button = QPushButton("Справочные сайты")
-        self.source_useful_links_button.setObjectName("mutedButton")
-        self.source_useful_links_button.setToolTip("Открыть полезные ссылки на справочные и экспертные материалы")
-        self.source_useful_links_button.clicked.connect(self.open_useful_links)
-        source_summary_row.addWidget(
-            self.source_useful_links_button,
-            alignment=Qt.AlignmentFlag.AlignVCenter,
-        )
         self.database_card.body.addLayout(source_summary_row)
         self.database_edit = QLineEdit()
         self.database_edit.hide()
@@ -497,10 +501,12 @@ class MainWindowBuildMixin:
         self.foreign_agents_card = SectionCard("Реестр иностранных агентов", "")
         self.foreign_agents_edit = QLineEdit()
         self.foreign_agents_edit.hide()
-        self.foreign_agents_list = QListWidget()
+        self.foreign_agents_list = FileDropListWidget(extensions=(".xlsx", ".xlsm"), allow_multiple=False)
         self.foreign_agents_list.setObjectName("compactList")
-        self.foreign_agents_list.setMaximumHeight(58)
-        self.foreign_agents_list.setMinimumHeight(38)
+        self.foreign_agents_list.setFixedHeight(84)
+        self.foreign_agents_list.setProperty("resizableSourceList", True)
+        self.foreign_agents_list.setToolTip("Перетащите сюда реестр .xlsx/.xlsm или нажмите «Добавить Excel»")
+        self.foreign_agents_list.filesDropped.connect(self._drop_foreign_agents_files)
         self.foreign_agents_button = QPushButton("Добавить Excel")
         self.foreign_agents_button.setObjectName("secondaryButton")
         self.foreign_agents_button.clicked.connect(self.select_foreign_agents)
@@ -512,13 +518,24 @@ class MainWindowBuildMixin:
         fa_actions.setVerticalSpacing(4)
         self.foreign_agents_controls = fa_actions
         self.foreign_agents_card.body.addLayout(fa_actions)
+        self.foreign_agents_resize_handle = ListResizeHandle(
+            self.foreign_agents_list,
+            minimum_height=58,
+            accessible_name="Изменить высоту реестра иностранных агентов",
+        )
+        self.foreign_agents_resize_handle.heightChanged.connect(
+            lambda height: self._source_list_resized(self.foreign_agents_list, height)
+        )
+        self.foreign_agents_card.body.addWidget(self.foreign_agents_resize_handle)
         sources_row.addWidget(self.foreign_agents_card, 0, 0)
 
         self.excel_card = SectionCard("Реестр по наркотическим веществам", "")
-        self.excel_list = QListWidget()
+        self.excel_list = FileDropListWidget(extensions=(".xlsx", ".xlsm", ".xls"), allow_multiple=True)
         self.excel_list.setObjectName("compactList")
-        self.excel_list.setMaximumHeight(58)
-        self.excel_list.setMinimumHeight(38)
+        self.excel_list.setFixedHeight(84)
+        self.excel_list.setProperty("resizableSourceList", True)
+        self.excel_list.setToolTip("Перетащите сюда один или несколько Excel-файлов или нажмите «Добавить Excel»")
+        self.excel_list.filesDropped.connect(self._drop_excel_files)
         self.excel_summary_edit = QLineEdit()
         self.excel_summary_edit.hide()
         self.add_excel_button = QPushButton("Добавить Excel")
@@ -532,15 +549,32 @@ class MainWindowBuildMixin:
         ex_actions.setVerticalSpacing(4)
         self.excel_controls = ex_actions
         self.excel_card.body.addLayout(ex_actions)
+        self.excel_resize_handle = ListResizeHandle(
+            self.excel_list,
+            minimum_height=58,
+            accessible_name="Изменить высоту реестра по наркотическим веществам",
+        )
+        self.excel_resize_handle.heightChanged.connect(
+            lambda height: self._source_list_resized(self.excel_list, height)
+        )
+        self.excel_card.body.addWidget(self.excel_resize_handle)
         sources_row.addWidget(self.excel_card, 0, 1)
         sources_row.setColumnStretch(0, 1)
         sources_row.setColumnStretch(1, 1)
         files_root.addLayout(sources_row)
 
-        match_settings_card = SectionCard("Настройка совпадений", "")
+        match_settings_card = SectionCard("Порядок сравнения", "")
         self.match_settings_card = match_settings_card
-        self.match_rules_editor = MatchRulesEditor()
-        match_settings_card.body.addWidget(self.match_rules_editor)
+        self.match_rules_editor = MatchRulesEditor(match_settings_card)
+        self.match_rules_editor.hide()
+        match_order = QLabel(
+            "1. Точное совпадение по ISBN.\n"
+            "2. Точное название книги и фамилия единственного автора.\n"
+            "3. Если автора нет или их несколько — точное название, издательство и год."
+        )
+        match_order.setObjectName("cardDescription")
+        match_order.setWordWrap(True)
+        match_settings_card.body.addWidget(match_order)
         files_root.addWidget(match_settings_card)
 
         compare_card = SectionCard("Результаты", "")
@@ -711,28 +745,43 @@ class MainWindowBuildMixin:
         marker_grid = QGridLayout()
         marker_grid.setHorizontalSpacing(6)
         marker_grid.setVerticalSpacing(4)
-        marker_grid.addWidget(QLabel("Тип совпадения"), 0, 0)
+        marker_grid.addWidget(QLabel("Тип метки"), 0, 0)
         marker_grid.addWidget(QLabel("Поле"), 0, 1)
         marker_grid.addWidget(QLabel("Содержимое метки"), 0, 2)
+        self.substance_marker_check = QCheckBox("Вещества")
         self.substance_field_spin = self._make_field_spin()
         self.substance_marker_edit = QLineEdit()
         self.substance_marker_edit.setObjectName("settingsField")
+        self.foreign_marker_check = QCheckBox("Иноагенты — авторы")
         self.foreign_field_spin = self._make_field_spin()
         self.foreign_marker_edit = QLineEdit()
         self.foreign_marker_edit.setObjectName("settingsField")
         self.foreign_marker_edit.setToolTip(
             "{name} будет заменено на совпавшего автора; названия организаций и проектов не подставляются"
         )
+        self.foreign_organization_marker_check = QCheckBox("Иноагенты — организации")
+        self.foreign_organization_field_spin = self._make_field_spin()
+        self.foreign_organization_marker_edit = QLineEdit()
+        self.foreign_organization_marker_edit.setObjectName("settingsField")
+        self.foreign_organization_marker_edit.setToolTip(
+            "{name} будет заменено на название организации или проекта из реестра"
+        )
+        self.age_marker_check = QCheckBox("Все найденные записи")
         self.age_field_spin = self._make_field_spin()
         self.age_marker_edit = QLineEdit()
         self.age_marker_edit.setObjectName("settingsField")
         rows = [
-            ("Вещества", self.substance_field_spin, self.substance_marker_edit),
-            ("Иностранные агенты", self.foreign_field_spin, self.foreign_marker_edit),
-            ("Все найденные записи", self.age_field_spin, self.age_marker_edit),
+            (self.substance_marker_check, self.substance_field_spin, self.substance_marker_edit),
+            (self.foreign_marker_check, self.foreign_field_spin, self.foreign_marker_edit),
+            (
+                self.foreign_organization_marker_check,
+                self.foreign_organization_field_spin,
+                self.foreign_organization_marker_edit,
+            ),
+            (self.age_marker_check, self.age_field_spin, self.age_marker_edit),
         ]
-        for row, (name, spin, edit) in enumerate(rows, start=1):
-            marker_grid.addWidget(QLabel(name), row, 0)
+        for row, (check, spin, edit) in enumerate(rows, start=1):
+            marker_grid.addWidget(check, row, 0)
             marker_grid.addWidget(spin, row, 1)
             marker_grid.addWidget(edit, row, 2)
         marker_grid.setColumnStretch(2, 1)
@@ -765,7 +814,7 @@ class MainWindowBuildMixin:
         self.actions_card = QFrame()
         self.actions_card.setObjectName("actionCard")
         self.actions_layout = QVBoxLayout(self.actions_card)
-        self.actions_layout.setContentsMargins(4, 3, 4, 4)
+        self.actions_layout.setContentsMargins(4, 4, 4, 4)
         self.actions_layout.setSpacing(4)
         action_title_row = QHBoxLayout()
         action_title_row.setSpacing(6)
@@ -850,9 +899,10 @@ class MainWindowBuildMixin:
         self.log_card = log_card
         log_card.setObjectName("sectionCard")
         log_layout = QVBoxLayout(log_card)
-        log_layout.setContentsMargins(4, 3, 4, 4)
+        log_layout.setContentsMargins(4, 4, 4, 4)
         log_layout.setSpacing(4)
         log_header = QHBoxLayout()
+        self.log_header = log_header
         log_header.setSpacing(6)
         log_title = QLabel("Журнал")
         log_title.setObjectName("cardTitle")
