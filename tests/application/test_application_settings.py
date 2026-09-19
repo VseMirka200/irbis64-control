@@ -26,6 +26,8 @@ class ApplicationSettingsTests(unittest.TestCase):
 
         self.assertTrue(settings.create_database_backup)
         self.assertTrue(settings.check_updates_on_start)
+        self.assertTrue(settings.use_nkp_drug_registry)
+        self.assertTrue(settings.use_nkp_foreign_agents_registry)
         self.assertEqual(settings.theme, THEME_SYSTEM)
 
     def test_settings_round_trip(self) -> None:
@@ -35,6 +37,8 @@ class ApplicationSettingsTests(unittest.TestCase):
                 create_database_backup=False,
                 check_updates_on_start=False,
                 theme=THEME_DARK,
+                use_nkp_drug_registry=False,
+                use_nkp_foreign_agents_registry=False,
             )
             save_application_settings(path, expected)
 
@@ -70,6 +74,36 @@ class ApplicationSettingsTests(unittest.TestCase):
             settings = load_application_settings(path)
 
         self.assertEqual(settings.theme, THEME_SYSTEM)
+
+    def test_invalid_nkp_registry_flags_use_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings.json"
+            path.write_text(
+                '{"use_nkp_drug_registry": 1, "use_nkp_foreign_agents_registry": "yes"}',
+                encoding="utf-8",
+            )
+
+            settings = load_application_settings(path)
+
+        self.assertTrue(settings.use_nkp_drug_registry)
+        self.assertTrue(settings.use_nkp_foreign_agents_registry)
+
+    def test_saved_settings_contain_nkp_registry_preferences(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings.json"
+            save_application_settings(
+                path,
+                ApplicationSettings(
+                    use_nkp_drug_registry=False,
+                    use_nkp_foreign_agents_registry=True,
+                ),
+            )
+
+            payload = path.read_text(encoding="utf-8")
+
+        self.assertIn('"use_nkp_drug_registry": false', payload)
+        self.assertIn('"use_nkp_foreign_agents_registry": true', payload)
+        self.assertIn('"schema_version": 3', payload)
 
 
 if __name__ == "__main__":

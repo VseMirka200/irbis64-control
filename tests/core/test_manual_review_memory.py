@@ -11,9 +11,10 @@ from irbis_control.core.manual_review_memory import (
     load_review_decision_rows,
     remember_approved_results,
     remember_review_decisions,
+    review_group_key,
     review_identity,
 )
-from irbis_control.core.matcher import SOURCE_FOREIGN_AGENTS
+from irbis_control.core.matcher import SOURCE_FOREIGN_AGENTS, SOURCE_SUBSTANCES
 from irbis_control.core.models import (
     ComparisonSummary,
     DatabaseRecord,
@@ -111,6 +112,64 @@ def test_review_identity_groups_repeated_initial_and_full_name() -> None:
     assert first.key == second.key
 
 
+def test_substance_review_groups_same_book_across_different_records() -> None:
+    def substance_result(mfn: int, author: str = "Прилепин З. Захар") -> MatchResult:
+        entry = ExcelEntry(1, "substances.xlsx", "Книги", 2, author=author, title="Обитель : роман : [18+]")
+        record = DatabaseRecord(
+            record_number=mfn,
+            source_record_number=mfn,
+            titles=["Обитель"],
+            authors=[author],
+            primary_authors=[author],
+        )
+        return MatchResult(
+            status="Возможное совпадение",
+            method="Название и неполные данные автора",
+            confidence=90.0,
+            excel=entry,
+            database=record,
+            source_type=SOURCE_SUBSTANCES,
+            matched_value=entry.title,
+        )
+
+    first = review_group_key(substance_result(3604))
+    second = review_group_key(substance_result(5283))
+    other_author = review_group_key(substance_result(6000, "Петров П.П."))
+
+    assert first is not None
+    assert first == second
+    assert first != other_author
+
+
+def test_substance_review_groups_authorless_database_copies_by_registry_author() -> None:
+    def result(mfn: int, registry_author: str) -> MatchResult:
+        entry = ExcelEntry(
+            1,
+            "substances.xlsx",
+            "Книги",
+            2,
+            author=registry_author,
+            title="Избранные рассказы : [16+]",
+        )
+        return MatchResult(
+            status="Возможное совпадение",
+            method="Название без проверки автора",
+            confidence=80.0,
+            excel=entry,
+            database=DatabaseRecord(record_number=mfn, titles=["Избранные рассказы"]),
+            source_type=SOURCE_SUBSTANCES,
+            matched_value=entry.title,
+        )
+
+    first = review_group_key(result(3604, "Кинг, Стивен"))
+    second = review_group_key(result(5283, "Кинг, Стивен"))
+    other_author = review_group_key(result(6000, "Петров, Пётр"))
+
+    assert first is not None
+    assert first == second
+    assert first != other_author
+
+
 def test_saved_confirmation_auto_confirms_same_mapping_on_later_records(tmp_path: Path) -> None:
     memory_path = tmp_path / "manual_review_confirmations.json"
     first_run = [_result(394, "Шпионский роман")]
@@ -161,6 +220,12 @@ def test_memory_rows_can_be_listed_and_removed(tmp_path: Path) -> None:
 
 
 class ReviewDecisionMemoryTests(unittest.TestCase):
+    def test_substance_review_groups_same_book_across_different_records(self) -> None:
+        test_substance_review_groups_same_book_across_different_records()
+
+    def test_substance_review_groups_authorless_database_copies_by_registry_author(self) -> None:
+        test_substance_review_groups_authorless_database_copies_by_registry_author()
+
     def test_approved_and_rejected_decisions_are_reused(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             memory_path = Path(folder) / "manual_review_confirmations.json"

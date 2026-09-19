@@ -5,9 +5,10 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSlot
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QFileDialog, QListWidgetItem, QMessageBox
+from PyQt6.QtWidgets import QFileDialog, QListWidgetItem
 
 from irbis_control import APP_TITLE
+from irbis_control.ui.message_box import AppMessageBox as QMessageBox
 from irbis_control.core.matcher import EXTRA_MATCH_RULES
 from irbis_control.core.models import ComparisonOptions, ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
@@ -104,6 +105,8 @@ class MainWindowRunMixin:
     def _update_foreign_agents_summary(self) -> None:
         self.foreign_agents_list.clear()
         path = self.foreign_agents_edit.text().strip()
+        if hasattr(self, "clear_foreign_agents_button"):
+            self.clear_foreign_agents_button.setEnabled(bool(path))
         if path:
             item = QListWidgetItem(path)
             item.setData(Qt.ItemDataRole.UserRole, True)
@@ -231,7 +234,7 @@ class MainWindowRunMixin:
 
     def clear_all(self) -> None:
         if self.thread and self.thread.isRunning():
-            QMessageBox.warning(self, APP_TITLE, "Сначала дождитесь завершения операции или нажмите «Отменить».")
+            QMessageBox.warning(self, APP_TITLE, "Сначала дождитесь завершения операции.")
             return
         self.database_edit.clear()
         self.database_list.clear()
@@ -256,6 +259,14 @@ class MainWindowRunMixin:
         self.result_summary_label.setText(
             "Проверьте выбранные данные и нажмите «Запустить проверку». Результаты сохраняются автоматически."
         )
+
+    def reset_workspace(self) -> None:
+        """Очищает выбор и результаты текущего запуска, не меняя сохранённые настройки."""
+        self.clear_all()
+        if not (self.thread and self.thread.isRunning()):
+            if hasattr(self, "workflow_tabs") and hasattr(self, "data_tab"):
+                self.workflow_tabs.setCurrentWidget(self.data_tab)
+            self._set_default_outputs(force=True)
 
     def select_output(self) -> None:
         initial = self.output_edit.text() or self._default_output_path()
@@ -327,11 +338,15 @@ class MainWindowRunMixin:
         if missing_databases:
             QMessageBox.warning(self, APP_TITLE, "Некоторые TXT-базы не найдены:\n" + "\n".join(missing_databases))
             return None
-        if not excel_paths and not foreign_agents_path:
+        use_nkp_live = bool(getattr(self, "nkp_live_check", None) and self.nkp_live_check.isChecked())
+        use_nkp_foreign_live = bool(
+            getattr(self, "nkp_foreign_live_check", None) and self.nkp_foreign_live_check.isChecked()
+        )
+        if not excel_paths and not foreign_agents_path and not use_nkp_live and not use_nkp_foreign_live:
             QMessageBox.warning(
                 self,
                 APP_TITLE,
-                "Выберите хотя бы один источник проверки: реестр по наркотическим веществам или реестр иностранных агентов.",
+                "Выберите хотя бы один источник проверки: актуальный список НКП РГБ или локальный Excel-реестр.",
             )
             self.workflow_tabs.setCurrentIndex(0)
             return None
@@ -387,11 +402,15 @@ class MainWindowRunMixin:
             QMessageBox.warning(self, APP_TITLE, "Выберите базу ИРБИС из списка.")
             self.workflow_tabs.setCurrentIndex(0)
             return None
-        if not excel_paths and not foreign_agents_path:
+        use_nkp_live = bool(getattr(self, "nkp_live_check", None) and self.nkp_live_check.isChecked())
+        use_nkp_foreign_live = bool(
+            getattr(self, "nkp_foreign_live_check", None) and self.nkp_foreign_live_check.isChecked()
+        )
+        if not excel_paths and not foreign_agents_path and not use_nkp_live and not use_nkp_foreign_live:
             QMessageBox.warning(
                 self,
                 APP_TITLE,
-                "Выберите хотя бы один источник проверки: реестр по наркотическим веществам или реестр иностранных агентов.",
+                "Выберите хотя бы один источник проверки: актуальный список НКП РГБ или локальный Excel-реестр.",
             )
             self.workflow_tabs.setCurrentIndex(0)
             return None
@@ -452,10 +471,18 @@ class MainWindowRunMixin:
         self.last_run_direct = direct_mode
         self.last_run_report_only = bool(self.marker_settings.get("report_only", False))
         selected_sources = []
+        use_nkp_live = bool(getattr(self, "nkp_live_check", None) and self.nkp_live_check.isChecked())
+        use_nkp_foreign_live = bool(
+            getattr(self, "nkp_foreign_live_check", None) and self.nkp_foreign_live_check.isChecked()
+        )
+        if use_nkp_live:
+            selected_sources.append("актуальный реестр по наркотическим веществам НКП РГБ")
+        if use_nkp_foreign_live:
+            selected_sources.append("актуальный реестр изданий иностранных агентов НКП РГБ")
         if excel_paths:
-            selected_sources.append(f"реестр по наркотическим веществам ({len(excel_paths)} файл.)")
-        if foreign_agents_path:
-            selected_sources.append("реестр иностранных агентов")
+            selected_sources.append(f"локальный реестр по наркотическим веществам ({len(excel_paths)} файл.)")
+        if foreign_agents_path and not use_nkp_foreign_live:
+            selected_sources.append("локальный реестр иностранных агентов")
         sources_text = ", ".join(selected_sources)
 
         self.workflow_tabs.setCurrentIndex(2)
@@ -463,7 +490,7 @@ class MainWindowRunMixin:
             "Проверка выполняется. Можно следить за общим состоянием здесь или открыть технический журнал."
         )
         self.progress_dialog.setWindowTitle("Выполнение проверки")
-        self.progress_dialog.start("Подготовка к проверке выбранных реестров…")
+        self.progress_dialog.start("Подготовка к проверке выбранных реестров…", cancellable=True)
         self._append_progress("Подготовка к проверке всех выбранных реестров…")
         self.progress.setValue(0)
         self.progress.show()
@@ -473,7 +500,6 @@ class MainWindowRunMixin:
         self.run_tab_start_button.setEnabled(False)
         self.create_matches_excel_button.setEnabled(False)
         self.marker_settings_button.setEnabled(False)
-        self.cancel_button.setEnabled(True)
         self.write_irbis_button.setEnabled(False)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(False)
@@ -497,8 +523,21 @@ class MainWindowRunMixin:
             self._append_progress(f"TXT-копия результата: {modified_database_path}")
 
         self._append_progress(f"Будут проверены источники: {sources_text}")
-        self._append_progress(f"Файлов реестра по наркотическим веществам: {len(excel_paths)}")
-        self._append_progress(f"Реестр иностранных агентов: {foreign_agents_path or 'не выбран'}")
+        self._append_progress(
+            "НКП РГБ — наркотические вещества: включён (будет загружен перед сравнением)"
+            if use_nkp_live
+            else "НКП РГБ — наркотические вещества: отключён"
+        )
+        self._append_progress(
+            "НКП РГБ — иностранные агенты: включён (будет загружен перед сравнением)"
+            if use_nkp_foreign_live
+            else "НКП РГБ — иностранные агенты: отключён"
+        )
+        self._append_progress(f"Локальных Excel-файлов реестра по наркотическим веществам: {len(excel_paths)}")
+        if use_nkp_foreign_live:
+            self._append_progress("Локальный реестр иностранных агентов: не используется, выбран актуальный список НКП РГБ")
+        else:
+            self._append_progress(f"Реестр иностранных агентов: {foreign_agents_path or 'не выбран'}")
         self._append_progress(f"Excel-отчёт: {output_path}" if output_path else "Excel-отчёт: не создаётся")
         substance_marker = (
             str(self.marker_settings["substance_marker"]) if self.marker_settings["substance_marker_enabled"] else ""
@@ -549,6 +588,8 @@ class MainWindowRunMixin:
                 page_size=int(irbis_params.get("page_size", 500)),
                 foreign_agents_path=foreign_agents_path,
                 excel_paths=excel_paths,
+                use_nkp_drug_registry=use_nkp_live,
+                use_nkp_foreign_agents_registry=use_nkp_foreign_live,
                 output_path=output_path,
                 comparison_options=comparison_options,
                 report_options=report_options,
@@ -580,6 +621,8 @@ class MainWindowRunMixin:
                 int(self.marker_settings["age_marker_field"]),
                 organization_marker,
                 int(self.marker_settings["foreign_organization_marker_field"]),
+                use_nkp_drug_registry=use_nkp_live,
+                use_nkp_foreign_agents_registry=use_nkp_foreign_live,
             )
         self._save_irbis_config()
         self.worker.moveToThread(self.thread)
@@ -631,68 +674,20 @@ class MainWindowRunMixin:
 
     @pyqtSlot(object)
     def _confirm_direct_changes(self, payload: object) -> None:
+        """Автоматически разрешает подготовленную запись в ИРБИС без диалога подтверждения."""
         worker = self.worker
         if not isinstance(worker, DirectIrbisComparisonWorker):
             return
+
         data = payload if isinstance(payload, dict) else {}
-        records = data.get("records", [])
-        records = records if isinstance(records, list) else []
-        preview_lines: list[str] = []
-        for item in records[:15]:
-            if not isinstance(item, dict):
-                continue
-            markers = item.get("markers", [])
-            marker_text = "; ".join(str(marker) for marker in markers)
-            if len(marker_text) > 180:
-                marker_text = marker_text[:177] + "…"
-            actions = []
-            added = int(item.get("added", 0))
-            repaired = int(item.get("duplicates_repaired", 0))
-            if added:
-                actions.append(f"добавится: {added}")
-            if repaired:
-                actions.append(f"исправится дублей: {repaired}")
-            action_text = ", ".join(actions) or "нормализация записи"
-            preview_lines.append(f"MFN {int(item.get('mfn', 0))}: {action_text}\n  {marker_text}")
-        remaining = max(0, len(records) - len(preview_lines))
-        if remaining:
-            preview_lines.append(f"…и ещё записей: {remaining}")
-
-        progress_was_visible = self._hide_progress_for_prompt()
-        try:
-            message = QMessageBox(self)
-            message.setWindowTitle(APP_TITLE)
-            message.setIcon(QMessageBox.Icon.Question)
-            message.setText(
-                f"Подготовлено к записи в базу {data.get('database', '')}: "
-                f"{int(data.get('record_count', 0))} записей."
-            )
-            message.setInformativeText(
-                f"Новых меток: {int(data.get('markers_added', 0))}\n"
-                f"Уже существовало: {int(data.get('markers_already_present', 0))}\n"
-                f"Будет исправлено дублей: {int(data.get('duplicates_repaired', 0))}\n"
-                f"Конфликтов версий: {int(data.get('conflicts', 0))}\n\n"
-                f"Требуют ручной проверки и не будут записаны: {int(data.get('review_rows', 0))}\n\n"
-                + (
-                    "Rollback-копия будет создана перед записью.\n\n"
-                    if bool(data.get("create_backup", True))
-                    else "ВНИМАНИЕ: rollback-копия отключена в настройках.\n\n"
-                )
-                + "\n".join(preview_lines)
-                + "\n\nЗаписать эти изменения в ИРБИС?"
-            )
-            message.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            message.setDefaultButton(QMessageBox.StandardButton.No)
-            approved = message.exec() == QMessageBox.StandardButton.Yes
-        finally:
-            self._restore_progress_after_prompt(progress_was_visible)
-        worker.confirm_preview(approved)
-
-    def cancel_comparison(self) -> None:
-        if self.worker:
-            self._set_status("Отмена…", "warning")
-            self.worker.request_cancel()
-            self.cancel_button.setEnabled(False)
+        record_count = int(data.get("record_count", 0))
+        markers_added = int(data.get("markers_added", 0))
+        duplicates_repaired = int(data.get("duplicates_repaired", 0))
+        self._append_progress(
+            f"Запись в ИРБИС подтверждена автоматически: {record_count:,} записей, "
+            f"новых меток: {markers_added:,}, исправлено дублей: {duplicates_repaired:,}."
+        )
+        worker.confirm_preview(True)
 
     @pyqtSlot(int, str)
     def on_progress(self, percent: int, text: str) -> None:
@@ -705,6 +700,7 @@ class MainWindowRunMixin:
     @pyqtSlot(object, object)
     def on_finished(self, results: list[MatchResult], summary: ComparisonSummary) -> None:
         self.progress.hide()
+        self._refresh_registry_cache_status()
         self.last_results = results
         self.last_summary = summary
         self._log_match_summary(results)
@@ -885,7 +881,6 @@ class MainWindowRunMixin:
         self.marker_settings_button.setEnabled(True)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(True)
-        self.cancel_button.setEnabled(False)
 
     def _log_match_summary(self, results: list[MatchResult]) -> None:
         unique_records = {
@@ -993,6 +988,10 @@ class MainWindowRunMixin:
             QMessageBox.warning(self, APP_TITLE, "TXT-копия не найдена.")
 
     def closeEvent(self, event) -> None:
+        if getattr(self, "nkp_refresh_thread", None) is not None and self.nkp_refresh_thread.isRunning():
+            QMessageBox.information(self, APP_TITLE, "Дождитесь завершения обновления реестра НКП РГБ.")
+            event.ignore()
+            return
         if self.update_thread and self.update_thread.isRunning() and not self._installing_update:
             QMessageBox.warning(
                 self,

@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from irbis_control.core.matcher import SOURCE_FOREIGN_AGENTS, normalize_author, normalize_title
+from irbis_control.core.matcher import (
+    SOURCE_FOREIGN_AGENTS,
+    SOURCE_SUBSTANCES,
+    normalize_author,
+    normalize_title,
+    primary_author_contributor,
+)
 from irbis_control.core.models import ComparisonSummary, MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 
@@ -88,6 +94,41 @@ def review_identity(result: MatchResult) -> ReviewIdentity | None:
         registry_number=registry_number,
         source_type=result.source_type,
         method=result.method,
+    )
+
+
+def review_group_key(result: MatchResult) -> str | None:
+    """Группирует одно ручное решение для одинаковых найденных экземпляров."""
+    identity = review_identity(result)
+    if identity is not None:
+        return identity.key
+    if result.source_type != SOURCE_SUBSTANCES or result.database is None:
+        return None
+
+    entry_title = normalize_title(result.excel.title)
+    entry_author = normalize_author(primary_author_contributor(result.excel.author))
+    database_titles = sorted({normalize_title(value) for value in result.database.titles if normalize_title(value)})
+    database_authors = sorted(
+        {
+            normalize_author(value)
+            for value in (result.database.primary_authors or result.database.authors)
+            if normalize_author(value)
+        }
+    )
+    # Автор из реестра остаётся частью ключа даже тогда, когда поле автора в
+    # старой записи ИРБИС пусто. Поэтому одинаковое общее название у разных
+    # авторов не объединится, а экземпляры одной книги подтвердятся вместе.
+    if not entry_title or not entry_author or not database_titles:
+        return None
+    return "\x1f".join(
+        (
+            result.source_type.strip().lower(),
+            "книга",
+            entry_title,
+            entry_author,
+            "|".join(database_titles),
+            "|".join(database_authors) or "автор-в-базе-не-указан",
+        )
     )
 
 

@@ -28,6 +28,7 @@ from irbis_control.core.matcher import (
     normalize_publisher,
     normalize_title,
     process,
+    primary_author_contributor,
     publisher_variants,
 )
 from irbis_control.core.models import (
@@ -124,28 +125,261 @@ def _foreign_agent_search_terms(entry: ForeignAgentEntry) -> list[tuple[str, str
     return terms
 
 
+def _foreign_agent_identity_key(entry: ForeignAgentEntry) -> tuple[str, str]:
+    """Стабильный ключ агента для книжной выгрузки с тысячами повторов."""
+    return normalize_author(entry.name), entry.registry_number.strip().casefold()
+
+
+def _foreign_publication_role_is_author(value: str) -> bool:
+    role = normalize_author(value)
+    return role in {"авт", "автор", "соавт", "авт текста"}
+
+
+def _publication_year_from_text(value: str) -> str:
+    years = re.findall(r"(?<!\d)(?:1[5-9]\d{2}|20\d{2})(?!\d)", safe_text(value))
+    return years[-1] if years else ""
+
+
+def _foreign_publication_results(
+    index: DatabaseIndex,
+    entry: ForeignAgentEntry,
+    options: ComparisonOptions,
+) -> list[MatchResult]:
+    """Ищет конкретное издание из книжной выгрузки иностранных агентов.
+
+    ISBN считается достаточным идентификатором. Для заглавия дополнительно
+    используем автора/псевдоним, роль и год выхода, чтобы не ставить метку по
+    одному общему заглавию вроде «Рассказы».
+    """
+    if not entry.isbn.strip() and not entry.title.strip():
+        return []
+
+    synthetic = ExcelEntry(
+        entry_id=entry.entry_id,
+        source_file=entry.source_file,
+        sheet_name=entry.sheet_name,
+        row_number=entry.row_number,
+        author=entry.name,
+        title=entry.title,
+        isbn=entry.isbn,
+        registration_number=entry.registry_number,
+        raw_data=entry.raw_data,
+    )
+
+    # ISBN: не требуем совпадения роли/автора. В строке списка иноагент может
+    # быть переводчиком, редактором или издателем, а не основным автором 700.
+    isbn_records: list[DatabaseRecord] = []
+    seen_isbn_records: set[int] = set()
+    for isbn in isbn_match_keys(entry.isbn):
+        for record in index.by_isbn.get(isbn, []):
+            if record.record_number not in seen_isbn_records:
+                seen_isbn_records.add(record.record_number)
+                isbn_records.append(record)
+    if isbn_records:
+        return [
+            MatchResult(
+                status="Совпадение",
+                method="Список изданий иноагентов: ISBN",
+                confidence=100.0,
+                excel=synthetic,
+                database=record,
+                note=f"Роль: {entry.role}" if entry.role else "Точный ISBN из списка изданий",
+                source_type=SOURCE_FOREIGN_AGENTS,
+                matched_value=entry.name,
+                foreign_agent=entry,
+            )
+            for record in isbn_records
+        ]
+
+    normalized_title = normalize_title(entry.title)
+    if not normalized_title:
+        return []
+    title_records = list(index.by_title.get(normalized_title, []))
+    is_person = "физичес" in normalize_author(entry.agent_type)
+    author_role = is_person and _foreign_publication_role_is_author(entry.role)
+
+    if title_records:
+        if author_role:
+            exact_author_records: list[tuple[DatabaseRecord, str]] = []
+            partial_author_records: list[tuple[DatabaseRecord, str]] = []
+            author_variants = _registry_name_variants(entry.name, is_person=True)
+            for record in title_records:
+                for variant in author_variants:
+                    author_match = index._matching_author(variant, record)
+                    if author_match is None:
+                        continue
+                    kind, database_value = author_match
+                    target = exact_author_records if kind == "exact" else partial_author_records
+                    target.append((record, database_value))
+                    break
+            if exact_author_records:
+                return [
+                    MatchResult(
+                        status="Совпадение",
+                        method="Список изданий иноагентов: Название и автор",
+                        confidence=100.0,
+                        excel=synthetic,
+                        database=record,
+                        note=f"Роль: {entry.role}" if entry.role else "Точное название и автор/псевдоним",
+                        source_type=SOURCE_FOREIGN_AGENTS,
+                        matched_value=entry.name,
+                        foreign_agent=entry,
+                        database_matched_value=database_value,
+                    )
+                    for record, database_value in exact_author_records
+                ]
+            if partial_author_records:
+                return [
+                    MatchResult(
+                        status="Возможное совпадение",
+                        method="Список изданий иноагентов: Название и сокращённый автор",
+                        confidence=90.0,
+                        excel=synthetic,
+                        database=record,
+                        note="Точное название, но автор в базе указан неполно — проверить вручную",
+                        source_type=SOURCE_FOREIGN_AGENTS,
+                        matched_value=entry.name,
+                        foreign_agent=entry,
+                        database_matched_value=database_value,
+                    )
+                    for record, database_value in partial_author_records
+                ]
+
+        # Если агент указан в иной роли (редактор, переводчик, издатель), его
+        # имя закономерно не совпадает с 700/701. Разрешаем автоматическое
+        # совпадение только для однозначного заглавия; при наличии года ещё и
+        # проверяем его, если в ИРБИС год заполнен.
+        candidate_records = title_records
+        publication_year = _publication_year_from_text(entry.publication)
+        if publication_year:
+            same_year = [
+                record
+                for record in candidate_records
+                if any(year == publication_year for _publisher, year in index.publications[record.record_number])
+            ]
+            if same_year:
+                candidate_records = same_year
+        if len(candidate_records) == 1 and (not author_role or not candidate_records[0].authors):
+            return [
+                MatchResult(
+                    status="Совпадение",
+                    method="Список изданий иноагентов: Точное название",
+                    confidence=100.0,
+                    excel=synthetic,
+                    database=candidate_records[0],
+                    note=(
+                        f"Однозначное заглавие; роль: {entry.role}"
+                        if entry.role
+                        else "Однозначное точное заглавие из списка изданий"
+                    ),
+                    source_type=SOURCE_FOREIGN_AGENTS,
+                    matched_value=entry.name,
+                    foreign_agent=entry,
+                )
+            ]
+
+    # Последний автоматический резерв — приблизительное заглавие, но только
+    # при точном совпадении основного автора/псевдонима. Используем уже
+    # отлаженную логику общего индекса и не понижаем порог для иноагентов.
+    if options.use_fuzzy and author_role:
+        converted: dict[int, MatchResult] = {}
+        for author_variant in _registry_name_variants(entry.name, is_person=True):
+            fuzzy_entry = ExcelEntry(
+                entry_id=entry.entry_id,
+                source_file=entry.source_file,
+                sheet_name=entry.sheet_name,
+                row_number=entry.row_number,
+                author=author_variant,
+                title=entry.title,
+                isbn="",
+                registration_number=entry.registry_number,
+                raw_data=entry.raw_data,
+            )
+            for result in index._match_fuzzy(fuzzy_entry, normalized_title, options.fuzzy_threshold):
+                if result.database is None:
+                    continue
+                converted_result = MatchResult(
+                    status=result.status,
+                    method="Список изданий иноагентов: Похожее название и автор",
+                    confidence=result.confidence,
+                    excel=synthetic,
+                    database=result.database,
+                    note=result.note,
+                    source_type=SOURCE_FOREIGN_AGENTS,
+                    matched_value=entry.name,
+                    foreign_agent=entry,
+                    database_matched_value=result.database_matched_value,
+                )
+                previous = converted.get(result.database.record_number)
+                if previous is None or converted_result.confidence > previous.confidence:
+                    converted[result.database.record_number] = converted_result
+        if converted:
+            return list(converted.values())
+    return []
+
+
 def compare_foreign_agents(
     records: DatabaseIndex | list[DatabaseRecord],
     entries: list[ForeignAgentEntry],
     progress_cb: ProgressCallback | None = None,
     cancel_cb: CancelCallback | None = None,
+    *,
+    options: ComparisonOptions | None = None,
 ) -> list[MatchResult]:
     if not entries:
         return []
     index = records if isinstance(records, DatabaseIndex) else DatabaseIndex(records)
-    results: list[MatchResult] = []
-    total = max(len(entries), 1)
+    comparison_options = options or ComparisonOptions(use_fuzzy=True, fuzzy_threshold=92)
+    publication_results: list[MatchResult] = []
 
+    # Сначала проверяем конкретные книги. В отличие от старой логики, строки
+    # книжной выгрузки не сворачиваются до одного автора и их ISBN/заглавия не
+    # теряются.
+    total = max(len(entries), 1)
     for position, entry in enumerate(entries, start=1):
-        if position % 100 == 0:
+        if position % 250 == 0:
             _cancelled(cancel_cb)
             if progress_cb:
-                progress_cb(72 + int(position / total * 8), f"Сверка с иноагентами: {position:,} из {total:,}")
+                progress_cb(72 + int(position / total * 4), f"Сверка изданий иноагентов: {position:,} из {total:,}")
+        publication_results.extend(_foreign_publication_results(index, entry, comparison_options))
+
+    publication_pairs = {
+        (_foreign_agent_identity_key(result.foreign_agent), result.database.record_number)
+        for result in publication_results
+        if result.foreign_agent is not None and result.database is not None and result.status == "Совпадение"
+    }
+
+    # Одного и того же агента книжная выгрузка повторяет для каждой книги.
+    # Поиск «все записи этого автора» выполняем один раз на агента.
+    unique_entries: dict[tuple[str, str], ForeignAgentEntry] = {}
+    for entry in entries:
+        unique_entries.setdefault(_foreign_agent_identity_key(entry), entry)
+
+    results: list[MatchResult] = list(publication_results)
+    person_identity_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for registry_entry in unique_entries.values():
+        identity = _author_identity(registry_entry.name)
+        if identity and identity[1]:
+            person_identity_counts[(identity[0], identity[1][0])] += 1
+    unique_total = max(len(unique_entries), 1)
+
+    for position, entry in enumerate(unique_entries.values(), start=1):
+        if position % 50 == 0:
+            _cancelled(cancel_cb)
+            if progress_cb:
+                progress_cb(
+                    76 + int(position / unique_total * 4),
+                    f"Сверка авторов-иноагентов: {position:,} из {unique_total:,}",
+                )
         for value, kind, is_person in _foreign_agent_search_terms(entry):
             matches = index.match_author_value(value) if is_person else index.match_name_value(value)
             for record, database_field, confidence, database_matched_value in matches:
                 # Участники-организации не сравниваются с названиями произведений.
                 if kind == "Участник" and database_field == "Название":
+                    continue
+                # Если эта же книга уже надёжно найдена по ISBN/заглавию для
+                # того же агента, не создаём вторую одинаковую строку отчёта.
+                if (_foreign_agent_identity_key(entry), record.record_number) in publication_pairs:
                     continue
                 synthetic_entry = ExcelEntry(
                     entry_id=entry.entry_id,
@@ -157,14 +391,27 @@ def compare_foreign_agents(
                     registration_number=entry.registry_number,
                     raw_data=entry.raw_data,
                 )
+                identity = _author_identity(value) if is_person else None
+                unique_abbreviated_person = bool(
+                    confidence < 100.0
+                    and kind == "ФИО/наименование"
+                    and identity
+                    and identity[1]
+                    and person_identity_counts[(identity[0], identity[1][0])] == 1
+                )
+                effective_confidence = 100.0 if unique_abbreviated_person else confidence
                 results.append(
                     MatchResult(
-                        status="Совпадение" if confidence >= 100.0 else "Возможное совпадение",
+                        status="Совпадение" if effective_confidence >= 100.0 else "Возможное совпадение",
                         method=f"Реестр иностранных агентов: {database_field}",
-                        confidence=confidence,
+                        confidence=effective_confidence,
                         excel=synthetic_entry,
                         database=record,
-                        note=(kind if confidence >= 100.0 else f"{kind}; неполные данные автора"),
+                        note=(
+                            f"{kind}; сокращённое имя однозначно в реестре"
+                            if unique_abbreviated_person
+                            else kind if confidence >= 100.0 else f"{kind}; неполные данные автора"
+                        ),
                         source_type=SOURCE_FOREIGN_AGENTS,
                         matched_value=value,
                         foreign_agent=entry,
@@ -283,12 +530,13 @@ class DatabaseIndex:
 
     @staticmethod
     def _matching_author(entry_author: str, record: DatabaseRecord) -> tuple[str, str] | None:
-        excel_identity = _author_identity(entry_author)
+        comparison_author = primary_author_contributor(entry_author)
+        excel_identity = _author_identity(comparison_author)
         if not excel_identity or not record.authors:
             return None
         excel_surname, excel_initials = excel_identity
-        entry_normalized = normalize_author(entry_author)
-        entry_order_variants = _author_order_variants(entry_author)
+        entry_normalized = normalize_author(comparison_author)
+        entry_order_variants = _author_order_variants(comparison_author)
 
         for author in record.authors:
             record_identity = _author_identity(author)
@@ -355,7 +603,7 @@ class DatabaseIndex:
     def _author_similarity(entry_author: str, record: DatabaseRecord) -> float:
         if not entry_author or not record.authors:
             return 100.0
-        entry_variants = _author_order_variants(entry_author)
+        entry_variants = _author_order_variants(primary_author_contributor(entry_author))
         if fuzz is None:
             return 100.0 if DatabaseIndex._author_matches(entry_author, record) else 0.0
         return max(
@@ -407,16 +655,33 @@ class DatabaseIndex:
         normalized_title: str,
         threshold: int,
     ) -> list[MatchResult]:
-        if process is None or fuzz is None or not self.unique_titles:
+        if process is None or fuzz is None or not self.unique_titles or not entry.author:
+            return []
+        candidate_records: list[DatabaseRecord] = []
+        seen_records: set[int] = set()
+        for surname in author_surnames(primary_author_contributor(entry.author)):
+            for record in self.by_author_surname.get(surname, []):
+                if record.record_number not in seen_records:
+                    seen_records.add(record.record_number)
+                    candidate_records.append(record)
+        candidate_title_keys = sorted(
+            {
+                normalize_title(title)
+                for record in candidate_records
+                for title in record.titles
+                if normalize_title(title)
+            }
+        )
+        if not candidate_title_keys:
             return []
         candidate_titles = process.extract(
             normalized_title,
-            self.unique_titles,
+            candidate_title_keys,
             scorer=fuzz.token_set_ratio,
             score_cutoff=threshold,
             limit=5,
         )
-        best: list[tuple[float, DatabaseRecord, float, float]] = []
+        best: list[tuple[float, DatabaseRecord, float, float, str]] = []
         for title_key, title_score, _ in candidate_titles:
             for record in self.by_title[title_key]:
                 author_score = self._author_similarity(entry.author, record)
@@ -424,25 +689,55 @@ class DatabaseIndex:
                     continue
                 combined = title_score * 0.85 + author_score * 0.15
                 if combined >= threshold:
-                    best.append((combined, record, float(title_score), float(author_score)))
+                    best.append((combined, record, float(title_score), float(author_score), title_key))
         if not best:
             return []
-        best.sort(key=lambda item: item[0], reverse=True)
+        # Одна запись может попасть в выдачу несколько раз из-за вариантов
+        # заглавия. Для проверки однозначности считаем записи, а не заглавия.
+        best_by_record: dict[int, tuple[float, DatabaseRecord, float, float, str]] = {}
+        for candidate in best:
+            record_number = candidate[1].record_number
+            previous = best_by_record.get(record_number)
+            if previous is None or candidate[0] > previous[0]:
+                best_by_record[record_number] = candidate
+        best = sorted(best_by_record.values(), key=lambda item: item[0], reverse=True)
         best_score = best[0][0]
         selected = [item for item in best if item[0] >= best_score - 1.0][:3]
-        return [
-            MatchResult(
-                status="Возможное совпадение",
-                method="Приблизительно по названию и автору",
-                confidence=round(score, 1),
-                excel=entry,
-                database=record,
-                note=f"Название: {title_score:.0f}%, автор: {author_score:.0f}%",
-                source_type=SOURCE_SUBSTANCES,
-                matched_value=entry.title or entry.author,
+        exact_primary_by_record: dict[int, bool] = {}
+        for _score, record, _title_score, _author_score, _title_key in selected:
+            author_match = self._matching_author(entry.author, record)
+            exact_primary_by_record[record.record_number] = bool(
+                author_match is not None
+                and author_match[0] == "exact"
+                and self._matched_author_is_primary(record, author_match[1])
             )
-            for score, record, title_score, author_score in selected
-        ]
+        automatic_group = bool(
+            selected
+            and len({item[4] for item in selected}) == 1
+            and all(exact_primary_by_record.values())
+        )
+        results: list[MatchResult] = []
+        for score, record, title_score, author_score, _title_key in selected:
+            automatic = automatic_group and exact_primary_by_record[record.record_number]
+            results.append(
+                MatchResult(
+                    status="Совпадение" if automatic else "Возможное совпадение",
+                    method=(
+                        "Похожее название и точный автор"
+                        if automatic
+                        else "Приблизительно по названию и автору"
+                    ),
+                    # 100% здесь означает надёжность принятого решения, а сами
+                    # проценты сходства остаются видимыми в примечании.
+                    confidence=100.0 if automatic else round(score, 1),
+                    excel=entry,
+                    database=record,
+                    note=f"Название: {title_score:.0f}%, автор: {author_score:.0f}%",
+                    source_type=SOURCE_SUBSTANCES,
+                    matched_value=entry.title or entry.author,
+                )
+            )
+        return results
 
     @staticmethod
     def _publication_matches(entry: ExcelEntry, publications: list[tuple[str, str]]) -> bool:
@@ -617,10 +912,10 @@ class DatabaseIndex:
                         else ""
                     )
                 else:
-                    status = "Возможное совпадение"
-                    method = "Название и неполные данные автора"
-                    confidence = 90.0
-                    note = "Название совпало, но для надёжной проверки автора недостаточно инициалов"
+                    status = "Совпадение"
+                    method = "Название и автор (сокращённое имя)"
+                    confidence = 100.0
+                    note = "Название совпало; фамилия и первый инициал автора совпали"
             elif self._publication_matches(entry, self.publications[record.record_number]):
                 status = "Совпадение"
                 method = "Название + издательство + год"
@@ -791,6 +1086,7 @@ def compare_database_records(
                 foreign_entries,
                 progress_cb,
                 cancel_cb,
+                options=comparison_options,
             )
             substance = substance_future.result()
             foreign_results = foreign_future.result()
@@ -802,7 +1098,13 @@ def compare_database_records(
             progress_cb,
             cancel_cb,
         )
-        foreign_results = compare_foreign_agents(index, foreign_entries, progress_cb, cancel_cb)
+        foreign_results = compare_foreign_agents(
+            index,
+            foreign_entries,
+            progress_cb,
+            cancel_cb,
+            options=comparison_options,
+        )
 
     results: list[MatchResult] = []
     results.extend(substance.results)

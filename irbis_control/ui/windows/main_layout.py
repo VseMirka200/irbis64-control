@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from irbis_control.application.marker_settings import DEFAULT_MARKER_SETTINGS
 from irbis_control.paths import icon_path
 from irbis_control.ui.components.widgets import SectionCard
 from irbis_control.ui.theme import apply_main_title_font, main_window_stylesheet
@@ -85,16 +86,24 @@ class MainWindowLayoutMixin:
         self.source_mode_combo.setMinimumWidth(190)
         mode_row.addWidget(mode_label)
         mode_row.addWidget(self.source_mode_combo)
-        mode_row.addStretch()
         self.source_useful_links_button = QPushButton("Полезные ссылки")
         self.source_useful_links_button.setObjectName("mutedButton")
-        self.source_useful_links_button.setToolTip("Открыть ссылки для скачивания данных")
+        self.source_useful_links_button.setToolTip("Открыть ссылки на официальные реестры и другие полезные ресурсы")
         self.source_useful_links_button.clicked.connect(self.open_useful_links)
+        # Полезные ссылки относятся к выбору источника, поэтому держим действие
+        # в той же строке. Отдельная строка «Скачать реестры» только занимала место
+        # и визуально отделяла кнопку от контекста, к которому она относится.
+        mode_row.addWidget(self.source_useful_links_button)
+        mode_row.addStretch()
         mode_card.body.addLayout(mode_row)
         self.source_mode_hint = QLabel()
         self.source_mode_hint.setObjectName("cardDescription")
         self.source_mode_hint.setWordWrap(True)
         mode_card.body.addWidget(self.source_mode_hint)
+        # Совместимость со сторонним кодом, который мог обращаться к старому полю.
+        # Элемент больше не показывается в интерфейсе.
+        self.download_registries_label = QLabel("Скачать реестры")
+        self.download_registries_label.hide()
         data_layout.addWidget(mode_card)
 
         connection_overview = QFrame()
@@ -137,7 +146,6 @@ class MainWindowLayoutMixin:
         records_title.setObjectName("pageSectionTitle")
         records_header.addWidget(records_title)
         records_header.addStretch()
-        records_header.addWidget(self.source_useful_links_button)
         data_layout.addLayout(records_header)
         data_layout.addWidget(self.database_card)
         self.sources_grid = QGridLayout()
@@ -210,7 +218,19 @@ class MainWindowLayoutMixin:
         self.confirmation_memory_button.setObjectName("mutedButton")
         self.confirmation_memory_button.setToolTip("Просмотреть или удалить сохранённые решения")
         self.confirmation_memory_button.clicked.connect(self.open_confirmation_memory)
-        confirmation_memory_row.addWidget(self.confirmation_memory_button, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # На Windows один AlignVCenter у QPushButton может выглядеть смещённым
+        # относительно многострочного QLabel из-за различий sizeHint/baseline.
+        # Отдельный контейнер центрирует кнопку по фактической высоте строки.
+        memory_button_box = QWidget()
+        memory_button_box.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        memory_button_layout = QVBoxLayout(memory_button_box)
+        memory_button_layout.setContentsMargins(0, 0, 0, 0)
+        memory_button_layout.setSpacing(0)
+        memory_button_layout.addStretch(1)
+        memory_button_layout.addWidget(self.confirmation_memory_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        memory_button_layout.addStretch(1)
+        confirmation_memory_row.addWidget(memory_button_box)
         confirmation_memory_card.body.addLayout(confirmation_memory_row)
         parameters_layout.addWidget(confirmation_memory_card)
 
@@ -222,7 +242,8 @@ class MainWindowLayoutMixin:
         self.advanced_settings_dialog = QDialog(self)
         self.advanced_settings_dialog.setWindowTitle("Дополнительные настройки")
         self.advanced_settings_dialog.setModal(True)
-        self.advanced_settings_dialog.setFixedSize(540, 520)
+        self.advanced_settings_dialog.resize(620, 580)
+        self.advanced_settings_dialog.setMinimumSize(520, 420)
         dialog_layout = QVBoxLayout(self.advanced_settings_dialog)
         dialog_layout.setContentsMargins(8, 8, 8, 8)
         dialog_layout.setSpacing(7)
@@ -253,6 +274,11 @@ class MainWindowLayoutMixin:
         advanced_scroll.setWidget(self.advanced_options)
         dialog_layout.addWidget(advanced_scroll, 1)
         dialog_buttons = QHBoxLayout()
+        reset_advanced_button = QPushButton("По умолчанию")
+        reset_advanced_button.setObjectName("mutedButton")
+        reset_advanced_button.setToolTip("Вернуть рекомендуемые правила, отчёты и метки; применятся после сохранения")
+        reset_advanced_button.clicked.connect(self._reset_advanced_settings_defaults)
+        dialog_buttons.addWidget(reset_advanced_button)
         dialog_buttons.addStretch()
         cancel_advanced_button = QPushButton("Отмена")
         cancel_advanced_button.setObjectName("mutedButton")
@@ -295,8 +321,6 @@ class MainWindowLayoutMixin:
         self.start_button.setObjectName("primaryButton")
         self.start_button.show()
         run_buttons.addWidget(self.start_button, 1)
-        self.cancel_button.show()
-        run_buttons.addWidget(self.cancel_button)
         self.actions_layout.addLayout(run_buttons)
         self.actions_layout.addWidget(self.progress)
         self.actions_layout.addLayout(self.status_row)
@@ -321,7 +345,8 @@ class MainWindowLayoutMixin:
         self.log_dialog = QDialog(self)
         self.log_dialog.setWindowTitle("Технический журнал")
         self.log_dialog.setModal(True)
-        self.log_dialog.setFixedSize(540, 420)
+        self.log_dialog.resize(700, 500)
+        self.log_dialog.setMinimumSize(520, 320)
         log_dialog_layout = QVBoxLayout(self.log_dialog)
         log_dialog_layout.setContentsMargins(8, 8, 8, 8)
         log_dialog_layout.setSpacing(7)
@@ -331,6 +356,10 @@ class MainWindowLayoutMixin:
         log_dialog_buttons.addStretch()
         self.export_journal_button.setObjectName("primaryButton")
         log_dialog_buttons.addWidget(self.export_journal_button)
+        close_log_button = QPushButton("Закрыть")
+        close_log_button.setObjectName("mutedButton")
+        close_log_button.clicked.connect(self.log_dialog.accept)
+        log_dialog_buttons.addWidget(close_log_button)
         log_dialog_layout.addLayout(log_dialog_buttons)
         self.log_toggle.clicked.connect(self.open_log_window)
 
@@ -352,7 +381,8 @@ class MainWindowLayoutMixin:
         self.maintenance_dialog = QDialog(self)
         self.maintenance_dialog.setWindowTitle("Обслуживание базы")
         self.maintenance_dialog.setModal(True)
-        self.maintenance_dialog.setFixedSize(460, 180)
+        self.maintenance_dialog.resize(520, 220)
+        self.maintenance_dialog.setMinimumSize(460, 180)
         maintenance_dialog_layout = QVBoxLayout(self.maintenance_dialog)
         maintenance_dialog_layout.setContentsMargins(8, 8, 8, 8)
         maintenance_dialog_layout.setSpacing(7)
@@ -373,6 +403,11 @@ class MainWindowLayoutMixin:
         secondary_actions.setSpacing(7)
         secondary_actions.addWidget(self.log_toggle, 1)
         secondary_actions.addWidget(self.maintenance_toggle, 1)
+        self.reset_workspace_button = QPushButton("Новая проверка")
+        self.reset_workspace_button.setObjectName("mutedButton")
+        self.reset_workspace_button.setToolTip("Очистить выбор текущего запуска и вернуться к данным")
+        self.reset_workspace_button.clicked.connect(self.reset_workspace)
+        secondary_actions.addWidget(self.reset_workspace_button, 1)
         results_layout.addLayout(secondary_actions)
         results_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.workflow_tabs.addTab(self.results_tab, "Результат")
@@ -407,6 +442,11 @@ class MainWindowLayoutMixin:
             scroll_content.setMaximumHeight(16777215)
             scroll_content.updateGeometry()
         QTimer.singleShot(0, self._fit_scroll_content)
+
+    def _reset_advanced_settings_defaults(self) -> None:
+        self.marker_settings = dict(DEFAULT_MARKER_SETTINGS)
+        self._apply_marker_settings_to_ui()
+        self._sync_output_mode_from_checks()
 
     def open_advanced_settings(self) -> None:
         saved_settings = dict(self.marker_settings)

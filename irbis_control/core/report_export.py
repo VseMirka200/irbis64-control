@@ -166,9 +166,14 @@ def _report_records(
     return records, grouped
 
 
-def _parallel_join(values: Iterable[Any]) -> str:
-    """Объединяет значения построчно, сохраняя соответствие между колонками."""
-    return "\n".join(safe_text(value) for value in values)
+def _unique_lines(values: Iterable[Any]) -> str:
+    """Выводит каждое непустое значение только один раз, сохраняя порядок."""
+    return _unique_join(values, separator="\n")
+
+
+def _unique_compact(values: Iterable[Any]) -> str:
+    """Компактно выводит уникальные служебные значения (например, номера строк)."""
+    return _unique_join(values, separator=", ")
 
 
 def _base_txt_row(number: int, record: DatabaseRecord) -> list[Any]:
@@ -195,10 +200,10 @@ def _substance_match_row(
         reasons.append(f"{method} — {matched_value}" if method and matched_value else method or matched_value)
     return [
         *_base_txt_row(number, record),
-        _parallel_join(reasons),
-        _parallel_join(Path(result.excel.source_file).name for result in record_results),
-        _parallel_join(result.excel.sheet_name for result in record_results),
-        _parallel_join(result.excel.row_number for result in record_results),
+        _unique_lines(reasons),
+        _unique_lines(Path(result.excel.source_file).name for result in record_results),
+        _unique_lines(result.excel.sheet_name for result in record_results),
+        _unique_compact(result.excel.row_number for result in record_results),
     ]
 
 
@@ -216,16 +221,16 @@ def _foreign_agent_match_row(
     entries = [result.foreign_agent for result in record_results]
     return [
         *_base_txt_row(number, record),
-        _parallel_join(_foreign_agent_field(result) for result in record_results),
-        _parallel_join(result.matched_value for result in record_results),
-        _parallel_join(entry.registry_number if entry else "" for entry in entries),
-        _parallel_join(entry.name if entry else "" for entry in entries),
-        _parallel_join(entry.agent_type if entry else "" for entry in entries),
-        _parallel_join(entry.inclusion_date if entry else "" for entry in entries),
-        _parallel_join(result.note for result in record_results),
-        _parallel_join(Path(entry.source_file).name if entry else "" for entry in entries),
-        _parallel_join(entry.sheet_name if entry else "" for entry in entries),
-        _parallel_join(entry.row_number if entry else "" for entry in entries),
+        _unique_lines(_foreign_agent_field(result) for result in record_results),
+        _unique_lines(result.matched_value for result in record_results),
+        _unique_lines(entry.registry_number if entry else "" for entry in entries),
+        _unique_lines(entry.name if entry else "" for entry in entries),
+        _unique_lines(entry.agent_type if entry else "" for entry in entries),
+        _unique_lines(entry.inclusion_date if entry else "" for entry in entries),
+        _unique_lines(result.note for result in record_results),
+        _unique_lines(Path(entry.source_file).name if entry else "" for entry in entries),
+        _unique_lines(entry.sheet_name if entry else "" for entry in entries),
+        _unique_compact(entry.row_number if entry else "" for entry in entries),
     ]
 
 
@@ -236,9 +241,9 @@ def _combined_match_row(
 ) -> list[Any]:
     return [
         *_base_txt_row(number, record),
-        _parallel_join(result.source_type for result in record_results),
-        _parallel_join(result.method for result in record_results),
-        _parallel_join(result.matched_value for result in record_results),
+        _unique_lines(result.source_type for result in record_results),
+        _unique_lines(result.method for result in record_results),
+        _unique_lines(result.matched_value for result in record_results),
     ]
 
 

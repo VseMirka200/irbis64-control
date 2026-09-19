@@ -8,8 +8,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, QStandardPaths, Qt, QUrl
-from PyQt6.QtGui import QDesktopServices, QIcon, QKeySequence
+from PyQt6.QtCore import QSize, QStandardPaths, Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,10 +23,11 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
+    QStyle,
+    QStyleOptionViewItem,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -35,11 +36,12 @@ from PyQt6.QtWidgets import (
 )
 
 from irbis_control import APP_TITLE as APP_TITLE
+from irbis_control.ui.message_box import AppMessageBox as QMessageBox
 from irbis_control.core.manual_review_memory import (
     clear_review_decision_memory,
     load_review_decision_rows,
     remove_review_decision_keys,
-    review_identity,
+    review_group_key,
 )
 from irbis_control.core.models import MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
@@ -49,7 +51,8 @@ from irbis_control.reporting.result_diff import (
     compare_result_files,
     compare_text_files,
 )
-from irbis_control.ui.theme import result_diff_fill_colors, useful_link_foreground
+from irbis_control.ui.context_menu import COPY_TEXT, new_context_menu
+from irbis_control.ui.theme import review_approved_fill_color, result_diff_fill_colors, useful_link_foreground
 
 
 class CopyableTableWidget(QTableWidget):
@@ -92,12 +95,35 @@ class CopyableTableWidget(QTableWidget):
         QApplication.clipboard().setText("\n".join(lines))
 
     def _show_copy_menu(self, position) -> None:
-        menu = QMenu(self)
-        copy_action = menu.addAction("Копировать")
-        copy_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Copy))
-        copy_action.setEnabled(bool(self.selectedIndexes()) or self.currentIndex().isValid())
-        if menu.exec(self.viewport().mapToGlobal(position)) == copy_action:
-            self.copy_selection_to_clipboard()
+        menu = new_context_menu(self)
+        menu.add_app_action(
+            COPY_TEXT,
+            self.copy_selection_to_clipboard,
+            shortcut=QKeySequence.StandardKey.Copy,
+            enabled=bool(self.selectedIndexes()) or self.currentIndex().isValid(),
+        )
+        menu.ensure_action_width()
+        menu.exec(self.viewport().mapToGlobal(position))
+
+
+class _ReviewDecisionDelegate(QStyledItemDelegate):
+    """Убирает нативный эффект наведения у ячеек ручной проверки."""
+
+    def __init__(self, decisions: dict[int, bool | None], parent: QWidget) -> None:
+        super().__init__(parent)
+        self._decisions = decisions
+
+    @staticmethod
+    def _without_hover(option: QStyleOptionViewItem) -> QStyleOptionViewItem:
+        clean_option = QStyleOptionViewItem(option)
+        clean_option.state &= ~QStyle.StateFlag.State_MouseOver
+        return clean_option
+
+    def paint(self, painter, option, index) -> None:
+        # Даже без QSS Qt/Windows рисует собственную рамку MouseOver вокруг
+        # ячейки. Перед базовой отрисовкой явно убираем это состояние.
+        clean_option = self._without_hover(option)
+        super().paint(painter, clean_option, index)
 
 
 def _powershell_literal(value: str) -> str:
@@ -219,6 +245,8 @@ class ManualMatchReviewDialog(QDialog):
         self.setMinimumSize(1000, 520)
         self._decisions: dict[int, bool | None] = {result_index: None for result_index, _result in rows}
         self._action_buttons: dict[int, tuple[QPushButton, QPushButton]] = {}
+        self._action_containers: dict[int, QWidget] = {}
+        self._result_table_rows: dict[int, int] = {}
         self._decision_group_keys: dict[int, str] = {}
         self._decision_groups: dict[str, list[int]] = {}
         self._source_locations: dict[int, tuple[str, str, int]] = {}
@@ -274,12 +302,14 @@ class ManualMatchReviewDialog(QDialog):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setWordWrap(True)
+        self.table.setItemDelegate(_ReviewDecisionDelegate(self._decisions, self.table))
 
         for row, (result_index, result) in enumerate(rows):
-            identity = review_identity(result)
-            if identity is not None:
-                self._decision_group_keys[result_index] = identity.key
-                self._decision_groups.setdefault(identity.key, []).append(result_index)
+            self._result_table_rows[result_index] = row
+            group_key = review_group_key(result)
+            if group_key is not None:
+                self._decision_group_keys[result_index] = group_key
+                self._decision_groups.setdefault(group_key, []).append(result_index)
 
             confirm_button = QPushButton("Подтвердить")
             confirm_button.setObjectName("primaryButton")
@@ -299,6 +329,7 @@ class ManualMatchReviewDialog(QDialog):
             action_layout.addWidget(confirm_button)
             action_layout.addWidget(remove_button)
             self.table.setCellWidget(row, 0, action_container)
+            self._action_containers[result_index] = action_container
 
             record = result.database
             foreign = result.foreign_agent
@@ -354,6 +385,7 @@ class ManualMatchReviewDialog(QDialog):
                 tooltip += "\n\nИсходные данные строки:\n" + raw_source
             for column, value in enumerate(values, start=1):
                 item = QTableWidgetItem(str(value))
+                item.setData(Qt.ItemDataRole.UserRole, result_index)
                 item.setToolTip(tooltip)
                 if column == self._source_column:
                     font = item.font()
@@ -369,7 +401,7 @@ class ManualMatchReviewDialog(QDialog):
             for result_index in group_members:
                 confirm_button, _remove_button = self._action_buttons[result_index]
                 confirm_button.setToolTip(
-                    f"Подтвердить этого автора сразу во всех одинаковых найденных записях: {len(group_members)}"
+                    f"Подтвердить сразу все одинаковые найденные экземпляры: {len(group_members)}"
                 )
 
         self.table.cellClicked.connect(self._on_cell_clicked)
@@ -438,13 +470,42 @@ class ManualMatchReviewDialog(QDialog):
 
     def _set_single_decision(self, result_index: int, approved: bool) -> None:
         self._decisions[result_index] = approved
-        confirm_button, remove_button = self._action_buttons[result_index]
         if approved:
+            confirm_button, remove_button = self._action_buttons[result_index]
             confirm_button.setText("✓ Подтверждено")
             remove_button.setText("Убрать")
+            container = self._action_containers[result_index]
+            container.setObjectName("approvedReviewActionCell")
+            container.style().unpolish(container)
+            container.style().polish(container)
+            table_row = self._result_table_rows.get(result_index)
+            if table_row is not None:
+                fill = review_approved_fill_color()
+                for column in range(1, self.table.columnCount()):
+                    item = self.table.item(table_row, column)
+                    if item is not None:
+                        item.setBackground(fill)
+            self.table.viewport().update()
         else:
-            confirm_button.setText("Подтвердить")
-            remove_button.setText("✓ Убрано")
+            self._remove_result_row(result_index)
+
+    def _remove_result_row(self, result_index: int) -> None:
+        """Удаляет отклонённую строку из таблицы, сохраняя принятое решение."""
+        row = self._result_table_rows.pop(result_index, None)
+        if row is None:
+            return
+        self.table.removeRow(row)
+        self._action_buttons.pop(result_index, None)
+        self._action_containers.pop(result_index, None)
+        self._source_locations.pop(row, None)
+
+        shifted_locations: dict[int, tuple[str, str, int]] = {}
+        for table_row, source in self._source_locations.items():
+            shifted_locations[table_row - 1 if table_row > row else table_row] = source
+        self._source_locations = shifted_locations
+        for member_index, table_row in list(self._result_table_rows.items()):
+            if table_row > row:
+                self._result_table_rows[member_index] = table_row - 1
 
     def _set_decision(self, result_index: int, approved: bool) -> None:
         # Подтверждение распространяем только на действительно одну и ту же пару
@@ -455,7 +516,8 @@ class ManualMatchReviewDialog(QDialog):
             group_members = self._decision_groups.get(group_key, []) if group_key else []
             if group_members:
                 for member_index in group_members:
-                    self._set_single_decision(member_index, True)
+                    if member_index in self._result_table_rows:
+                        self._set_single_decision(member_index, True)
             else:
                 self._set_single_decision(result_index, True)
         else:
@@ -653,6 +715,8 @@ class ConfirmationMemoryDialog(QDialog):
 
 # Показывает прогресс и журнал, не позволяя случайно закрыть активную операцию.
 class ProgressDialog(QDialog):
+    cancel_requested = pyqtSignal()
+
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
@@ -668,12 +732,19 @@ class ProgressDialog(QDialog):
         self.status_label = QLabel("Ожидание...")
         root.addWidget(self.status_label)
 
+        self.progress_label = QLabel("Выполнено: 0%")
+        self.progress_label.setObjectName("progressValueLabel")
+        self.progress_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(self.progress_label)
+
         self.progress = QProgressBar()
         self.progress.setObjectName("dialogProgress")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setFormat("Выполнено: %p%")
-        self.progress.setTextVisible(True)
+        # На Windows нативный стиль рисует встроенный текст поверх тонкой
+        # полосы индикатора. Процент показывается отдельной строкой выше.
+        self.progress.setTextVisible(False)
         root.addWidget(self.progress)
 
         self.text_edit = QTextEdit()
@@ -682,15 +753,23 @@ class ProgressDialog(QDialog):
         self.text_edit.setPlaceholderText("Здесь будет отображаться ход выполнения.")
         root.addWidget(self.text_edit, 1)
 
+        self.cancel_button = QPushButton("Отменить")
+        self.cancel_button.setObjectName("mutedButton")
+        self.cancel_button.clicked.connect(self._request_cancel)
+        self.cancel_button.hide()
         self.close_button = QPushButton("Закрыть")
+        self.close_button.setObjectName("primaryButton")
         self.close_button.clicked.connect(self.hide)
         bottom = QHBoxLayout()
+        bottom.addWidget(self.cancel_button)
         bottom.addStretch()
         bottom.addWidget(self.close_button)
         root.addLayout(bottom)
 
-    def start(self, text: str) -> None:
+    def start(self, text: str, *, cancellable: bool = False) -> None:
         self.clear()
+        self.cancel_button.setVisible(cancellable)
+        self.cancel_button.setEnabled(cancellable)
         self.set_running(True)
         self.set_progress(0, text)
         self.show()
@@ -700,9 +779,20 @@ class ProgressDialog(QDialog):
 
     def set_running(self, running: bool) -> None:
         self.close_button.setEnabled(not running)
+        if not running:
+            self.cancel_button.setEnabled(False)
+
+    def _request_cancel(self) -> None:
+        if not self.cancel_button.isEnabled():
+            return
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("Отмена запрошена…")
+        self.cancel_requested.emit()
 
     def set_progress(self, percent: int, text: str) -> None:
-        self.progress.setValue(max(0, min(100, percent)))
+        value = max(0, min(100, percent))
+        self.progress.setValue(value)
+        self.progress_label.setText(f"Выполнено: {value}%")
         self.status_label.setText(text)
 
     def append_line(self, text: str) -> None:
@@ -712,6 +802,7 @@ class ProgressDialog(QDialog):
     def clear(self) -> None:
         self.text_edit.clear()
         self.progress.setValue(0)
+        self.progress_label.setText("Выполнено: 0%")
         self.status_label.setText("Ожидание...")
 
     def finish(self, text: str, percent: int = 100) -> None:
@@ -730,6 +821,10 @@ DEFAULT_USEFUL_LINKS = [
     {
         "title": "Рекомендации по выявлению запрещённой литературы — РГБ",
         "url": "https://nkp.rsl.ru/drug-literature-recommendations",
+    },
+    {
+        "title": "Реестр изданий иностранных агентов — НКП РГБ",
+        "url": "https://nkp.rsl.ru/foreign-agents-registry",
     },
     {
         "title": "Экспертный совет Российского книжного союза",

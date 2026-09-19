@@ -18,6 +18,8 @@ class ApplicationSettings:
     create_database_backup: bool = True
     check_updates_on_start: bool = True
     theme: str = THEME_SYSTEM
+    use_nkp_drug_registry: bool = True
+    use_nkp_foreign_agents_registry: bool = True
 
 
 # Читает настройки по пути и возвращает безопасные значения, если файл повреждён или имеет неверную структуру.
@@ -42,17 +44,25 @@ def load_application_settings(path: str | Path) -> ApplicationSettings:
     theme = payload.get("theme", THEME_SYSTEM)
     if theme not in VALID_THEMES:
         theme = THEME_SYSTEM
+    use_nkp_drug = payload.get("use_nkp_drug_registry", True)
+    if not isinstance(use_nkp_drug, bool):
+        use_nkp_drug = True
+    use_nkp_foreign = payload.get("use_nkp_foreign_agents_registry", True)
+    if not isinstance(use_nkp_foreign, bool):
+        use_nkp_foreign = True
     return ApplicationSettings(
         create_database_backup=create_backup,
         check_updates_on_start=check_updates,
         theme=theme,
+        use_nkp_drug_registry=use_nkp_drug,
+        use_nkp_foreign_agents_registry=use_nkp_foreign,
     )
 
 
 # Принимает путь и настройки, сохраняет их целиком и возвращает путь к готовому файлу.
 def save_application_settings(path: str | Path, settings: ApplicationSettings) -> Path:
     payload = asdict(settings)
-    payload["schema_version"] = 2
+    payload["schema_version"] = 3
     return atomic_write_text(
         path,
         json.dumps(payload, ensure_ascii=False, indent=2),
