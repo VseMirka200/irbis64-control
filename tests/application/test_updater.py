@@ -48,6 +48,19 @@ class UpdaterTests(unittest.TestCase):
             with self.assertRaisesRegex(UpdateError, "GitHub не нашёл опубликованный релиз"):
                 fetch_latest_release()
 
+    def test_missing_release_falls_back_to_main_branch_version(self) -> None:
+        error = urllib.error.HTTPError("https://api.github.com", 404, "Not Found", {}, None)
+        pyproject = b'[project]\nname = "irbis64-control"\nversion = "1.2.3"\n'
+        with patch(
+            "irbis_control.application.updater.urllib.request.urlopen",
+            side_effect=[error, FakeResponse(pyproject)],
+        ):
+            release = fetch_latest_release()
+
+        self.assertEqual("1.2.3", release.version)
+        self.assertEqual((), release.assets)
+        self.assertIn("основной ветки", release.notes)
+
     def test_other_http_errors_are_not_reported_as_missing_release(self) -> None:
         error = urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None)
         with patch("irbis_control.application.updater.urllib.request.urlopen", side_effect=error):

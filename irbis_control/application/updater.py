@@ -18,6 +18,7 @@ from irbis_control.infrastructure.atomic_io import atomic_write_text
 
 GITHUB_REPOSITORY_URL = "https://github.com/VseMirka200/irbis64-control"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/VseMirka200/irbis64-control/releases/latest"
+GITHUB_MAIN_PYPROJECT_URL = "https://raw.githubusercontent.com/VseMirka200/irbis64-control/main/pyproject.toml"
 _TRUSTED_DOWNLOAD_HOSTS = {
     "github.com",
     "objects.githubusercontent.com",
@@ -60,6 +61,35 @@ def is_newer_version(latest: str, current: str) -> bool:
     return latest_parts + (0,) * (length - len(latest_parts)) > current_parts + (0,) * (length - len(current_parts))
 
 
+
+def _fetch_repository_version(*, timeout: float = 15.0) -> GitHubRelease:
+    """Возвращает версию main-ветки, если GitHub Release ещё не опубликован."""
+    request = urllib.request.Request(
+        GITHUB_MAIN_PYPROJECT_URL,
+        headers={"User-Agent": "IRBIS64Control-Updater"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            text = response.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        raise UpdateError(
+            "GitHub не нашёл опубликованный релиз приложения, а версию main-ветки получить не удалось.\n\n"
+            f"Страница проекта: {GITHUB_REPOSITORY_URL}"
+        ) from exc
+
+    match = re.search(r'(?m)^\s*version\s*=\s*["\']([^"\']+)["\']\s*$', text)
+    if not match:
+        raise UpdateError("Не удалось определить версию приложения в pyproject.toml на GitHub.")
+    return GitHubRelease(
+        version=match.group(1).strip(),
+        page_url=GITHUB_REPOSITORY_URL,
+        notes=(
+            "На GitHub обнаружена версия из основной ветки проекта. "
+            "Отдельный установочный релиз для неё пока не опубликован."
+        ),
+        assets=(),
+    )
+
 def fetch_latest_release(*, timeout: float = 15.0) -> GitHubRelease:
     request = urllib.request.Request(
         GITHUB_LATEST_RELEASE_API,
@@ -74,11 +104,10 @@ def fetch_latest_release(*, timeout: float = 15.0) -> GitHubRelease:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
-            raise UpdateError(
-                "GitHub не нашёл опубликованный релиз приложения. "
-                "Возможно, релизы ещё не опубликованы или репозиторий недоступен.\n\n"
-                f"Страница релизов: {GITHUB_REPOSITORY_URL}/releases"
-            ) from exc
+            # В репозитории релизов может ещё не быть. В таком случае проверяем
+            # версию основной ветки, чтобы автопроверка при запуске не завершалась
+            # ошибкой и всё равно могла сообщить о более новом коде.
+            return _fetch_repository_version(timeout=timeout)
         raise
 
     version = str(payload.get("tag_name") or payload.get("name") or "").strip()

@@ -168,8 +168,7 @@ def save_marker_settings(settings: dict[str, str | int | bool]) -> None:
 
 # Проверяет значения служебных полей перед сохранением настроек меток.
 class ApplicationSettingsPage(QWidget):
-    saved = pyqtSignal(object)
-    cancelled = pyqtSignal()
+    settings_changed = pyqtSignal(object)
 
     def __init__(
         self,
@@ -185,8 +184,8 @@ class ApplicationSettingsPage(QWidget):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(7)
 
-        # Содержимое настроек прокручивается отдельно, а footer остаётся
-        # закреплённым снизу. Так кнопки действий не уезжают при прокрутке.
+        # Содержимое настроек прокручивается целиком; отдельного footer больше нет,
+        # потому что все значения сохраняются автоматически.
         self.content_scroll = QScrollArea()
         self.content_scroll.setObjectName("settingsScroll")
         self.content_scroll.setWidgetResizable(True)
@@ -242,7 +241,7 @@ class ApplicationSettingsPage(QWidget):
         sources_card.body.addWidget(self.nkp_drug_check)
         sources_card.body.addWidget(self.nkp_foreign_check)
 
-        # Кэш — два самостоятельных действия во всю ширину карточки.
+        # Кэш — два равноправных действия в одной строке на всю ширину карточки.
         self.open_registry_cache_button = QPushButton("Открыть кэш")
         self.open_registry_cache_button.setObjectName("mutedButton")
         self.open_registry_cache_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -252,8 +251,12 @@ class ApplicationSettingsPage(QWidget):
         if parent is not None:
             self.open_registry_cache_button.clicked.connect(parent.open_registry_cache_folder)
             self.clear_registry_cache_button.clicked.connect(parent.clear_registry_cache)
-        sources_card.body.addWidget(self.open_registry_cache_button)
-        sources_card.body.addWidget(self.clear_registry_cache_button)
+        cache_actions = QHBoxLayout()
+        cache_actions.setContentsMargins(0, 0, 0, 0)
+        cache_actions.setSpacing(7)
+        cache_actions.addWidget(self.open_registry_cache_button, 1)
+        cache_actions.addWidget(self.clear_registry_cache_button, 1)
+        sources_card.body.addLayout(cache_actions)
 
         updates_card = SectionCard("Обновления")
         layout.addWidget(updates_card)
@@ -276,35 +279,41 @@ class ApplicationSettingsPage(QWidget):
         layout.addLayout(info_actions)
         layout.addStretch()
 
-        # Нижний колонтитул всегда остаётся на месте независимо от прокрутки.
-        self.footer = QFrame()
-        self.footer.setObjectName("settingsFooter")
-        footer_layout = QHBoxLayout(self.footer)
-        footer_layout.setContentsMargins(0, 7, 0, 0)
-        footer_layout.setSpacing(7)
-        self.reset_settings_button = QPushButton("По умолчанию")
-        self.reset_settings_button.setObjectName("mutedButton")
-        self.reset_settings_button.setToolTip("Вернуть рекомендуемые настройки; изменения применятся после сохранения")
-        self.reset_settings_button.clicked.connect(self._reset_defaults)
-        self.save_settings_button = QPushButton("Сохранить")
-        self.save_settings_button.setObjectName("primaryButton")
-        self.save_settings_button.clicked.connect(self._save)
-        self.cancel_settings_button = QPushButton("Отмена")
-        self.cancel_settings_button.setObjectName("mutedButton")
-        self.cancel_settings_button.clicked.connect(self.cancelled.emit)
-        footer_layout.addWidget(self.reset_settings_button)
-        footer_layout.addStretch()
-        footer_layout.addWidget(self.save_settings_button)
-        footer_layout.addWidget(self.cancel_settings_button)
-        root.addWidget(self.footer, 0)
+        # Настройки применяются и сохраняются сразу после изменения.
+        self.backup_check.toggled.connect(self._backup_setting_toggled)
+        self.auto_updates_check.toggled.connect(self._emit_settings_changed)
+        self.theme_combo.currentIndexChanged.connect(self._emit_settings_changed)
+        self.nkp_drug_check.toggled.connect(self._emit_settings_changed)
+        self.nkp_foreign_check.toggled.connect(self._emit_settings_changed)
 
-    def _reset_defaults(self) -> None:
-        defaults = ApplicationSettings()
-        self.backup_check.setChecked(defaults.create_database_backup)
-        self.auto_updates_check.setChecked(defaults.check_updates_on_start)
-        self.theme_combo.setCurrentIndex(self.theme_combo.findData(defaults.theme))
-        self.nkp_drug_check.setChecked(defaults.use_nkp_drug_registry)
-        self.nkp_foreign_check.setChecked(defaults.use_nkp_foreign_agents_registry)
+    def _current_settings(self) -> ApplicationSettings:
+        return ApplicationSettings(
+            create_database_backup=self.backup_check.isChecked(),
+            check_updates_on_start=self.auto_updates_check.isChecked(),
+            theme=str(self.theme_combo.currentData()),
+            use_nkp_drug_registry=self.nkp_drug_check.isChecked(),
+            use_nkp_foreign_agents_registry=self.nkp_foreign_check.isChecked(),
+        )
+
+    def _backup_setting_toggled(self, checked: bool) -> None:
+        if not checked:
+            answer = QMessageBox.warning(
+                self,
+                APP_TITLE,
+                "Без резервной копии частично выполненную запись нельзя будет безопасно откатить. "
+                "Всё равно отключить создание копии?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                self.backup_check.blockSignals(True)
+                self.backup_check.setChecked(True)
+                self.backup_check.blockSignals(False)
+                return
+        self._emit_settings_changed()
+
+    def _emit_settings_changed(self, *_args: object) -> None:
+        self.settings_changed.emit(self._current_settings())
 
     def _show_about(self) -> None:
         dialog = QDialog(self)
@@ -362,26 +371,6 @@ class ApplicationSettingsPage(QWidget):
         """)
         root.addWidget(about_page)
         dialog.exec()
-
-    def _save(self) -> None:
-        if not self.backup_check.isChecked():
-            answer = QMessageBox.warning(
-                self,
-                APP_TITLE,
-                "Без резервной копии частично выполненную запись нельзя будет безопасно откатить. "
-                "Всё равно отключить создание копии?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        settings = ApplicationSettings(
-            create_database_backup=self.backup_check.isChecked(),
-            check_updates_on_start=self.auto_updates_check.isChecked(),
-            theme=str(self.theme_combo.currentData()),
-            use_nkp_drug_registry=self.nkp_drug_check.isChecked(),
-            use_nkp_foreign_agents_registry=self.nkp_foreign_check.isChecked(),
-        )
-        self.saved.emit(settings)
 
 
 # Связывает вкладки, настройки и фоновые операции, сохраняя состояние текущего запуска.
@@ -521,22 +510,6 @@ class MainWindow(
             self.journal_filter_combo.setCurrentIndex(journal_index)
         self.journal_search_edit.setText(str(ui.get("journal_search", "") or ""))
 
-        settings_draft = ui.get("settings_draft", {})
-        if isinstance(settings_draft, dict):
-            page = self.application_settings_page
-            if isinstance(settings_draft.get("create_database_backup"), bool):
-                page.backup_check.setChecked(settings_draft["create_database_backup"])
-            if isinstance(settings_draft.get("check_updates_on_start"), bool):
-                page.auto_updates_check.setChecked(settings_draft["check_updates_on_start"])
-            theme = str(settings_draft.get("theme", "") or "")
-            theme_index = page.theme_combo.findData(theme)
-            if theme_index >= 0:
-                page.theme_combo.setCurrentIndex(theme_index)
-            if isinstance(settings_draft.get("use_nkp_drug_registry"), bool):
-                page.nkp_drug_check.setChecked(settings_draft["use_nkp_drug_registry"])
-            if isinstance(settings_draft.get("use_nkp_foreign_agents_registry"), bool):
-                page.nkp_foreign_check.setChecked(settings_draft["use_nkp_foreign_agents_registry"])
-
         positions = ui.get("workflow_scroll_positions", {})
         if isinstance(positions, dict):
             self._workflow_scroll_positions = {
@@ -661,13 +634,6 @@ class MainWindow(
                 "modified_database_path": self.modified_database_edit.text().strip(),
                 "journal_filter": str(self.journal_filter_combo.currentData() or "all"),
                 "journal_search": self.journal_search_edit.text(),
-                "settings_draft": {
-                    "create_database_backup": self.application_settings_page.backup_check.isChecked(),
-                    "check_updates_on_start": self.application_settings_page.auto_updates_check.isChecked(),
-                    "theme": str(self.application_settings_page.theme_combo.currentData() or THEME_SYSTEM),
-                    "use_nkp_drug_registry": self.application_settings_page.nkp_drug_check.isChecked(),
-                    "use_nkp_foreign_agents_registry": self.application_settings_page.nkp_foreign_check.isChecked(),
-                },
             },
         }
         path = window_state_path()
@@ -686,13 +652,9 @@ class MainWindow(
         ConfirmationMemoryDialog(manual_review_memory_path(), self).exec()
 
     def open_application_settings(self) -> None:
-        page = self.application_settings_page
-        page.backup_check.setChecked(self.app_settings.create_database_backup)
-        page.auto_updates_check.setChecked(self.app_settings.check_updates_on_start)
-        page.theme_combo.setCurrentIndex(page.theme_combo.findData(self.app_settings.theme))
-        page.nkp_drug_check.setChecked(self.app_settings.use_nkp_drug_registry)
-        page.nkp_foreign_check.setChecked(self.app_settings.use_nkp_foreign_agents_registry)
-        self.workflow_tabs.setCurrentWidget(page)
+        # Страница постоянно отражает сохранённое состояние: изменения
+        # применяются сразу и не требуют отдельной кнопки подтверждения.
+        self.workflow_tabs.setCurrentWidget(self.application_settings_page)
         self.marker_settings_button.setChecked(True)
 
     def _settings_navigation_changed(self, _index: int) -> None:
@@ -702,15 +664,17 @@ class MainWindow(
             self._settings_return_page = current
 
     def _save_application_settings(self, settings: ApplicationSettings) -> None:
+        # Live-save: изменение сразу применяется и атомарно записывается на диск.
         try:
             save_application_settings(application_settings_path(), settings)
         except Exception as exc:
             QMessageBox.warning(
                 self,
                 APP_TITLE,
-                f"Не удалось сохранить настройки приложения:\n{exc}",
+                f"Не удалось автоматически сохранить настройки приложения:\n{exc}",
             )
             return
+        previous_theme = self.app_settings.theme
         self.app_settings = settings
         if hasattr(self, "nkp_live_check"):
             self.nkp_live_check.blockSignals(True)
@@ -721,20 +685,14 @@ class MainWindow(
             self.nkp_foreign_live_check.setChecked(settings.use_nkp_foreign_agents_registry)
             self.nkp_foreign_live_check.blockSignals(False)
         self._update_nkp_source_controls()
-        app = QApplication.instance()
-        if app is not None:
-            apply_application_theme(app, settings.theme)
-        self._apply_style()
-        self._set_status("Настройки приложения сохранены", "idle")
-        self._close_application_settings()
+        if previous_theme != settings.theme:
+            app = QApplication.instance()
+            if app is not None:
+                apply_application_theme(app, settings.theme)
+            self._apply_style()
+        self._set_status("Настройки сохранены автоматически", "idle")
 
     def _close_application_settings(self) -> None:
-        page = self.application_settings_page
-        page.backup_check.setChecked(self.app_settings.create_database_backup)
-        page.auto_updates_check.setChecked(self.app_settings.check_updates_on_start)
-        page.theme_combo.setCurrentIndex(page.theme_combo.findData(self.app_settings.theme))
-        page.nkp_drug_check.setChecked(self.app_settings.use_nkp_drug_registry)
-        page.nkp_foreign_check.setChecked(self.app_settings.use_nkp_foreign_agents_registry)
         self.workflow_tabs.setCurrentWidget(self._settings_return_page)
 
     def _cancel_current_comparison(self) -> None:
@@ -810,8 +768,12 @@ class MainWindow(
             QMessageBox.warning(self, APP_TITLE, f"Не удалось сохранить выбор источников НКП:\n{exc}")
         page = getattr(self, "application_settings_page", None)
         if page is not None:
+            page.nkp_drug_check.blockSignals(True)
+            page.nkp_foreign_check.blockSignals(True)
             page.nkp_drug_check.setChecked(self.app_settings.use_nkp_drug_registry)
             page.nkp_foreign_check.setChecked(self.app_settings.use_nkp_foreign_agents_registry)
+            page.nkp_drug_check.blockSignals(False)
+            page.nkp_foreign_check.blockSignals(False)
 
     def open_nkp_registry_page(self, registry: str) -> None:
         url = NKP_FOREIGN_AGENTS_PAGE_URL if registry == "foreign" else NKP_DRUG_PAGE_URL

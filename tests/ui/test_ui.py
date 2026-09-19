@@ -111,14 +111,14 @@ class UiTests(unittest.TestCase):
         self.assertTrue(window._irbis_state_container.isHidden())
 
         settings_page = window.application_settings_page
-        settings_page.backup_check.setChecked(False)
+        self.assertFalse(hasattr(settings_page, "reset_settings_button"))
+        self.assertFalse(hasattr(settings_page, "save_settings_button"))
+        self.assertFalse(hasattr(settings_page, "cancel_settings_button"))
         settings_page.auto_updates_check.setChecked(False)
         settings_page.theme_combo.setCurrentIndex(settings_page.theme_combo.findData(THEME_DARK))
-        settings_page.reset_settings_button.click()
-        defaults = ApplicationSettings()
-        self.assertEqual(settings_page.backup_check.isChecked(), defaults.create_database_backup)
-        self.assertEqual(settings_page.auto_updates_check.isChecked(), defaults.check_updates_on_start)
-        self.assertEqual(settings_page.theme_combo.currentData(), THEME_SYSTEM)
+        self.app.processEvents()
+        self.assertFalse(window.app_settings.check_updates_on_start)
+        self.assertEqual(window.app_settings.theme, THEME_DARK)
 
     def test_match_rules_editor_is_managed_by_card_layout(self) -> None:
         window = main_window.MainWindow()

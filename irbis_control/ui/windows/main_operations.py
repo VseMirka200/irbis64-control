@@ -31,7 +31,7 @@ from irbis_control.core.matcher import (
 )
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.infrastructure.irbis_bridge import load_manifest
-from irbis_control.ui.components.dialogs import ResultComparisonDialog
+from irbis_control.ui.components.dialogs import ResultComparisonDialog, UpdateAvailableDialog
 from irbis_control.ui.services.workers import IrbisOperationWorker, UpdateWorker
 from irbis_control.ui.windows.connection_dialog import IrbisConnectionDialog
 
@@ -630,41 +630,19 @@ class MainWindowOperationsMixin:
             return
 
         asset = select_windows_asset(release)
-        if asset is None:
-            answer = QMessageBox.information(
-                self,
-                APP_TITLE,
-                f"Доступна версия {release.version}, но в релизе нет установочного "
-                "EXE или ZIP для Windows. Открыть страницу релиза?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                QDesktopServices.openUrl(QUrl(release.page_url))
-            return
-
-        if not getattr(sys, "frozen", False):
-            answer = QMessageBox.information(
-                self,
-                APP_TITLE,
-                f"Доступна версия {release.version}. Автоустановка работает в EXE-сборке. Открыть страницу релиза?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                QDesktopServices.openUrl(QUrl(release.page_url))
-            return
-
-        size_mb = asset.size / 1024 / 1024 if asset.size else 0
-        size_text = f" ({size_mb:.1f} МБ)" if size_mb else ""
-        answer = QMessageBox.question(
-            self,
-            APP_TITLE,
-            f"Доступно обновление: {release.version}\n"
-            f"Текущая версия: {APP_VERSION}\n"
-            f"Файл: {asset.name}{size_text}\n\n"
-            "Скачать и установить обновление?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        can_install = asset is not None and getattr(sys, "frozen", False)
+        dialog = UpdateAvailableDialog(
+            current_version=APP_VERSION,
+            release_version=release.version,
+            release_notes=release.notes,
+            page_url=release.page_url,
+            asset_name=asset.name if asset is not None else "",
+            asset_size=asset.size if asset is not None else 0,
+            can_install=can_install,
+            parent=self,
         )
-        if answer == QMessageBox.StandardButton.Yes:
+        dialog.exec()
+        if dialog.install_requested and asset is not None:
             self._pending_update_asset = asset
 
     @pyqtSlot(str)
@@ -680,7 +658,7 @@ class MainWindowOperationsMixin:
         self.update_thread = None
         self.update_worker = None
         self.update_button.setEnabled(True)
-        self.update_button.setText("Проверить обновление")
+        self.update_button.setText("Проверить обновления")
         pending = self._pending_update_asset
         self._pending_update_asset = None
         if pending is not None:

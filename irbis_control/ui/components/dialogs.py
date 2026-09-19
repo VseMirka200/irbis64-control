@@ -1484,3 +1484,85 @@ class TextComparisonDialog(QDialog):
             QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_output_path))
         else:
             QMessageBox.warning(self, APP_TITLE, "Файл отчёта не найден.")
+
+
+class UpdateAvailableDialog(QDialog):
+    """Единое окно доступного обновления с заметками релиза и явными действиями."""
+
+    def __init__(
+        self,
+        *,
+        current_version: str,
+        release_version: str,
+        release_notes: str,
+        page_url: str,
+        asset_name: str = "",
+        asset_size: int = 0,
+        can_install: bool = False,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.install_requested = False
+        self.page_url = page_url
+        self.setWindowTitle(f"Доступно обновление — {APP_TITLE}")
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
+        self.setModal(True)
+        self.resize(620, 500)
+        self.setMinimumSize(500, 380)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(9)
+
+        title = QLabel(f"Доступна версия {release_version}")
+        title.setObjectName("mainTitle")
+        title.setWordWrap(True)
+        root.addWidget(title)
+
+        details = [f"Установлена версия: {current_version}"]
+        if asset_name:
+            size_text = f" · {asset_size / 1024 / 1024:.1f} МБ" if asset_size else ""
+            details.append(f"Файл обновления: {asset_name}{size_text}")
+        info = QLabel("\n".join(details))
+        info.setObjectName("cardDescription")
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        notes_label = QLabel("Что изменилось")
+        notes_label.setObjectName("fieldLabel")
+        root.addWidget(notes_label)
+
+        notes = QTextEdit()
+        notes.setReadOnly(True)
+        notes.setObjectName("updateReleaseNotes")
+        notes.setPlainText(release_notes.strip() or "Для этого релиза описание изменений не опубликовано.")
+        root.addWidget(notes, 1)
+
+        actions = QHBoxLayout()
+        actions.setSpacing(7)
+        later_button = QPushButton("Позже")
+        later_button.setObjectName("mutedButton")
+        later_button.clicked.connect(self.reject)
+        actions.addWidget(later_button)
+        actions.addStretch(1)
+
+        page_button = QPushButton("Открыть страницу релиза")
+        page_button.setObjectName("mutedButton")
+        page_button.clicked.connect(self._open_release_page)
+        actions.addWidget(page_button)
+
+        if can_install:
+            install_button = QPushButton("Скачать и установить")
+            install_button.setObjectName("primaryButton")
+            install_button.clicked.connect(self._request_install)
+            install_button.setDefault(True)
+            actions.addWidget(install_button)
+        root.addLayout(actions)
+
+    def _open_release_page(self) -> None:
+        if self.page_url:
+            QDesktopServices.openUrl(QUrl(self.page_url))
+
+    def _request_install(self) -> None:
+        self.install_requested = True
+        self.accept()

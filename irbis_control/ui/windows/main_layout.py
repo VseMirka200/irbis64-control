@@ -361,8 +361,7 @@ class MainWindowLayoutMixin:
         # Раньше для фонового обновления существовала вторая, постоянно скрытая
         # кнопка в старой шапке главного окна.
         self.update_button = self.application_settings_page.check_updates_button
-        self.application_settings_page.saved.connect(self._save_application_settings)
-        self.application_settings_page.cancelled.connect(self._close_application_settings)
+        self.application_settings_page.settings_changed.connect(self._save_application_settings)
         settings_index = self.workflow_tabs.addTab(self.application_settings_page, "Настройки")
         self.workflow_tabs.setTabVisible(settings_index, False)
         self._settings_return_page = self.data_tab
