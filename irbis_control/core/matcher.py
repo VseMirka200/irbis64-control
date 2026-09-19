@@ -9,6 +9,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -76,6 +77,8 @@ class ExcelEntry:
     isbn: str = ""
     registration_number: str = ""
     raw_data: dict[str, Any] = field(default_factory=dict)
+    publisher: str = ""
+    year: str = ""
 
 
 @dataclass
@@ -147,6 +150,8 @@ class MarkerApplicationStats:
 
 
 HEADER_SYNONYMS = {
+    "publisher": {"издательство", "издатель", "наименование издательства", "publisher", "publishing house"},
+    "year": {"год", "год издания", "год выпуска", "год публикации", "year", "publication year"},
     "author": {
         "автор", "авторы", "фио автора", "author", "authors",
     },
@@ -184,6 +189,53 @@ FOREIGN_AGENT_HEADER_SYNONYMS = {
 }
 
 SOURCE_SUBSTANCES = "Вещества"
+MATCH_FIELDS = {
+    "isbn": "ISBN", "title": "Название", "author": "автор", "publisher": "издательство", "year": "год",
+}
+EXTRA_MATCH_RULES = {
+    "_".join(fields): (" + ".join(MATCH_FIELDS[key] for key in fields), fields)
+    for size in range(2, len(MATCH_FIELDS) + 1)
+    for fields in combinations(MATCH_FIELDS, size)
+    if {"isbn", "title", "author"}.intersection(fields) and fields != ("title", "author")
+}
+MATCH_RULE_LABELS = {
+    "use_isbn_matching": "ISBN",
+    "use_title_fallback": "Название + автор",
+    **{key: label for key, (label, _fields) in EXTRA_MATCH_RULES.items()},
+}
+
+
+def match_rule_needs_review(fields: tuple[str, ...]) -> bool:
+    return not (
+        "isbn" in fields
+        or "title" in fields and ("author" in fields or {"publisher", "year"}.issubset(fields))
+    )
+
+
+def parse_match_rule(value: str) -> str:
+    """Parse a field combination; never interpret input as executable code."""
+    parts = re.split(r"[+,]", unicodedata.normalize("NFKC", value).strip())
+    if not value.strip() or any(not part.strip() for part in parts):
+        raise ValueError("Введите поля через +, например: Название + издательство + год.")
+    fields: set[str] = set()
+    for part in parts:
+        normalized = normalize_header(part)
+        key = next((key for key in MATCH_FIELDS if normalized in {
+            normalize_header(alias) for alias in HEADER_SYNONYMS[key]
+        }), None)
+        if key is None:
+            raise ValueError(f"Неизвестное поле «{part.strip()}». Доступны: ISBN, название, автор, издательство, год.")
+        if key in fields:
+            raise ValueError(f"Поле «{MATCH_FIELDS[key]}» указано дважды.")
+        fields.add(key)
+    if fields == {"isbn"}:
+        return "use_isbn_matching"
+    if fields == {"title", "author"}:
+        return "use_title_fallback"
+    key = "_".join(field for field in MATCH_FIELDS if field in fields)
+    if key not in EXTRA_MATCH_RULES:
+        raise ValueError("Выберите ISBN либо название или автора с другим полем. Одного автора, года или издательства недостаточно.")
+    return key
 SOURCE_FOREIGN_AGENTS = "Иностранные агенты"
 DEFAULT_SUBSTANCE_MARKER = "^AIII"
 DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE = "^AI^@{name}"
@@ -311,6 +363,18 @@ def _author_identity(value: Any) -> tuple[str, tuple[str, ...]] | None:
 def author_surname(value: Any) -> str:
     identity = _author_identity(value)
     return identity[0] if identity else ""
+
+
+def normalize_publication_year(value: Any) -> str:
+    match = re.fullmatch(r"\[?(\d{4})\]?(?:\s*г(?:од)?\.?)?", safe_text(value), re.IGNORECASE)
+    return match.group(1) if match else ""
+
+
+def normalize_publisher(value: Any) -> str:
+    normalized = normalize_header(value)
+    if normalized in {"нет", "не указано", "не указан", "неизвестно", "б и", "без издательства", "unknown", "na", "n a"}:
+        return ""
+    return normalized
 
 
 def _extract_subfield(value: str, code: str) -> str:
@@ -460,7 +524,7 @@ def _detect_header(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, int], li
                 if normalized in normalized_synonyms and key not in mapping:
                     mapping[key] = column
                     break
-        score = len(mapping)
+        score = len(mapping) if any(key in mapping for key in ("isbn", "title", "author")) else 0
         if score > best_score:
             best_score = score
             best_row = row_index
@@ -511,6 +575,8 @@ def _make_entry(
         isbn=isbn,
         registration_number=get("registration_number"),
         raw_data=raw_data,
+        publisher=get("publisher"),
+        year=get("year"),
     )
 
 
@@ -604,6 +670,8 @@ def _deduplicate_cross_sheet_entries(entries: list[ExcelEntry]) -> tuple[list[Ex
             normalize_title(entry.title),
             tuple(extract_isbns(entry.isbn)),
             normalize_header(entry.registration_number),
+            normalize_header(entry.publisher),
+            normalize_publication_year(entry.year) or safe_text(entry.year),
         )
         first_sheet = first_sheet_by_key.get(key)
         if first_sheet is None:
@@ -1072,6 +1140,7 @@ def compare_substance_entries(
     fuzzy_threshold: int,
     progress_cb: Optional[ProgressCallback] = None,
     cancel_cb: Optional[CancelCallback] = None,
+    match_rules: dict[str, bool] | None = None,
 ) -> tuple[list[MatchResult], set[int], set[int], set[int], set[int]]:
     results: list[MatchResult] = []
     matched_entry_ids: set[int] = set()
@@ -1092,13 +1161,14 @@ def compare_substance_entries(
             use_title_fallback,
             use_fuzzy,
             fuzzy_threshold,
+            match_rules=match_rules,
         )
         results.extend(entry_results)
         if any(item.status == "Совпадение" for item in entry_results):
             matched_entry_ids.add(entry.entry_id)
-        if any(item.method == "ISBN" for item in entry_results):
+        if any(item.status == "Совпадение" and item.method.startswith("ISBN") for item in entry_results):
             exact_isbn_ids.add(entry.entry_id)
-        if any(item.method in {"Название", "Название и автор"} for item in entry_results):
+        if any(item.status == "Совпадение" and not item.method.startswith("ISBN") for item in entry_results):
             exact_title_ids.add(entry.entry_id)
         if any(item.status == "Возможное совпадение" for item in entry_results):
             probable_ids.add(entry.entry_id)
@@ -1111,12 +1181,24 @@ class DatabaseIndex:
         self.records = records
         self.by_isbn: dict[str, list[DatabaseRecord]] = defaultdict(list)
         self.by_title: dict[str, list[DatabaseRecord]] = defaultdict(list)
+        self.by_full_title: dict[str, list[DatabaseRecord]] = defaultdict(list)
+        self.by_author_surname: dict[str, list[DatabaseRecord]] = defaultdict(list)
+        self.publications: dict[int, list[tuple[str, str]]] = {}
 
         for record in records:
+            for surname in {author_surname(author) for author in record.authors} - {""}:
+                self.by_author_surname[surname].append(record)
+            self.publications[record.record_number] = [
+                (normalize_publisher(_extract_subfield(item, "C")), normalize_publication_year(_extract_subfield(item, "D")))
+                for item in record.publication
+            ]
             for isbn in record.isbns:
                 for normalized in extract_isbns(isbn):
                     self.by_isbn[normalized].append(record)
             for title in record.titles:
+                full_title = normalize_header(title)
+                if full_title:
+                    self.by_full_title[full_title].append(record)
                 normalized = normalize_title(title)
                 if normalized:
                     self.by_title[normalized].append(record)
@@ -1160,8 +1242,9 @@ class DatabaseIndex:
         use_title_fallback: bool,
         use_fuzzy: bool,
         fuzzy_threshold: int,
+        match_rules: dict[str, bool] | None = None,
     ) -> list[MatchResult]:
-        normalized_isbns = extract_isbns(entry.isbn) if use_isbn_matching else []
+        normalized_isbns = extract_isbns(entry.isbn)
         isbn_records: list[DatabaseRecord] = []
         seen_record_numbers: set[int] = set()
         if use_isbn_matching:
@@ -1184,7 +1267,8 @@ class DatabaseIndex:
                 for record in isbn_records
             ]
 
-        if not use_title_fallback:
+        enabled_rules = {key for key in EXTRA_MATCH_RULES if (match_rules or {}).get(key, False)}
+        if not use_title_fallback and not enabled_rules:
             if not use_isbn_matching:
                 note = "Поиск по ISBN и названию отключён"
             else:
@@ -1192,17 +1276,34 @@ class DatabaseIndex:
             return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
         normalized_title = normalize_title(entry.title)
-        if not normalized_title:
+        full_title = normalize_header(entry.title)
+        author_search = any(
+            not {"isbn", "title"}.intersection(EXTRA_MATCH_RULES[key][1]) for key in enabled_rules
+        )
+        if not normalized_title and not (enabled_rules and (full_title or normalized_isbns or author_search and author_surname(entry.author))):
             if entry.isbn and not normalized_isbns:
                 note = "ISBN имеет неверный формат или контрольную цифру; названия для резервного поиска нет"
             else:
                 note = "Нет ISBN или названия для поиска"
             return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
-        exact_candidates = self.by_title.get(normalized_title, [])
+        extra_candidates = self.by_full_title.get(full_title, []) if enabled_rules else []
+        extra_candidate_ids = {record.record_number for record in extra_candidates}
+        custom_isbn_candidates = [
+            record for isbn in normalized_isbns for record in self.by_isbn.get(isbn, [])
+        ] if enabled_rules else []
+        custom_isbn_ids = {record.record_number for record in custom_isbn_candidates}
+        legacy_candidates = self.by_title.get(normalized_title, []) if use_title_fallback else []
+        legacy_ids = {record.record_number for record in legacy_candidates}
+        author_candidates = self.by_author_surname.get(author_surname(entry.author), []) if author_search else []
+        exact_candidates = list(legacy_candidates) + extra_candidates + custom_isbn_candidates + list(author_candidates)
         if exact_candidates:
             title_results: list[MatchResult] = []
+            seen_titles: set[int] = set()
             for record in exact_candidates:
+                if record.record_number in seen_titles:
+                    continue
+                seen_titles.add(record.record_number)
                 excel_author = _author_identity(entry.author)
                 record_has_authors = bool(record.authors)
                 author_confirmed = bool(
@@ -1213,7 +1314,43 @@ class DatabaseIndex:
                 if entry.author and record_has_authors and not author_confirmed:
                     continue
 
-                if author_confirmed:
+                extra_method = ""
+                extra_confirmed = False
+                if enabled_rules:
+                    publisher = normalize_publisher(entry.publisher)
+                    year = normalize_publication_year(entry.year)
+                    for key in sorted(enabled_rules, key=lambda key: (
+                        match_rule_needs_review(EXTRA_MATCH_RULES[key][1]), -len(EXTRA_MATCH_RULES[key][1]), key,
+                    )):
+                        label, required = EXTRA_MATCH_RULES[key]
+                        if "author" in required and not author_confirmed:
+                            continue
+                        if "title" in required and record.record_number not in extra_candidate_ids:
+                            continue
+                        if "isbn" in required and record.record_number not in custom_isbn_ids:
+                            continue
+                        if not {"publisher", "year"}.intersection(required) or any(
+                            ("publisher" not in required or bool(publisher) and publisher == record_publisher)
+                            and ("year" not in required or bool(year) and year == record_year)
+                            for record_publisher, record_year in self.publications[record.record_number]
+                        ):
+                            extra_method = label
+                            extra_confirmed = not match_rule_needs_review(required)
+                            break
+
+                legacy_confirmed = use_title_fallback and record.record_number in legacy_ids and author_confirmed
+                if extra_method and (extra_confirmed or not legacy_confirmed):
+                    status = "Совпадение" if extra_confirmed else "Возможное совпадение"
+                    method = extra_method
+                    confidence = 100.0 if extra_confirmed else 85.0
+                    note = "" if extra_confirmed else (
+                        "Совпали автор и данные издания без проверки названия или ISBN; проверьте вручную"
+                        if "title" not in EXTRA_MATCH_RULES[key][1]
+                        else "Совпало название и одно поле издания; проверьте вручную"
+                    )
+                elif not use_title_fallback or record.record_number not in legacy_ids:
+                    continue
+                elif author_confirmed:
                     status = "Совпадение"
                     method = "Название и автор"
                     confidence = 100.0
@@ -1249,7 +1386,7 @@ class DatabaseIndex:
             if title_results:
                 return title_results
 
-        if use_fuzzy and process is not None and self.unique_titles:
+        if use_title_fallback and use_fuzzy and process is not None and self.unique_titles:
             candidate_titles = process.extract(
                 normalized_title,
                 self.unique_titles,
@@ -1285,7 +1422,7 @@ class DatabaseIndex:
                     for score, record, title_score, author_score in selected
                 ]
 
-        note = "ISBN не найден; название и автор не совпали" if normalized_isbns else "Название и автор не совпали"
+        note = "Нет совпадений по включённым правилам; проверьте наличие необходимых полей"
         return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
 
@@ -1297,6 +1434,7 @@ def compare_database_records(
     foreign_agents_path: str | Path | None = None,
     use_isbn_matching: bool = True,
     use_title_fallback: bool = True,
+    match_rules: dict[str, bool] | None = None,
     use_fuzzy: bool = False,
     fuzzy_threshold: int = 90,
     progress_cb: Optional[ProgressCallback] = None,
@@ -1328,6 +1466,7 @@ def compare_database_records(
                 fuzzy_threshold,
                 progress_cb,
                 cancel_cb,
+                match_rules,
             )
             foreign_future = executor.submit(
                 compare_foreign_agents,
@@ -1354,6 +1493,7 @@ def compare_database_records(
             fuzzy_threshold,
             progress_cb,
             cancel_cb,
+            match_rules,
         )
         foreign_results = compare_foreign_agents(records, foreign_entries, progress_cb, cancel_cb)
 
@@ -1412,6 +1552,7 @@ def compare_files(
     foreign_agents_path: str | Path | None = None,
     use_isbn_matching: bool = True,
     use_title_fallback: bool = True,
+    match_rules: dict[str, bool] | None = None,
     use_fuzzy: bool = False,
     fuzzy_threshold: int = 90,
     progress_cb: Optional[ProgressCallback] = None,
@@ -1431,6 +1572,7 @@ def compare_files(
         foreign_agents_path=foreign_agents_path,
         use_isbn_matching=use_isbn_matching,
         use_title_fallback=use_title_fallback,
+        match_rules=match_rules,
         use_fuzzy=use_fuzzy,
         fuzzy_threshold=fuzzy_threshold,
         progress_cb=progress_cb,
@@ -2788,30 +2930,14 @@ def export_modified_database(
             or Path(result.database.source_file).resolve() == source_path.resolve()
         )
     }
-    markers_by_record: dict[int, list[tuple[int, str]]] = defaultdict(list)
-    for result in results:
-        if not _result_is_eligible_for_txt_marker(result) or result.database is None:
-            continue
-        record = result.database
-        if record.source_file and Path(record.source_file).resolve() != source_path.resolve():
-            continue
-        record_number = record.source_record_number or record.record_number
-        if result.source_type == SOURCE_FOREIGN_AGENTS:
-            agent_name = _foreign_agent_marker_name(result)
-            marker = foreign_agent_marker_template.replace("{name}", agent_name)
-            marker_field = foreign_agent_marker_field
-        else:
-            marker = substance_marker
-            marker_field = substance_marker_field
-        marker = marker.strip()
-        field_marker = (marker_field, marker)
-        marker_key = (int(marker_field), _normalized_marker_text(marker))
-        existing_keys = {
-            (int(existing_field), _normalized_marker_text(existing_marker))
-            for existing_field, existing_marker in markers_by_record[record_number]
-        }
-        if marker and marker_key not in existing_keys:
-            markers_by_record[record_number].append(field_marker)
+    source_results = [result for result in results if result.database is not None and (
+        not result.database.source_file or Path(result.database.source_file).resolve() == source_path.resolve()
+    )]
+    markers_by_record = build_markers_by_record(
+        source_results, substance_marker=substance_marker,
+        foreign_agent_marker_template=foreign_agent_marker_template,
+        substance_marker_field=substance_marker_field, foreign_agent_marker_field=foreign_agent_marker_field,
+    )
     text, encoding = _read_text_file_with_encoding(source_path)
     newline = _detect_newline(text)
 
@@ -2896,17 +3022,8 @@ def export_modified_databases(
         )
         written.append(target)
         files.append(str(target))
-        total_marked += sum(
-            1
-            for record_number in {
-                result.database.source_record_number or result.database.record_number
-                for result in results
-                if _result_is_eligible_for_txt_marker(result)
-                and result.database is not None
-                and result.database.source_file
-                and Path(result.database.source_file).resolve() == source_path.resolve()
-            }
-        )
+        total_marked += summary.modified_database_records
+
     summary.modified_database_file = "; ".join(files)
     summary.modified_database_records = total_marked
     return written
@@ -2921,6 +3038,7 @@ def compare_and_export(
     foreign_agents_path: str | Path | None = None,
     use_isbn_matching: bool = True,
     use_title_fallback: bool = True,
+    match_rules: dict[str, bool] | None = None,
     use_fuzzy: bool = False,
     fuzzy_threshold: int = 90,
     report_options: dict[str, Any] | None = None,
@@ -2940,6 +3058,7 @@ def compare_and_export(
         foreign_agents_path=foreign_agents_path,
         use_isbn_matching=use_isbn_matching,
         use_title_fallback=use_title_fallback,
+        match_rules=match_rules,
         use_fuzzy=use_fuzzy,
         fuzzy_threshold=fuzzy_threshold,
         progress_cb=progress_cb,

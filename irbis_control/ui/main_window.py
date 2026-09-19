@@ -29,6 +29,13 @@ from irbis_control.application.updater import (
     select_windows_asset,
 )
 from irbis_control.core.matcher import (
+    EXTRA_MATCH_RULES,
+    MATCH_RULE_LABELS,
+    MATCH_FIELDS,
+    parse_match_rule,
+    match_rule_needs_review,
+    SOURCE_SUBSTANCES,
+    SOURCE_FOREIGN_AGENTS,
     DEFAULT_AGE_MARKER,
     DEFAULT_AGE_MARKER_FIELD,
     DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
@@ -69,8 +76,8 @@ from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.storage_paths import application_settings_path
 from irbis_control.ui.theme import apply_light_palette
 
-from PyQt6.QtCore import QObject, QRect, QSize, QStandardPaths, QThread, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon
+from PyQt6.QtCore import QEvent, QObject, QRect, QSize, QStandardPaths, QThread, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot
+from PyQt6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -88,17 +95,21 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStyle,
+    QStyleOptionComboBox,
+    QStylePainter,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -248,6 +259,7 @@ class ComparisonWorker(QObject):
         substance_marker_field: int,
         foreign_agent_marker_field: int,
         age_marker_field: int,
+        match_rules: dict[str, bool] | None = None,
     ) -> None:
         super().__init__()
         self.database_path = database_path
@@ -257,6 +269,7 @@ class ComparisonWorker(QObject):
         self.modified_database_path = modified_database_path
         self.use_isbn_matching = use_isbn_matching
         self.use_title_fallback = use_title_fallback
+        self.match_rules = dict(match_rules or {})
         self.use_fuzzy = use_fuzzy
         self.fuzzy_threshold = fuzzy_threshold
         self.report_options = dict(report_options)
@@ -282,6 +295,7 @@ class ComparisonWorker(QObject):
                 foreign_agents_path=self.foreign_agents_path or None,
                 use_isbn_matching=self.use_isbn_matching,
                 use_title_fallback=self.use_title_fallback,
+                match_rules=self.match_rules,
                 use_fuzzy=self.use_fuzzy,
                 fuzzy_threshold=self.fuzzy_threshold,
                 report_options=self.report_options,
@@ -336,6 +350,7 @@ class DirectIrbisComparisonWorker(QObject):
         age_marker_field: int,
         backup_dir: str,
         create_backup: bool = True,
+        match_rules: dict[str, bool] | None = None,
     ) -> None:
         super().__init__()
         self.host = host
@@ -350,6 +365,7 @@ class DirectIrbisComparisonWorker(QObject):
         self.output_path = output_path
         self.use_isbn_matching = use_isbn_matching
         self.use_title_fallback = use_title_fallback
+        self.match_rules = dict(match_rules or {})
         self.use_fuzzy = use_fuzzy
         self.fuzzy_threshold = fuzzy_threshold
         self.report_options = dict(report_options)
@@ -457,6 +473,7 @@ class DirectIrbisComparisonWorker(QObject):
                     foreign_agents_path=self.foreign_agents_path or None,
                     use_isbn_matching=self.use_isbn_matching,
                     use_title_fallback=self.use_title_fallback,
+                    match_rules=self.match_rules,
                     use_fuzzy=self.use_fuzzy,
                     fuzzy_threshold=self.fuzzy_threshold,
                     progress_cb=lambda percent, message: self.progress.emit(percent, message),
@@ -922,6 +939,40 @@ class IrbisOperationWorker(QObject):
             raise RuntimeError(f"Неизвестная операция ИРБИС: {self.mode}")
         except Exception as exc:
             self.failed.emit(self.mode, str(exc))
+
+
+class DatabaseComboBox(QComboBox):
+    """A database field with adjacent dropdown and refresh icons on the right."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("databaseCombo")
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setTextMargins(0, 0, 44, 0)
+        self.dropdown_button = QToolButton(self)
+        self.dropdown_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        self.dropdown_button.setToolTip("Выбрать базу")
+        self.dropdown_button.setAccessibleName("Выбрать базу")
+        self.dropdown_button.clicked.connect(self.showPopup)
+        self.refresh_action = QAction(QIcon(resource_path("assets", "refresh.svg")), "Обновить список баз", self)
+        self.refresh_button = QToolButton(self)
+        self.refresh_button.setDefaultAction(self.refresh_action)
+        for button in (self.dropdown_button, self.refresh_button):
+            button.setAutoRaise(True)
+            button.setIconSize(QSize(16, 16))
+            button.setStyleSheet("QToolButton { border: none; padding: 0; background: transparent; }")
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        icon_width = 20
+        right = self.width() - 3
+        height = max(0, self.height() - 4)
+        self.refresh_button.setGeometry(right - icon_width, 2, icon_width, height)
+        self.dropdown_button.setGeometry(right - 2 * icon_width, 2, icon_width, height)
+        self.dropdown_button.raise_()
+        self.refresh_button.raise_()
 
 
 class CompactTabWidget(QTabWidget):
@@ -1687,6 +1738,7 @@ class TextComparisonDialog(QDialog):
 
 
 DEFAULT_MARKER_SETTINGS = {
+    **{key: False for key in EXTRA_MATCH_RULES},
     "use_isbn_matching": True,
     "use_title_fallback": True,
     "use_fuzzy": False,
@@ -1747,6 +1799,220 @@ def save_marker_settings(settings: dict[str, str | int | bool]) -> None:
         json.dumps(settings, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+class MatchFieldsComboBox(QComboBox):
+    """Select several rule fields while keeping the dropdown open."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAccessibleName("Поля правила совпадения")
+        for key, label in MATCH_FIELDS.items():
+            self.addItem(label if key == "isbn" else label.capitalize(), key)
+            self.model().item(self.count() - 1).setCheckable(True)
+            self.setItemData(self.count() - 1, Qt.CheckState.Unchecked.value, Qt.ItemDataRole.CheckStateRole)
+        self.view().viewport().installEventFilter(self)
+        self.view().installEventFilter(self)
+        self._update_summary()
+
+    def rule_text(self) -> str:
+        return " + ".join(
+            MATCH_FIELDS[self.itemData(index)] for index in range(self.count())
+            if self.itemData(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
+        )
+
+    def reset_fields(self) -> None:
+        for index in range(self.count()):
+            self.setItemData(index, Qt.CheckState.Unchecked.value, Qt.ItemDataRole.CheckStateRole)
+        self._update_summary()
+
+    def _toggle_field(self, index: int) -> None:
+        checked = self.itemData(index, Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked.value
+        state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
+        self.setItemData(index, state.value, Qt.ItemDataRole.CheckStateRole)
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        self.setToolTip(self.rule_text() or "Отметьте нужные поля, затем нажмите «Добавить».")
+        self.setAccessibleDescription(self.toolTip())
+        self.update()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.view().viewport() and event.type() == QEvent.Type.MouseButtonRelease:
+            if event.button() == Qt.MouseButton.LeftButton:
+                index = self.view().indexAt(event.position().toPoint())
+                if index.isValid():
+                    self._toggle_field(index.row())
+                    return True
+        if watched is self.view() and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Space:
+                index = self.view().currentIndex()
+                if index.isValid():
+                    self._toggle_field(index.row())
+                return True
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.hidePopup()
+                return True
+        return super().eventFilter(watched, event)
+
+    def paintEvent(self, event) -> None:
+        option = QStyleOptionComboBox()
+        self.initStyleOption(option)
+        field = self.style().subControlRect(QStyle.ComplexControl.CC_ComboBox, option, QStyle.SubControl.SC_ComboBoxEditField, self)
+        option.currentText = self.fontMetrics().elidedText(
+            self.rule_text() or "Выберите поля…", Qt.TextElideMode.ElideRight, max(0, field.width() - 4),
+        )
+        painter = QStylePainter(self)
+        painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+        painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
+
+class ListResizeHandle(QFrame):
+    def __init__(self, target: QListWidget) -> None:
+        super().__init__()
+        self.target = target
+        self._drag_y: float | None = None
+        self._start_height = target.height()
+        self.setFixedHeight(10)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setAccessibleName("Изменить высоту списка правил")
+        self.setToolTip("Потяните вверх или вниз, чтобы изменить высоту списка. Также можно использовать стрелки ↑ и ↓.")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 3, 0, 3)
+        grip = QFrame()
+        grip.setFixedSize(32, 3)
+        grip.setStyleSheet("background: #aebdcd; border-radius: 1px;")
+        grip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(grip, 0, Qt.AlignmentFlag.AlignCenter)
+
+    def _set_height(self, height: int) -> None:
+        self.target.setFixedHeight(max(76, min(600, height)))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_y = event.globalPosition().y()
+            self._start_height = self.target.height()
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag_y is not None:
+            self._set_height(self._start_height + round(event.globalPosition().y() - self._drag_y))
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_y = None
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            self._set_height(self.target.height() + (20 if event.key() == Qt.Key.Key_Down else -20))
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+
+class MatchRulesEditor(QWidget):
+    changed = pyqtSignal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(4)
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        self.fields_combo = MatchFieldsComboBox()
+        row.addWidget(self.fields_combo, 1)
+        add = QPushButton("Добавить")
+        add.clicked.connect(self.add_rule)
+        row.addWidget(add)
+        root.addLayout(row)
+        self.rules = QListWidget()
+        self.rules.setObjectName("matchRulesList")
+        self.rules.setFixedHeight(76)
+        self.rules.setWordWrap(True)
+        self.rules.setTextElideMode(Qt.TextElideMode.ElideNone)
+        self.rules.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.rules.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        root.addWidget(self.rules)
+        self.resize_handle = ListResizeHandle(self.rules)
+        root.addWidget(self.resize_handle)
+        self.error = QLabel()
+        self.error.setWordWrap(True)
+        self.error.setStyleSheet("color: #b52f2f;")
+        self.error.hide()
+        root.addWidget(self.error)
+        footer = QHBoxLayout()
+        hint = QLabel("Поля: ISBN, название, автор, издательство, год. Достаточно одного правила.")
+        hint.setWordWrap(True)
+        hint.setObjectName("tabIntro")
+        footer.addWidget(hint, 1)
+        self.remove = QPushButton("Удалить")
+        self.remove.setEnabled(False)
+        self.remove.clicked.connect(self.remove_rule)
+        footer.addWidget(self.remove)
+        root.addLayout(footer)
+        self.rules.currentRowChanged.connect(lambda row: self.remove.setEnabled(row >= 0))
+
+    def values(self) -> dict[str, bool]:
+        active = {self.rules.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.rules.count())}
+        return {key: key in active for key in MATCH_RULE_LABELS}
+
+    @staticmethod
+    def _rule_item(key: str) -> QListWidgetItem:
+        label = MATCH_RULE_LABELS[key]
+        if key in EXTRA_MATCH_RULES and match_rule_needs_review(EXTRA_MATCH_RULES[key][1]):
+            label += " — ручная проверка"
+        item = QListWidgetItem(label)
+        item.setData(Qt.ItemDataRole.UserRole, key)
+        item.setToolTip(label)
+        return item
+
+    def set_values(self, settings: dict[str, str | int | bool]) -> None:
+        self.rules.clear()
+        for key, label in MATCH_RULE_LABELS.items():
+            if settings.get(key, False):
+                self.rules.addItem(self._rule_item(key))
+        self.error.hide()
+
+    def add_rule(self) -> None:
+        try:
+            text = self.fields_combo.rule_text()
+            if not text:
+                raise ValueError("Выберите поля в выпадающем списке.")
+            key = parse_match_rule(text)
+            if self.values()[key]:
+                raise ValueError("Такое правило уже добавлено, в том числе с другим порядком полей.")
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            return
+        item = self._rule_item(key)
+        self.rules.addItem(item)
+        self.rules.setCurrentItem(item)
+        self.rules.scrollToItem(item)
+        self.fields_combo.reset_fields()
+        self.error.hide()
+        self.changed.emit()
+
+    def remove_rule(self) -> None:
+        if self.rules.currentRow() < 0:
+            return
+        if self.rules.count() == 1:
+            self.error.setText("Оставьте хотя бы одно правило. Сначала добавьте новое, затем удалите старое.")
+            self.error.show()
+            return
+        self.rules.takeItem(self.rules.currentRow())
+        self.error.hide()
+        self.changed.emit()
 
 
 class MarkerSettingsDialog(QDialog):
@@ -1884,6 +2150,7 @@ class MarkerSettingsDialog(QDialog):
 
     def _values(self) -> dict[str, str | int | bool]:
         return {
+            **{key: bool(self.settings.get(key, False)) for key in EXTRA_MATCH_RULES},
             "use_isbn_matching": self.isbn_match_check.isChecked(),
             "use_title_fallback": self.title_fallback_check.isChecked(),
             "use_fuzzy": False,
@@ -1946,7 +2213,10 @@ class MarkerSettingsDialog(QDialog):
         self.accept()
 
 
-class ApplicationSettingsDialog(QDialog):
+class ApplicationSettingsPage(QWidget):
+    saved = pyqtSignal(object)
+    cancelled = pyqtSignal()
+
     def __init__(
         self,
         settings: ApplicationSettings,
@@ -1954,20 +2224,18 @@ class ApplicationSettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("Настройки приложения")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
-        self.resize(520, 270)
-        self.setMinimumWidth(460)
-        if parent is not None:
-            self.setStyleSheet(parent.styleSheet())
+        self.setObjectName("tabPage")
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(7)
+        layout = QVBoxLayout()
+        root.addLayout(layout, 1)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(7)
 
-        safety_title = QLabel("Безопасность базы")
-        safety_title.setObjectName("cardTitle")
-        layout.addWidget(safety_title)
+        safety_card = SectionCard("Безопасность базы", "")
+        layout.addWidget(safety_card)
         self.backup_check = QCheckBox(
             "Создавать rollback-копию базы перед изменением записей"
         )
@@ -1975,33 +2243,100 @@ class ApplicationSettingsDialog(QDialog):
         self.backup_check.setToolTip(
             "Рекомендуется оставить включённым: копия позволяет восстановить исходные поля MFN."
         )
-        layout.addWidget(self.backup_check)
+        safety_card.body.addWidget(self.backup_check)
 
-        updates_title = QLabel("Обновления")
-        updates_title.setObjectName("cardTitle")
-        layout.addWidget(updates_title)
+        updates_card = SectionCard("Обновления", "")
+        layout.addWidget(updates_card)
         self.auto_updates_check = QCheckBox(
             "Проверять обновления на GitHub при запуске"
         )
         self.auto_updates_check.setChecked(settings.check_updates_on_start)
-        layout.addWidget(self.auto_updates_check)
+        updates_card.body.addWidget(self.auto_updates_check)
         check_button = QPushButton("Проверить обновление сейчас")
         check_button.setObjectName("mutedButton")
         if parent is not None:
             check_button.clicked.connect(lambda: parent.check_updates(manual=True))
-        layout.addWidget(check_button)
+        updates_card.body.addWidget(check_button)
 
+        about_button = QPushButton("О программе")
+        about_button.clicked.connect(self._show_about)
+        layout.addWidget(about_button, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
+
         buttons = QHBoxLayout()
         buttons.addStretch()
         cancel_button = QPushButton("Отмена")
-        cancel_button.clicked.connect(self.reject)
+        cancel_button.clicked.connect(self.cancelled.emit)
         buttons.addWidget(cancel_button)
         save_button = QPushButton("Сохранить")
         save_button.setObjectName("primaryButton")
         save_button.clicked.connect(self._save)
         buttons.addWidget(save_button)
-        layout.addLayout(buttons)
+        root.addLayout(buttons)
+
+    def _show_about(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"О программе — {APP_TITLE}")
+        dialog.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
+        dialog.resize(620, 480)
+        root = QVBoxLayout(dialog)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(7)
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        logo = QLabel()
+        logo.setObjectName("aboutLogo")
+        logo.setPixmap(QIcon(resource_path("assets", "irbis64_control_icon.png")).pixmap(40, 40))
+        logo.setFixedSize(40, 40)
+        header.addWidget(logo)
+        title = QLabel(APP_TITLE)
+        title.setObjectName("mainTitle")
+        title.setWordWrap(True)
+        title_font = title.font()
+        title_font.setPointSize(12)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        header.addWidget(title, 1)
+        root.addLayout(header)
+        about_page = QTextBrowser()
+        about_page.setObjectName("aboutPage")
+        about_page.setFrameShape(QFrame.Shape.NoFrame)
+        about_page.setStyleSheet("QTextBrowser#aboutPage { border: none; background: #f8fafc; color: #202020; }")
+        about_page.document().setDocumentMargin(0)
+        about_page.document().setDefaultStyleSheet(
+            "h3 { font-size: 13px; font-weight: 600; color: #006bd6; margin-top: 12px; margin-bottom: 3px; }"
+            "p { margin-top: 0; margin-bottom: 7px; }"
+            "a { color: #006bd6; }"
+        )
+        about_page.setOpenExternalLinks(True)
+        about_page.setHtml(f"""
+            <p>Версия {APP_VERSION} · Разработчик: VseMirka200</p>
+            <p>Помощник библиотекаря для проверки каталога ИРБИС64:
+            находит записи, совпадающие с загруженными перечнями,
+            формирует отчёты и помогает проставлять служебные метки.</p>
+            <h3>Проверка каталога</h3>
+            <p>Работайте с базой на сервере ИРБИС64 или с её локальной TXT-копией.
+            Сверяйте издания с перечнями из Excel по ISBN, названию, автору,
+            издательству и году с помощью выбранных правил совпадения;
+            проверяйте авторов по реестру иностранных агентов.</p>
+            <h3>Результаты и метки</h3>
+            <p>Просматривайте найденные совпадения и сохраняйте Excel-отчёты.
+            Пограничные совпадения выносятся на отдельный лист для ручной проверки.
+            Настраивайте поля и текст меток, создавайте только отчёт или применяйте
+            метки к подтверждённым совпадениям. Сравнивайте отчёты и TXT-копии,
+            чтобы увидеть изменения между проверками.</p>
+            <h3>Изменение базы</h3>
+            <p>Перед прямой записью в ИРБИС64 программа показывает план изменений
+            и проверяет версии записей. Создание резервной копии исходных полей
+            включено по умолчанию; ход выполнения и результат отражаются в журнале.</p>
+            <h3>Проект и обратная связь</h3>
+            <p><a href="{GITHUB_REPOSITORY_URL}">Описание и исходный код</a><br>
+            <a href="{GITHUB_REPOSITORY_URL}/releases/latest">Скачать последнюю версию</a><br>
+            <a href="{GITHUB_REPOSITORY_URL}/issues">Сообщить об ошибке или предложить улучшение</a></p>
+            <p>Автоматическая и ручная проверка обновлений доступны в разделе «Настройки».</p>
+        """)
+        root.addWidget(about_page)
+        dialog.exec()
 
     def _save(self) -> None:
         if not self.backup_check.isChecked():
@@ -2014,11 +2349,11 @@ class ApplicationSettingsDialog(QDialog):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        self.settings = ApplicationSettings(
+        settings = ApplicationSettings(
             create_database_backup=self.backup_check.isChecked(),
             check_updates_on_start=self.auto_updates_check.isChecked(),
         )
-        self.accept()
+        self.saved.emit(settings)
 
 
 class MainWindow(QMainWindow):
@@ -2164,15 +2499,21 @@ class MainWindow(QMainWindow):
         dialog = MarkerSettingsDialog(self.marker_settings, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.marker_settings = dict(dialog.settings)
-            if hasattr(self, "substance_marker_edit"):
-                self._apply_marker_settings_to_ui()
+            self._apply_marker_settings_to_ui()
 
     def open_application_settings(self) -> None:
-        dialog = ApplicationSettingsDialog(self.app_settings, self)
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
+        self.workflow_tabs.setCurrentWidget(self.application_settings_page)
+        self.marker_settings_button.setChecked(True)
+
+    def _settings_navigation_changed(self, _index: int) -> None:
+        current = self.workflow_tabs.currentWidget()
+        self.marker_settings_button.setChecked(current is self.application_settings_page)
+        if current is not self.application_settings_page:
+            self._settings_return_page = current
+
+    def _save_application_settings(self, settings: ApplicationSettings) -> None:
         try:
-            save_application_settings(application_settings_path(), dialog.settings)
+            save_application_settings(application_settings_path(), settings)
         except Exception as exc:
             QMessageBox.warning(
                 self,
@@ -2180,34 +2521,15 @@ class MainWindow(QMainWindow):
                 f"Не удалось сохранить настройки приложения:\n{exc}",
             )
             return
-        self.app_settings = dialog.settings
+        self.app_settings = settings
         self._set_status("Настройки приложения сохранены", "idle")
+        self._close_application_settings()
 
-    def show_about_dialog(self) -> None:
-        releases_url = f"{GITHUB_REPOSITORY_URL}/releases/latest"
-        QMessageBox.about(
-            self,
-            f"О программе — {APP_TITLE}",
-            f"""
-            <h2>{APP_TITLE}</h2>
-            <p><b>Версия:</b> {APP_VERSION}</p>
-            <p>Программа для проверки и безопасного обновления библиотечных баз ИРБИС64.</p>
-            <p><b>Основные возможности:</b></p>
-            <ul>
-              <li>сверка записей по ISBN, названию и автору;</li>
-              <li>проверка по реестрам и установка меток;</li>
-              <li>работа напрямую с сервером ИРБИ64 или через TXT-копии;</li>
-              <li>Excel-отчёты, журнал операций и rollback-копии.</li>
-            </ul>
-            <p><b>Разработчик:</b> VseMirka200</p>
-            <p><b>Технологии:</b> Python, PyQt6</p>
-            <p><b>Скачать программу и обновления:</b><br>
-            <a href="{releases_url}">GitHub Releases</a></p>
-            <p><b>Исходный код и описание:</b><br>
-            <a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_URL}</a></p>
-            <p>Встроенная проверка обновлений использует официальные релизы этого репозитория.</p>
-            """,
-        )
+    def _close_application_settings(self) -> None:
+        page = self.application_settings_page
+        page.backup_check.setChecked(self.app_settings.create_database_backup)
+        page.auto_updates_check.setChecked(self.app_settings.check_updates_on_start)
+        self.workflow_tabs.setCurrentWidget(self._settings_return_page)
 
     def open_database_connector(self) -> None:
         """Запускает отдельную утилиту прямого подключения к хранилищу/ИРБИС."""
@@ -2263,8 +2585,7 @@ class MainWindow(QMainWindow):
     def _apply_marker_settings_to_ui(self) -> None:
         if not hasattr(self, "substance_marker_edit"):
             return
-        self.inline_isbn_match_check.setChecked(bool(self.marker_settings["use_isbn_matching"]))
-        self.inline_title_fallback_check.setChecked(bool(self.marker_settings["use_title_fallback"]))
+        self.match_rules_editor.set_values(self.marker_settings)
         self.create_excel_report_check.setChecked(bool(self.marker_settings["create_excel_report"]))
         self.report_substances_check.setChecked(bool(self.marker_settings["report_substances"]))
         self.report_foreign_agents_check.setChecked(bool(self.marker_settings["report_foreign_agents"]))
@@ -2284,8 +2605,7 @@ class MainWindow(QMainWindow):
 
     def _marker_values_from_ui(self) -> dict[str, str | int | bool]:
         return {
-            "use_isbn_matching": self.inline_isbn_match_check.isChecked(),
-            "use_title_fallback": self.inline_title_fallback_check.isChecked(),
+            **self.match_rules_editor.values(),
             "use_fuzzy": False,
             "fuzzy_threshold": 90,
             "create_excel_report": self.create_excel_report_check.isChecked(),
@@ -2306,8 +2626,8 @@ class MainWindow(QMainWindow):
 
     def _sync_marker_settings_from_ui(self, save: bool = True, show_message: bool = True) -> bool:
         values = self._marker_values_from_ui()
-        if not bool(values["use_isbn_matching"]) and not bool(values["use_title_fallback"]):
-            QMessageBox.warning(self, APP_TITLE, "Выберите совпадения по ISBN или по названию и автору.")
+        if not any(bool(values[key]) for key in ("use_isbn_matching", "use_title_fallback", *EXTRA_MATCH_RULES)):
+            QMessageBox.warning(self, APP_TITLE, "Включите хотя бы одно правило совпадения.")
             self.workflow_tabs.setCurrentIndex(1)
             return False
         if bool(values["report_only"]) and not bool(values["create_excel_report"]):
@@ -2465,7 +2785,8 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 self.irbis_db_combo.setCurrentIndex(index)
         self.irbis_db_combo.blockSignals(False)
-        self.irbis_db_combo.setEnabled(bool(self._current_irbis_database()))
+        # Keep the embedded refresh action available even when the list is empty.
+        self.irbis_db_combo.setEnabled(True)
 
     def _update_direct_mode_ui(self, checked: bool | None = None) -> None:
         direct = self.direct_irbis_checkbox.isChecked() if checked is None else bool(checked)
@@ -2659,7 +2980,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(0, self._fit_scroll_content)
             self.irbis_test_button.setEnabled(False)
             self.irbis_tune_read_button.setEnabled(False)
-            self.irbis_refresh_databases_button.setEnabled(False)
+            self.irbis_refresh_databases_action.setEnabled(False)
             self.irbis_fetch_button.setEnabled(False)
             self.write_irbis_button.setEnabled(False)
             if hasattr(self, "cleanup_button"):
@@ -2832,7 +3153,7 @@ class MainWindow(QMainWindow):
         self._irbis_operation_silent = False
         self.irbis_test_button.setEnabled(True)
         self.irbis_tune_read_button.setEnabled(True)
-        self.irbis_refresh_databases_button.setEnabled(True)
+        self.irbis_refresh_databases_action.setEnabled(True)
         self.irbis_fetch_button.setEnabled(True)
         if hasattr(self, "cleanup_button"):
             self.cleanup_button.setEnabled(True)
@@ -3024,7 +3345,9 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def _on_update_failed(self, error: str) -> None:
         if self._update_manual:
-            QMessageBox.warning(self, APP_TITLE, f"Не удалось обновить приложение:\n{error}")
+            checking = self.update_worker is not None and self.update_worker.mode == "check"
+            action = "проверить наличие обновлений" if checking else "загрузить обновление"
+            QMessageBox.warning(self, APP_TITLE, f"Не удалось {action}:\n{error}")
         else:
             self._append_progress(f"Автопроверка обновлений не выполнена: {error}")
 
@@ -3169,7 +3492,7 @@ class MainWindow(QMainWindow):
         central.setObjectName("centralPage")
         self.scroll_area.setWidget(central)
         self.root_layout = QVBoxLayout(central)
-        self.root_layout.setContentsMargins(8, 8, 8, 8)
+        self.root_layout.setContentsMargins(0, 0, 0, 0)
         self.root_layout.setSpacing(8)
 
         # Компактная шапка в стиле нового макета.
@@ -3212,15 +3535,10 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_comparison)
         self.header_actions.addWidget(self.start_button)
 
-        self.marker_settings_button = QPushButton("Настройки и справка")
-        self.marker_settings_button.setObjectName("headerButton")
-        self.main_menu = QMenu(self.marker_settings_button)
-        self.settings_action = self.main_menu.addAction("Настройки")
-        self.settings_action.triggered.connect(self.open_application_settings)
-        self.main_menu.addSeparator()
-        self.about_action = self.main_menu.addAction("О программе")
-        self.about_action.triggered.connect(self.show_about_dialog)
-        self.marker_settings_button.setMenu(self.main_menu)
+        self.marker_settings_button = QPushButton("Настройки")
+        self.marker_settings_button.setObjectName("settingsTab")
+        self.marker_settings_button.setCheckable(True)
+        self.marker_settings_button.clicked.connect(self.open_application_settings)
         self.header_actions.addWidget(self.marker_settings_button)
 
         self.useful_links_button = QPushButton("Полезные ссылки")
@@ -3246,7 +3564,7 @@ class MainWindow(QMainWindow):
         self.workflow_tabs.tabBar().setMovable(False)
         self.workflow_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
         self.workflow_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
-        # Keep settings and help in one compact drop-down beside the tabs.
+        # The permanent settings page uses a navigation item aligned to the right.
         self.workflow_tabs.setCornerWidget(
             self.marker_settings_button,
             Qt.Corner.TopRightCorner,
@@ -3300,18 +3618,15 @@ class MainWindow(QMainWindow):
             self.irbis_show_password.setToolTip(hint)
 
         self.irbis_show_password.toggled.connect(toggle_irbis_password)
-        self.irbis_db_combo = QComboBox()
-        self.irbis_db_combo.setObjectName("settingsField")
+        self.irbis_db_combo = DatabaseComboBox()
         self.irbis_db_combo.setToolTip("Список загружается с сервера ИРБИС из доступных баз АРМ Каталогизатор.")
         self.irbis_db_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.irbis_db_combo.setMinimumContentsLength(18)
         self.irbis_db_combo.currentIndexChanged.connect(lambda _index: self._update_direct_mode_ui() if hasattr(self, "direct_source_label") else None)
-        self.irbis_refresh_databases_button = QPushButton()
-        self.irbis_refresh_databases_button.setObjectName("mutedButton")
-        self.irbis_refresh_databases_button.setIcon(self._asset_icon("refresh.svg"))
-        self.irbis_refresh_databases_button.setIconSize(QSize(16, 16))
-        self.irbis_refresh_databases_button.setToolTip("Заново получить список существующих баз с сервера ИРБИС")
-        self.irbis_refresh_databases_button.clicked.connect(lambda: self._start_irbis_operation("databases"))
+        self.irbis_refresh_databases_action = self.irbis_db_combo.refresh_action
+        self.irbis_refresh_databases_action.setText("Обновить список баз")
+        self.irbis_refresh_databases_action.setToolTip("Заново получить список существующих баз с сервера ИРБИС")
+        self.irbis_refresh_databases_action.triggered.connect(lambda: self._start_irbis_operation("databases"))
         self.irbis_query_edit = QLineEdit("I=$")
         self.irbis_query_edit.setToolTip("Поисковое выражение ИРБИС. По умолчанию используется I=$.")
         self.irbis_read_workers_spin = QSpinBox()
@@ -3353,9 +3668,8 @@ class MainWindow(QMainWindow):
         self.irbis_database_box = QWidget()
         database_row = QHBoxLayout(self.irbis_database_box)
         database_row.setContentsMargins(0, 0, 0, 0)
-        database_row.setSpacing(4)
+        database_row.setSpacing(0)
         database_row.addWidget(self.irbis_db_combo, 1)
-        database_row.addWidget(self.irbis_refresh_databases_button)
 
         self._reflow_irbis_connection_form(False)
         connection_card.body.addLayout(form)
@@ -3574,10 +3888,8 @@ class MainWindow(QMainWindow):
         files_root.addLayout(sources_row)
 
         match_settings_card = SectionCard("Настройка совпадений", "")
-        self.inline_isbn_match_check = QCheckBox("Точные совпадения по ISBN")
-        self.inline_title_fallback_check = QCheckBox("Точные совпадения по названию и автору")
-        match_settings_card.body.addWidget(self.inline_isbn_match_check)
-        match_settings_card.body.addWidget(self.inline_title_fallback_check)
+        self.match_rules_editor = MatchRulesEditor()
+        match_settings_card.body.addWidget(self.match_rules_editor)
         files_root.addWidget(match_settings_card)
 
         compare_card = SectionCard("Результаты", "")
@@ -3692,18 +4004,33 @@ class MainWindow(QMainWindow):
 
         marker_card = SectionCard("Метки в ИРБИС", "")
         self.marker_card = marker_card
-        marker_grid = QGridLayout(); marker_grid.setHorizontalSpacing(6); marker_grid.setVerticalSpacing(4)
-        marker_grid.addWidget(QLabel("Тип совпадения"), 0, 0); marker_grid.addWidget(QLabel("Поле"), 0, 1); marker_grid.addWidget(QLabel("Содержимое метки"), 0, 2)
-        self.substance_field_spin = self._make_field_spin(); self.substance_marker_edit = QLineEdit(); self.substance_marker_edit.setObjectName("settingsField")
-        self.foreign_field_spin = self._make_field_spin(); self.foreign_marker_edit = QLineEdit(); self.foreign_marker_edit.setObjectName("settingsField"); self.foreign_marker_edit.setToolTip("{name} будет заменено на совпавшего автора; названия организаций и проектов не подставляются")
-        self.age_field_spin = self._make_field_spin(); self.age_marker_edit = QLineEdit(); self.age_marker_edit.setObjectName("settingsField")
+        marker_grid = QGridLayout()
+        marker_grid.setHorizontalSpacing(6)
+        marker_grid.setVerticalSpacing(4)
+        marker_grid.addWidget(QLabel("Тип совпадения"), 0, 0)
+        marker_grid.addWidget(QLabel("Поле"), 0, 1)
+        marker_grid.addWidget(QLabel("Содержимое метки"), 0, 2)
+        self.substance_field_spin = self._make_field_spin()
+        self.substance_marker_edit = QLineEdit()
+        self.substance_marker_edit.setObjectName("settingsField")
+        self.foreign_field_spin = self._make_field_spin()
+        self.foreign_marker_edit = QLineEdit()
+        self.foreign_marker_edit.setObjectName("settingsField")
+        self.foreign_marker_edit.setToolTip(
+            "{name} будет заменено на совпавшего автора; названия организаций и проектов не подставляются"
+        )
+        self.age_field_spin = self._make_field_spin()
+        self.age_marker_edit = QLineEdit()
+        self.age_marker_edit.setObjectName("settingsField")
         rows = [
             ("Вещества", self.substance_field_spin, self.substance_marker_edit),
             ("Иностранные агенты", self.foreign_field_spin, self.foreign_marker_edit),
             ("Все найденные записи", self.age_field_spin, self.age_marker_edit),
         ]
         for row, (name, spin, edit) in enumerate(rows, start=1):
-            marker_grid.addWidget(QLabel(name), row, 0); marker_grid.addWidget(spin, row, 1); marker_grid.addWidget(edit, row, 2)
+            marker_grid.addWidget(QLabel(name), row, 0)
+            marker_grid.addWidget(spin, row, 1)
+            marker_grid.addWidget(edit, row, 2)
         marker_grid.setColumnStretch(2, 1)
         marker_card.body.addLayout(marker_grid)
         run_root.addWidget(marker_card)
@@ -3799,6 +4126,13 @@ class MainWindow(QMainWindow):
         self._load_run_journal()
         log_layout.addWidget(self.run_log, 1); results_root.addWidget(log_card, 1)
         self.workflow_tabs.addTab(self.results_tab, "Запуск")
+        self.application_settings_page = ApplicationSettingsPage(self.app_settings, self)
+        self.application_settings_page.saved.connect(self._save_application_settings)
+        self.application_settings_page.cancelled.connect(self._close_application_settings)
+        settings_index = self.workflow_tabs.addTab(self.application_settings_page, "Настройки")
+        self.workflow_tabs.setTabVisible(settings_index, False)
+        self._settings_return_page = self.workflow_tabs.currentWidget()
+        self.workflow_tabs.currentChanged.connect(self._settings_navigation_changed)
         self.workflow_tabs.currentChanged.connect(
             lambda _index: QTimer.singleShot(0, self._fit_scroll_content)
         )
@@ -3831,10 +4165,19 @@ class MainWindow(QMainWindow):
         self._marker_autosave_timer = QTimer(self)
         self._marker_autosave_timer.setSingleShot(True)
         self._marker_autosave_timer.timeout.connect(self._autosave_marker_settings)
-        for edit in (self.substance_marker_edit, self.foreign_marker_edit, self.age_marker_edit):
-            edit.textChanged.connect(self._queue_marker_settings_autosave)
-        for spin in (self.substance_field_spin, self.foreign_field_spin, self.age_field_spin):
-            spin.valueChanged.connect(self._queue_marker_settings_autosave)
+        self.match_rules_editor.changed.connect(self._queue_marker_settings_autosave)
+        for widget in (
+            self.substance_marker_edit,
+            self.foreign_marker_edit,
+            self.age_marker_edit,
+            self.substance_field_spin,
+            self.foreign_field_spin,
+            self.age_field_spin,
+        ):
+            if isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self._queue_marker_settings_autosave)
+            else:
+                widget.valueChanged.connect(self._queue_marker_settings_autosave)
         self._update_database_summary(); self._update_foreign_agents_summary(); self._update_excel_summary()
         self._set_default_outputs(force=False)
         self._apply_responsive_layout(force=True)
@@ -3877,8 +4220,6 @@ class MainWindow(QMainWindow):
         form.setColumnStretch(1, 1)
         self.irbis_db_combo.setMinimumContentsLength(6)
         self.irbis_db_combo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
-        self.irbis_refresh_databases_button.setText("")
-        self.irbis_refresh_databases_button.setFixedWidth(32)
 
     def _reflow_actions(self, columns: int) -> None:
         self._take_all(self.actions_buttons_layout)
@@ -3982,8 +4323,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "irbis_connection_form"):
             self._reflow_irbis_connection_form(very_compact)
 
-        margin = 4 if very_compact else (6 if compact else 8)
-        self.root_layout.setContentsMargins(margin, margin, margin, 0)
+        self.root_layout.setContentsMargins(0, 0, 0, 0)
         self.root_layout.setSpacing(4 if very_compact else (6 if compact else 8))
 
         logo_size = 22 if compact else 26
@@ -3999,9 +4339,9 @@ class MainWindow(QMainWindow):
 
         self.start_button.setText("Запуск" if short_start else "Запустить проверку")
         self.start_button.setMinimumWidth(0)
-        self.marker_settings_button.setText("Настройки и справка")
+        self.marker_settings_button.setText("Настройки")
         self.marker_settings_button.setToolTip(
-            "Открыть настройки или сведения о программе"
+            "Открыть настройки приложения"
         )
         self.marker_settings_button.setMinimumWidth(0)
         self.marker_settings_button.setMaximumWidth(16777215)
@@ -4165,6 +4505,8 @@ class MainWindow(QMainWindow):
             QLabel:disabled { color: #6b6b6b; }
             QTextEdit#logEdit, QTextEdit#plainLogEdit { font-family: Consolas, monospace; }
             QLineEdit, QComboBox, QSpinBox, QPushButton { min-height: 23px; }
+            QComboBox#databaseCombo::drop-down { width: 0; border: none; }
+            QComboBox#databaseCombo::down-arrow { image: none; }
             QPushButton#primaryButton {
                 color: white;
                 background: #0878e3;
@@ -4176,6 +4518,16 @@ class MainWindow(QMainWindow):
             QPushButton#primaryButton:pressed { background: #0064c4; }
             QPushButton#primaryButton:disabled { color: #e4e4e4; background: #8fb9df; border-color: #8fb9df; }
             QListWidget#compactList::item { min-height: 21px; }
+            QListWidget#matchRulesList::item {
+                padding: 0px 8px;
+                border-left: 2px solid transparent;
+                color: #202020;
+            }
+            QListWidget#matchRulesList::item:selected {
+                border-left-color: #0878e3;
+                background: #eef6ff;
+                color: #202020;
+            }
             QProgressBar { min-height: 12px; max-height: 12px; }
             QProgressBar#mainProgress {
                 min-height: 4px;
@@ -4207,6 +4559,7 @@ class MainWindow(QMainWindow):
             QTabWidget#workflowTabs QTabBar::tab {
                 background: transparent;
                 border: none;
+                border-bottom: 2px solid transparent;
                 padding: 5px 10px;
                 margin: 0px;
             }
@@ -4218,6 +4571,23 @@ class MainWindow(QMainWindow):
             QTabWidget#workflowTabs QTabBar::tab:hover:!selected {
                 background: palette(alternate-base);
                 border: none;
+                border-bottom: 2px solid transparent;
+            }
+            QPushButton#settingsTab {
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+                border-radius: 0;
+                padding: 5px 10px;
+                margin: 0;
+                min-height: 0;
+            }
+            QPushButton#settingsTab:checked {
+                color: palette(highlight);
+                border-bottom: 2px solid palette(highlight);
+            }
+            QPushButton#settingsTab:hover:!checked {
+                background: palette(alternate-base);
             }
             """
         self.setStyleSheet(base_style)
@@ -4664,6 +5034,7 @@ class MainWindow(QMainWindow):
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
                 backup_dir=str(app_data_dir() / "backups"),
                 create_backup=self.app_settings.create_database_backup,
+                match_rules={key: bool(self.marker_settings.get(key, False)) for key in EXTRA_MATCH_RULES},
             )
         else:
             self.worker = ComparisonWorker(
@@ -4683,6 +5054,7 @@ class MainWindow(QMainWindow):
                 int(self.marker_settings["substance_marker_field"]),
                 int(self.marker_settings["foreign_agent_marker_field"]),
                 int(self.marker_settings["age_marker_field"]),
+                match_rules={key: bool(self.marker_settings.get(key, False)) for key in EXTRA_MATCH_RULES},
             )
         self._save_irbis_config()
         self.worker.moveToThread(self.thread)

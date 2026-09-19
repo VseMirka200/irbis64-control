@@ -1,6 +1,7 @@
 import hashlib
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from irbis_control.application.updater import (
     ReleaseAsset,
     UpdateError,
     download_asset,
+    fetch_latest_release,
     is_newer_version,
     schedule_install,
     select_windows_asset,
@@ -40,6 +42,19 @@ class FakeResponse:
 
 
 class UpdaterTests(unittest.TestCase):
+    def test_missing_release_has_readable_error(self) -> None:
+        error = urllib.error.HTTPError("https://api.github.com", 404, "Not Found", {}, None)
+        with patch("irbis_control.application.updater.urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(UpdateError, "GitHub не нашёл опубликованный релиз"):
+                fetch_latest_release()
+
+    def test_other_http_errors_are_not_reported_as_missing_release(self) -> None:
+        error = urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None)
+        with patch("irbis_control.application.updater.urllib.request.urlopen", side_effect=error):
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                fetch_latest_release()
+        self.assertEqual(403, raised.exception.code)
+
     def test_version_comparison_ignores_missing_zero_parts(self) -> None:
         self.assertFalse(is_newer_version("v1.0", "1.0.0"))
         self.assertTrue(is_newer_version("v1.0.1", "1.0.0"))

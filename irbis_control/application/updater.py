@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -69,8 +70,17 @@ def fetch_latest_release(*, timeout: float = 15.0) -> GitHubRelease:
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            raise UpdateError(
+                "GitHub не нашёл опубликованный релиз приложения. "
+                "Возможно, релизы ещё не опубликованы или репозиторий недоступен.\n\n"
+                f"Страница релизов: {GITHUB_REPOSITORY_URL}/releases"
+            ) from exc
+        raise
 
     version = str(payload.get("tag_name") or payload.get("name") or "").strip()
     if not version:
