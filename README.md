@@ -3,8 +3,9 @@
   <h1>ИРБИС64 Контроль</h1>
   <p>Настольное приложение для проверки библиотечных записей ИРБИС64 по перечням из Excel.</p>
   <p>
-    <a href="https://github.com/VseMirka200/irbis64-control/releases/latest/download/IRBIS64Control-windows-x64.zip"><img src="https://img.shields.io/badge/Скачать-для%20Windows-0969da?style=for-the-badge&amp;logo=windows" alt="Скачать для Windows"></a>
-    <a href="https://github.com/VseMirka200/irbis64-control/releases"><img src="https://img.shields.io/badge/Все-версии-6e7781?style=for-the-badge&amp;logo=github" alt="Все версии"></a>
+    <a href="https://github.com/VseMirka200/irbis64-control/releases/latest/download/IRBIS64Control-windows-x64.zip"><img src="https://img.shields.io/badge/-СКАЧАТЬ-555555?style=for-the-badge&amp;logo=github" alt="Скачать"></a>&nbsp;
+    <a href="README_EN.md"><img src="https://img.shields.io/badge/-ENGLISH-2468dc?style=for-the-badge" alt="English"></a>&nbsp;
+    <a href="https://github.com/VseMirka200/irbis64-control/issues/new"><img src="https://img.shields.io/badge/-ОШИБКА-dc3545?style=for-the-badge&amp;logo=github" alt="Сообщить об ошибке"></a>
   </p>
 </div>
 
