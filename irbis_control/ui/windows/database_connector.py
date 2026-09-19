@@ -38,7 +38,7 @@ from irbis_control.paths import icon_path
 from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
 from irbis_control.ui.storage_paths import database_connector_config_path as config_path
-from irbis_control.ui.theme import apply_light_palette
+from irbis_control.ui.theme import apply_light_palette, common_button_stylesheet
 
 APP_TITLE = "ИРБИС64 Контроль — подключение к базе"
 
@@ -279,7 +279,8 @@ class ConnectorWindow(QMainWindow):
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
-            """
+            common_button_stylesheet()
+            + """
             QMainWindow, QWidget#root, QWidget#tabPage { background: palette(window); color: palette(window-text); }
             QFrame#card { border: none; background: transparent; }
             QLabel#title, QLabel#cardTitle { font-weight: 600; }

@@ -5,6 +5,59 @@ from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
 
+def common_button_stylesheet() -> str:
+    """Единые размеры и состояния кнопок для всех окон приложения."""
+    return """
+        QPushButton {
+            min-height: 23px;
+            padding: 3px 10px;
+            color: #202020;
+            background: #ffffff;
+            border: 1px solid #b8c4d0;
+            border-radius: 4px;
+        }
+        QPushButton:hover {
+            background: #f3f7fb;
+            border-color: #8fa7bf;
+        }
+        QPushButton:pressed {
+            background: #e7eef5;
+            border-color: #718ba5;
+        }
+        QPushButton:disabled {
+            color: #777777;
+            background: #eeeeee;
+            border-color: #d2d2d2;
+        }
+        QPushButton#primaryButton, QPushButton#primary {
+            color: #ffffff;
+            background: #0878e3;
+            border-color: #0870d2;
+        }
+        QPushButton#primaryButton:hover, QPushButton#primary:hover { background: #006fd8; }
+        QPushButton#primaryButton:pressed, QPushButton#primary:pressed { background: #0064c4; }
+        QPushButton#primaryButton:disabled, QPushButton#primary:disabled {
+            color: #e4e4e4;
+            background: #8fb9df;
+            border-color: #8fb9df;
+        }
+        QPushButton#dangerButton {
+            color: #a92828;
+            background: #ffffff;
+            border-color: #d6aaaa;
+        }
+        QPushButton#dangerButton:hover { background: #fff2f2; border-color: #c67f7f; }
+        QPushButton#disclosureButton {
+            color: #006bd6;
+            background: transparent;
+            border: none;
+            padding: 3px 0;
+            text-align: left;
+        }
+        QPushButton#disclosureButton:hover { background: transparent; text-decoration: underline; }
+    """
+
+
 def apply_light_palette(app: QApplication) -> None:
     """Применяет единственную поддерживаемую светлую цветовую схему приложения."""
     try:
