@@ -3,13 +3,15 @@
   <h1>ИРБИС64 Контроль</h1>
   <p>Настольное приложение для проверки библиотечных записей ИРБИС64 по перечням из Excel.</p>
   <p>
-    <a href="https://github.com/VseMirka200/irbis64-control/releases/latest/download/IRBIS64Control-windows-x64.zip"><img src="https://img.shields.io/badge/-СКАЧАТЬ-555555?style=for-the-badge&amp;logo=github" alt="Скачать"></a>&nbsp;
-    <a href="README_EN.md"><img src="https://img.shields.io/badge/-ENGLISH-2468dc?style=for-the-badge" alt="English"></a>&nbsp;
-    <a href="https://github.com/VseMirka200/irbis64-control/issues/new"><img src="https://img.shields.io/badge/-ОШИБКА-dc3545?style=for-the-badge&amp;logo=github" alt="Сообщить об ошибке"></a>
+    <a href="https://github.com/VseMirka200/irbis64-control/archive/refs/heads/main.zip"><img src="https://img.shields.io/badge/-СКАЧАТЬ-555555?style=for-the-badge&logo=github" alt="Скачать"></a>&nbsp;
+    <a href="docs/ARCHITECTURE.md"><img src="https://img.shields.io/badge/-ДОКУМЕНТАЦИЯ-2468dc?style=for-the-badge" alt="Документация"></a>&nbsp;
+    <a href="https://github.com/VseMirka200/irbis64-control/issues/new"><img src="https://img.shields.io/badge/-ОШИБКА-dc3545?style=for-the-badge&logo=github" alt="Сообщить об ошибке"></a>
   </p>
 </div>
 
-Программа сверяет записи базы ИРБИС64 со списками веществ и реестром иностранных агентов. Найденные совпадения можно сохранить в Excel-отчёт и отметить в базе служебными полями. Приложение работает напрямую с сервером ИРБИС64 или с локальной TXT-копией базы.
+**ИРБИС64 Контроль** сверяет записи базы ИРБИС64 со списками веществ и реестром иностранных агентов. Найденные совпадения можно сохранить в Excel-отчёт и, после подтверждения, отметить в базе служебными полями. Приложение работает напрямую с сервером ИРБИС64 или с локальной TXT-копией базы.
+
+Текущая версия проекта — **1.0.1**. Для запуска из исходного кода требуется **Python 3.11+**.
 
 ## Возможности
 
@@ -21,10 +23,10 @@
 - формирование Excel-отчётов по выбранным разделам;
 - добавление служебных меток в записи ИРБИС64 и локальные TXT-базы;
 - предварительный просмотр изменений перед записью на сервер;
+- повторная проверка версии записи перед изменением, чтобы не перезаписать чужие правки;
 - создание копии исходных записей для восстановления;
-- сравнение двух Excel-отчётов или двух TXT-копий базы;
-- сохранение журнала выполненных операций;
-- автоматическая проверка новых версий приложения.
+- сравнение двух Excel-отчётов;
+- сохранение журнала выполненных операций между сессиями.
 
 ## Правила поиска
 
@@ -56,6 +58,28 @@
 
 **Только отчёт.** Результаты сохраняются в Excel без добавления меток в базу.
 
-**Сравнение файлов.** Можно увидеть добавленные, удалённые и изменённые записи между двумя отчётами или снимками базы.
+**Сравнение отчётов.** Можно увидеть добавленные, удалённые и изменённые записи между двумя Excel-отчётами.
 
-[Code of Conduct](.github/CODE_OF_CONDUCT.md) · [Contributing](.github/CONTRIBUTING.md) · [Security](.github/SECURITY.md)
+## Запуск из исходного кода
+
+```powershell
+git clone https://github.com/VseMirka200/irbis64-control.git
+cd irbis64-control
+.\start_irbis64-control.bat
+```
+
+Или вручную:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+
+## Документация и правила проекта
+
+- [Архитектура](docs/ARCHITECTURE.md)
+- [Code of Conduct](.github/CODE_OF_CONDUCT.md)
+- [Contributing](.github/CONTRIBUTING.md)
+- [Security](.github/SECURITY.md)
+- [Сообщить об ошибке](https://github.com/VseMirka200/irbis64-control/issues/new)
