@@ -47,7 +47,7 @@ def parse_txt_records(text: str) -> list[list[IrbisField]]:
         fields: list[IrbisField] = []
         for line in re.split(r"\r\n|\n|\r", raw):
             # Формат рабочей копии: "#TAG: <значение>". После двоеточия
-            # writer добавляет ровно один служебный ASCII-пробел. Важно снять
+            # функция записи добавляет ровно один служебный пробел ASCII. Важно снять
             # только его, а не `\s*`: начальные пробелы/табуляции могут быть
             # частью реального значения поля ИРБИС и участвуют в контрольном
             # хэше снимка.
@@ -59,11 +59,11 @@ def parse_txt_records(text: str) -> list[list[IrbisField]]:
 
 
 def parse_all_format_record(payload: str, fallback_mfn: int = 0) -> IrbisRecord:
-    """Decode the IRBIS ``&uf('+0')`` representation returned by search+format.
+    """Разбирает представление ИРБИС ``&uf('+0')``, полученное поиском с форматированием.
 
-    The server packs the record into control-character separated protocol lines.
-    This is the same logical representation used by command C, but it arrives
-    inside a single search result line (``MFN#<formatted record>``).
+    Сервер упаковывает запись в строки протокола, разделённые управляющими символами.
+    Такое же логическое представление использует команда C, но здесь оно приходит
+    в одной строке результата поиска (``MFN#<форматированная запись>``).
     """
     if payload is None:
         raise IrbisError("Пустое представление записи ИРБИС.")
@@ -72,7 +72,7 @@ def parse_all_format_record(payload: str, fallback_mfn: int = 0) -> IrbisRecord:
     normalized = normalized.replace("\x1f", "\n").replace("\x1e", "\n")
     parts = [part.strip("\r") for part in normalized.split("\n") if part.strip("\r") != ""]
 
-    # &uf('+0') may put a service fragment before the actual protocol record.
+    # &uf('+0') может добавить служебный фрагмент перед самой записью протокола.
     start = -1
     for index, part in enumerate(parts):
         if __import__("re").match(r"^\d+#-?\d+$", part.strip()):
@@ -150,10 +150,11 @@ def save_manifest(manifest: SnapshotManifest, path: str | Path) -> Path:
 
 # Управляет сеансом ИРБИС и преобразует ответы протокола в записи.
 class IrbisClient:
-    """Small IRBIS64 TCP client for the commands needed by IRBIS64 Control.
+    """Небольшой TCP-клиент ИРБИС64 для команд, нужных приложению.
 
-    The packet layout follows the public IRBIS64 TCP client examples: A/B for
-    registration, K for search+format, C for record reading and D for update.
+    Структура пакета соответствует открытым примерам TCP-клиентов ИРБИС64:
+    A/B отвечают за регистрацию, K — за поиск с форматированием,
+    C — за чтение записи, D — за обновление.
     """
 
     def __init__(
@@ -180,7 +181,7 @@ class IrbisClient:
         self.registered = False
 
     def clone(self) -> IrbisClient:
-        """Create an independent logical IRBIS client for parallel reads."""
+        """Создаёт независимый логический клиент ИРБИС для параллельного чтения."""
         return IrbisClient(
             self.host,
             self.port,
@@ -298,7 +299,7 @@ class IrbisClient:
 
     @staticmethod
     def _payload_text(data: bytes, *, ansi: bool = False) -> str:
-        """Return the IRBIS response payload after the 10-line service header."""
+        """Возвращает полезную часть ответа ИРБИС после служебного заголовка из 10 строк."""
         encodings = ("cp1251", "utf-8") if ansi else ("utf-8", "cp1251")
         text = ""
         for encoding in encodings:
@@ -309,20 +310,20 @@ class IrbisClient:
                 continue
         if not text:
             text = data.decode("cp1251" if ansi else "utf-8", errors="replace")
-        # IRBIS answers use CRLF for the 10 service header lines.  Split only
-        # ten times so text files can keep their own line structure intact.
+        # В ответах ИРБИС 10 строк служебного заголовка разделены CRLF.
+        # Ограничиваем число разбиений, чтобы сохранить структуру строк текстового файла.
         parts = text.split("\r\n", 10)
         return parts[10] if len(parts) > 10 else ""
 
     def read_text_file(self, specification: str) -> str:
-        """Read a text resource from the IRBIS server (command L)."""
+        """Читает текстовый ресурс с сервера ИРБИС командой L."""
         if not specification.strip():
             return ""
         payload = self._payload_text(self._send(self._packet("L", [specification.strip()])), ansi=True)
         return payload.replace("\x1f\x1e", "\r\n").replace("\x1f", "\r\n")
 
     def list_files(self, specification: str) -> list[str]:
-        """List server files matching an IRBIS file specification (command !)."""
+        """Возвращает файлы сервера по файловой спецификации ИРБИС командой !."""
         if not specification.strip():
             return []
         payload = self._payload_text(self._send(self._packet("!", [specification.strip()])), ansi=True)
@@ -336,7 +337,7 @@ class IrbisClient:
 
     @staticmethod
     def _parse_database_menu(text: str) -> list[dict[str, str]]:
-        """Parse DBNAM2.MNU into [{name, description}] for the Cataloger ARM."""
+        """Разбирает DBNAM2.MNU в список баз для АРМ «Каталогизатор»."""
         normalized = text.replace("\x1f\x1e", "\n").replace("\x1f", "\n")
         lines = [line.strip() for line in normalized.replace("\r", "").split("\n") if line.strip()]
         result: list[dict[str, str]] = []
@@ -346,9 +347,9 @@ class IrbisClient:
             raw_name = lines[index]
             description = lines[index + 1] if index + 1 < len(lines) else ""
             index += 2
-            # In DBNAM2.MNU a leading '-' means the database is unavailable
-            # for data input in the Cataloger ARM, therefore do not offer it
-            # in a write-capable selector.
+            # Начальный '-' в DBNAM2.MNU означает, что база недоступна для ввода
+            # данных в АРМ «Каталогизатор», поэтому не показываем её в списке
+            # баз, доступных для записи.
             if raw_name.startswith("-"):
                 continue
             name = raw_name.strip().upper()
@@ -359,11 +360,11 @@ class IrbisClient:
         return result
 
     def list_databases(self) -> list[dict[str, str]]:
-        """Return databases available to the Cataloger as a display-ready list.
+        """Возвращает готовый для отображения список баз АРМ «Каталогизатор».
 
-        Primary source is DATAI/DBNAM2.MNU.  If that menu is unavailable on a
-        particular installation, fall back to existing *.PAR descriptors in
-        the server database-information directory.
+        Основной источник — DATAI/DBNAM2.MNU. Если это меню недоступно,
+        используются существующие дескрипторы *.PAR из серверной папки
+        с описаниями баз данных.
         """
         try:
             menu = self.read_text_file("1..DBNAM2.MNU")
@@ -448,11 +449,11 @@ class IrbisClient:
         number: int = 500,
         first: int = 1,
     ) -> tuple[int, list[IrbisRecord]]:
-        """Search and receive complete records in one server round trip.
+        """Ищет и получает полные записи за один запрос к серверу.
 
-        Command K can format every found record. ``&uf('+0')`` asks IRBIS to
-        return the full protocol representation, so we avoid a separate command
-        C request for every MFN and do not create a local TXT snapshot.
+        Команда K форматирует каждую найденную запись. ``&uf('+0')`` запрашивает
+        у ИРБИС полное представление протокола, поэтому отдельный запрос командой C
+        для каждого MFN и локальный снимок TXT не нужны.
         """
         number = max(1, min(int(number or 500), 2000))
         packet = self._packet(
@@ -482,9 +483,8 @@ class IrbisClient:
             try:
                 records.append(parse_all_format_record(payload, mfn))
             except IrbisError:
-                # Do not silently invent a record: a malformed page should be
-                # visible to the caller, because writing by the wrong MFN is
-                # worse than stopping the operation.
+                # Не создаём запись из неполных данных: вызывающий код должен увидеть
+                # ошибку страницы, потому что запись по неверному MFN опаснее остановки.
                 raise
         return total, records
 
@@ -497,7 +497,7 @@ class IrbisClient:
         progress_cb: ProgressCallback | None = None,
         cancel_cb: Callable[[], bool] | None = None,
     ) -> list[IrbisRecord]:
-        """Read a search result in large formatted pages without a TXT copy."""
+        """Читает результат поиска большими форматированными страницами без копии TXT."""
         first = 1
         total: int | None = None
         records: list[IrbisRecord] = []
@@ -530,10 +530,10 @@ class IrbisClient:
         candidates: Iterable[int] = (100, 500, 1000, 1500, 2000),
         progress_cb: ProgressCallback | None = None,
     ) -> tuple[int, int]:
-        """Return the largest page size successfully handled by this server.
+        """Возвращает наибольший размер страницы, который успешно обрабатывает сервер.
 
-        The probe is read-only. IRBIS command D writes exactly one record, so
-        write throughput must not be tested by modifying a production record.
+        Проверка только читает данные. Команда D ИРБИС записывает ровно одну запись,
+        поэтому скорость записи нельзя проверять изменением рабочей записи.
         """
         safe_size = 0
         total = 0
@@ -619,13 +619,13 @@ def read_records_parallel(
     workers: int = 4,
     progress_cb: ProgressCallback | None = None,
 ) -> list[IrbisRecord]:
-    """Read records using several independent IRBIS sessions.
+    """Читает записи через несколько независимых сеансов ИРБИС.
 
-    IRBIS command C returns one record per request. On remote/server installs the
-    round-trip latency dominates, so a small number of parallel registered
-    sessions considerably reduces snapshot time. The first worker reuses the
-    already registered client; remaining workers use clones with independent
-    process/command identifiers.
+    Команда C ИРБИС возвращает одну запись за запрос. При работе с удалённым сервером
+    основное время занимает передача данных, поэтому несколько параллельных
+    зарегистрированных сеансов заметно ускоряют создание снимка. Первый поток
+    использует уже зарегистрированный клиент, остальные — его копии с независимыми
+    идентификаторами процесса и команды.
     """
     total = len(mfns)
     if total == 0:
@@ -831,7 +831,7 @@ def apply_modified_snapshot(
             )
 
     # Если всё записалось без конфликтов, сразу обновляем локальный снимок и
-    # карту MFN по фактическому состоянию сервера. Иначе версии в manifest
+    # карту MFN по фактическому состоянию сервера. Иначе версии в манифесте
     # устареют после первой же записи и повторная отправка даст ложные конфликты.
     if written and conflicts == 0:
         refreshed: list[IrbisRecord] = []

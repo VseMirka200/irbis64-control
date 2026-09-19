@@ -1,1 +1,1 @@
-"""Report generation and comparison services."""
+"""Сервисы создания и сравнения отчётов."""

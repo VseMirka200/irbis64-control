@@ -34,10 +34,10 @@ jobs:
         shell: pwsh
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed `
-            --name IRBIS64Control --icon assets/irbis64_control.ico `
+            --name IRBIS64Control --icon assets/icons/irbis64_control.ico `
             --add-data "assets;assets" main.py
           python -m PyInstaller --noconfirm --clean --onefile --windowed `
-            --name IRBIS64ControlDB --icon assets/irbis64_control.ico `
+            --name IRBIS64ControlDB --icon assets/icons/irbis64_control.ico `
             --add-data "assets;assets" db_connector.py
           Rename-Item -LiteralPath dist/IRBIS64Control.exe -NewName "ИРБИС64 Контроль.exe"
           Compress-Archive `

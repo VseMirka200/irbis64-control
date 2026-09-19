@@ -1,1 +1,1 @@
-"""PyQt user-interface modules."""
+"""Модули пользовательского интерфейса на PyQt."""

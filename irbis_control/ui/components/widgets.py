@@ -27,12 +27,12 @@ from irbis_control.core.matcher import (
     match_rule_needs_review,
     parse_match_rule,
 )
-from irbis_control.paths import resource_path
+from irbis_control.paths import icon_path
 
 
 # Оставляет выбор базы и обновление списка доступными в одном поле.
 class DatabaseComboBox(QComboBox):
-    """A database field with adjacent dropdown and refresh icons on the right."""
+    """Поле базы данных с кнопками выбора и обновления справа."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -46,7 +46,7 @@ class DatabaseComboBox(QComboBox):
         self.dropdown_button.setToolTip("Выбрать базу")
         self.dropdown_button.setAccessibleName("Выбрать базу")
         self.dropdown_button.clicked.connect(self.showPopup)
-        self.refresh_action = QAction(QIcon(resource_path("assets", "refresh.svg")), "Обновить список баз", self)
+        self.refresh_action = QAction(QIcon(icon_path("refresh.svg")), "Обновить список баз", self)
         self.refresh_button = QToolButton(self)
         self.refresh_button.setDefaultAction(self.refresh_action)
         for button in (self.dropdown_button, self.refresh_button):
@@ -67,7 +67,7 @@ class DatabaseComboBox(QComboBox):
 
 # Согласует размер окна с текущей вкладкой, а не с самой большой страницей.
 class CompactTabWidget(QTabWidget):
-    """A tab container that does not inherit the widest page as its minimum."""
+    """Контейнер вкладок, минимальная ширина которого не зависит от самой широкой страницы."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -92,7 +92,7 @@ class CompactTabWidget(QTabWidget):
 
 # Передаёт размеры макета прокручиваемой странице без лишнего запаса.
 class LayoutHintWidget(QWidget):
-    """Expose the current layout hint to a resizable scroll area."""
+    """Передаёт текущий рекомендуемый размер макета изменяемой области прокрутки."""
 
     def sizeHint(self) -> QSize:
         layout = self.layout()
@@ -148,7 +148,7 @@ class SectionCard(QFrame):
 
 # Позволяет выбрать несколько полей правила без закрытия списка после каждого щелчка.
 class MatchFieldsComboBox(QComboBox):
-    """Select several rule fields while keeping the dropdown open."""
+    """Позволяет выбрать несколько полей правила, не закрывая выпадающий список."""
 
     def __init__(self) -> None:
         super().__init__()

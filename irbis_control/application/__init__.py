@@ -1,1 +1,1 @@
-"""Application configuration and use-case services."""
+"""Настройки приложения и сервисы пользовательских сценариев."""

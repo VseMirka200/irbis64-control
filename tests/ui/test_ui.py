@@ -11,7 +11,9 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 from irbis_control.application.settings import ApplicationSettings
-from irbis_control.ui import db_connector_window, dialogs, main_window, widgets, workers
+from irbis_control.ui import db_connector_window, main_window
+from irbis_control.ui.components import dialogs, widgets
+from irbis_control.ui.services import workers
 
 
 # Проверяем сборку окон и сигналы Qt без сети и без доступа к настройкам пользователя.

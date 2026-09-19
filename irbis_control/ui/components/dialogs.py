@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from irbis_control import APP_TITLE as APP_TITLE
 from irbis_control.infrastructure.atomic_io import atomic_write_text
-from irbis_control.paths import resource_path
+from irbis_control.paths import icon_path
 from irbis_control.reporting.models import ResultDiffRow, ResultDiffSummary
 from irbis_control.reporting.result_diff import (
     compare_result_files,
@@ -44,7 +44,7 @@ class ProgressDialog(QDialog):
     def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.resize(460, 260)
         self.setMinimumSize(360, 220)
@@ -128,7 +128,7 @@ class UsefulLinksDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Полезные ссылки")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
         self.resize(620, 360)
         self.setMinimumSize(620, 300)
         self.links = self._load_links()
@@ -391,7 +391,7 @@ class ResultComparisonDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Сравнение старого и нового результата")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
         self.resize(900, 580)
         self.setMinimumSize(680, 440)
         self.last_output_path = ""
@@ -645,7 +645,7 @@ class TextComparisonDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Сравнение TXT-баз")
-        self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
+        self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
         self.resize(780, 520)
         self.setMinimumSize(600, 400)
         self.last_output_path = ""

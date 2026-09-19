@@ -17,3 +17,7 @@ def runtime_root() -> Path:
 
 def resource_path(*parts: str) -> str:
     return str(runtime_root().joinpath(*parts))
+
+
+def icon_path(filename: str) -> str:
+    return resource_path("assets", "icons", filename)

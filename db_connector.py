@@ -1,6 +1,6 @@
-"""Compatibility entry point for the standalone database connector."""
+"""Совместимая точка входа для отдельного подключения к базе данных."""
 
-from irbis_control.ui.db_connector_window import main
+from irbis_control.ui.windows.database_connector import main
 
 if __name__ == "__main__":
     raise SystemExit(main())
