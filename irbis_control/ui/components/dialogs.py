@@ -266,7 +266,7 @@ class ManualMatchReviewDialog(QDialog):
             "Причина сомнения",
         ]
         self.table = CopyableTableWidget(len(rows), len(headers))
-        self.table.setObjectName("resultsTable")
+        self.table.setObjectName("manualReviewTable")
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
@@ -666,8 +666,11 @@ class ProgressDialog(QDialog):
         root.addWidget(self.status_label)
 
         self.progress = QProgressBar()
+        self.progress.setObjectName("dialogProgress")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
+        self.progress.setFormat("Выполнено: %p%")
+        self.progress.setTextVisible(True)
         root.addWidget(self.progress)
 
         self.text_edit = QTextEdit()

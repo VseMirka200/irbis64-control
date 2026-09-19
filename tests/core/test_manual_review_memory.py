@@ -90,6 +90,22 @@ def test_review_identity_groups_same_author_and_same_registry_candidate() -> Non
     assert first.key != other_candidate.key
 
 
+def test_review_identity_groups_repeated_initial_and_full_name() -> None:
+    repeated_initial = _result(394, "Шпионский роман")
+    repeated_initial.database_matched_value = "Фаулз Д. Джон"
+    repeated_initial.matched_value = "Фаулз, Джон"
+    plain_name = _result(395, "Нефритовые четки")
+    plain_name.database_matched_value = "Фаулз, Джон"
+    plain_name.matched_value = "Фаулз Джон"
+
+    first = review_identity(repeated_initial)
+    second = review_identity(plain_name)
+
+    assert first is not None
+    assert second is not None
+    assert first.key == second.key
+
+
 def test_saved_confirmation_auto_confirms_same_mapping_on_later_records(tmp_path: Path) -> None:
     memory_path = tmp_path / "manual_review_confirmations.json"
     first_run = [_result(394, "Шпионский роман")]

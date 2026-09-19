@@ -278,7 +278,23 @@ def normalize_title(value: Any) -> str:
 def normalize_author(value: Any) -> str:
     text = unicodedata.normalize("NFKC", safe_text(value)).lower().replace("ё", "е")
     text = re.sub(r"[^a-zа-я]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+    tokens = text.split()
+
+    # В ИРБИС полное имя иногда хранится вместе с собственным инициалом:
+    # «Фаулз Д. Джон», «Акунин Б. Борис». Такой инициал не является вторым
+    # именем и не должен отличать запись от «Фаулз, Джон».
+    normalized_tokens = [
+        token
+        for index, token in enumerate(tokens)
+        if not (
+            index > 0
+            and len(token) == 1
+            and index + 1 < len(tokens)
+            and len(tokens[index + 1]) > 1
+            and tokens[index + 1].startswith(token)
+        )
+    ]
+    return " ".join(normalized_tokens)
 
 
 def _author_identity(value: Any) -> tuple[str, tuple[str, ...]] | None:

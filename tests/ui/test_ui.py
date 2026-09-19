@@ -8,12 +8,14 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QDialog
 
 from irbis_control.application.settings import THEME_DARK, THEME_SYSTEM, ApplicationSettings
+from irbis_control.core.models import ComparisonOptions
 from irbis_control.ui import db_connector_window, main_window
 from irbis_control.ui.components import dialogs, widgets
 from irbis_control.ui.services import workers
+from irbis_control.ui.windows import main_run
 from irbis_control.ui.windows.connection_dialog import IrbisConnectionDialog
 
 
@@ -268,6 +270,75 @@ class UiTests(unittest.TestCase):
                 finally:
                     window.close()
                     window.deleteLater()
+
+    def test_progress_dialog_shows_percent_and_locks_close_while_running(self) -> None:
+        dialog = dialogs.ProgressDialog("Выполнение", None)
+        self.addCleanup(dialog.deleteLater)
+        self.addCleanup(dialog.close)
+
+        dialog.start("Подготовка…")
+        self.app.processEvents()
+        self.assertTrue(dialog.isVisible())
+        self.assertEqual("Выполнено: %p%", dialog.progress.format())
+        self.assertFalse(dialog.close_button.isEnabled())
+
+        dialog.set_progress(42, "Обработано 42 записи")
+        self.assertEqual(42, dialog.progress.value())
+        self.assertEqual("Обработано 42 записи", dialog.status_label.text())
+
+        dialog.finish("Готово", 100)
+        self.assertEqual(100, dialog.progress.value())
+        self.assertTrue(dialog.close_button.isEnabled())
+
+    def test_manual_review_table_does_not_use_blue_selection(self) -> None:
+        window = main_window.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        dialog = dialogs.ManualMatchReviewDialog([], window)
+        self.addCleanup(dialog.deleteLater)
+        self.addCleanup(dialog.close)
+
+        self.assertEqual("manualReviewTable", dialog.table.objectName())
+        self.assertIn("QTableWidget#manualReviewTable::item:selected", window.styleSheet())
+        self.assertIn("QTableWidget#manualReviewTable::item:hover", window.styleSheet())
+        self.assertIn("selection-background-color:", window.styleSheet())
+
+    def test_manual_review_temporarily_releases_progress_dialog_modality(self) -> None:
+        window = main_window.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        worker = workers.ComparisonWorker(
+            [],
+            "",
+            [],
+            "",
+            "",
+            ComparisonOptions(),
+            {},
+            "",
+            "",
+            "",
+            333,
+            333,
+            900,
+        )
+        window.worker = worker
+        window.progress_dialog.start("Требуется ручная проверка…")
+        visible_during_prompt: list[bool] = []
+        review_dialog = Mock()
+        review_dialog.DialogCode = QDialog.DialogCode
+        review_dialog.exec.side_effect = lambda: (
+            visible_during_prompt.append(window.progress_dialog.isVisible()),
+            QDialog.DialogCode.Rejected,
+        )[1]
+
+        with patch.object(main_run, "ManualMatchReviewDialog", return_value=review_dialog):
+            window._review_suspicious_matches([(0, Mock())])
+
+        self.assertEqual([False], visible_during_prompt)
+        self.assertTrue(window.progress_dialog.isVisible())
+        self.assertTrue(worker.review_event.is_set())
+        window.progress_dialog.finish("Готово")
 
     def test_match_rules_reject_duplicates_and_keep_last_rule(self) -> None:
         editor = widgets.MatchRulesEditor()

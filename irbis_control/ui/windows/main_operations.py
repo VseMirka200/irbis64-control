@@ -340,9 +340,13 @@ class MainWindowOperationsMixin:
             "apply": "Запись изменений в ИРБИС…",
             "clean_markers": "Очистка меток прямо в ИРБИС…",
         }
-        self._set_irbis_status(captions.get(mode, "Выполнение операции…"), "running")
+        caption = captions.get(mode, "Выполнение операции…")
+        self._set_irbis_status(caption, "running")
         if not silent:
-            self._append_progress(captions.get(mode, "Операция ИРБИС"))
+            if mode == "clean_markers":
+                self.progress_dialog.setWindowTitle("Удаление меток")
+                self.progress_dialog.start(caption)
+            self._append_progress(caption)
 
         self.irbis_thread = QThread(self)
         self.irbis_worker = IrbisOperationWorker(mode, params)
@@ -363,6 +367,8 @@ class MainWindowOperationsMixin:
         self.irbis_progress.show()
         self.irbis_progress.setValue(percent)
         self._set_irbis_status(text, "running")
+        if self.irbis_worker is not None and self.irbis_worker.mode == "clean_markers":
+            self.progress_dialog.set_progress(percent, text)
         self._append_progress(text)
 
     @pyqtSlot(str, object)
@@ -452,6 +458,7 @@ class MainWindowOperationsMixin:
             )
             if backup:
                 self._append_progress(f"Rollback-копия перед очисткой: {backup}")
+            self.progress_dialog.finish("Удаление меток завершено.", 100)
             QMessageBox.information(
                 self,
                 APP_TITLE,
@@ -492,6 +499,8 @@ class MainWindowOperationsMixin:
         QTimer.singleShot(0, self._fit_scroll_content)
         self._set_irbis_status("Ошибка подключения/обмена с ИРБИС", "error")
         self._append_progress(f"Ошибка ИРБИС: {error}")
+        if mode == "clean_markers":
+            self.progress_dialog.finish("Ошибка удаления меток.", 0)
         QMessageBox.critical(self, APP_TITLE, f"Операция ИРБИС не выполнена:\n{error}")
 
     @pyqtSlot()
@@ -786,6 +795,14 @@ class MainWindowOperationsMixin:
             return
         if not output_path.lower().endswith(".txt"):
             output_path += ".txt"
+        self.progress_dialog.setWindowTitle("Удаление меток")
+        self.progress_dialog.start("Подготовка к очистке TXT-базы…")
+        self._append_progress(f"Удаление меток из TXT-базы: {source_path}")
+
+        def update_cleanup_progress(percent: int, text: str) -> None:
+            self.progress_dialog.set_progress(percent, text)
+            QApplication.processEvents()
+
         try:
             written, cleaned_records = remove_database_markers(
                 source_path,
@@ -798,8 +815,11 @@ class MainWindowOperationsMixin:
                 foreign_agent_marker_field=int(self.marker_settings["foreign_agent_marker_field"]),
                 foreign_organization_marker_field=int(self.marker_settings["foreign_organization_marker_field"]),
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
+                progress_cb=update_cleanup_progress,
             )
         except Exception as exc:
+            self.progress_dialog.finish("Ошибка удаления меток.", 0)
+            self._append_progress(f"Ошибка очистки TXT-базы: {exc}")
             QMessageBox.warning(self, APP_TITLE, f"Не удалось очистить TXT-базу:\n{exc}")
             return
         cleaned_path = str(Path(written))
@@ -813,6 +833,7 @@ class MainWindowOperationsMixin:
         )
         self._save_irbis_config()
         self._append_progress(f"Очищенная TXT-копия выбрана для отправки в ИРБИС: {cleaned_path}")
+        self.progress_dialog.finish("Удаление меток завершено.", 100)
         QMessageBox.information(
             self,
             APP_TITLE,
