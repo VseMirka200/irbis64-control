@@ -10,6 +10,14 @@ from irbis_control.application.settings import (
 
 
 class ApplicationSettingsTests(unittest.TestCase):
+    def test_invalid_payload_uses_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "settings.json"
+            for payload in ("[]", "null", "42", '"text"', "{broken", '{"create_database_backup": 0}'):
+                with self.subTest(payload=payload):
+                    path.write_text(payload, encoding="utf-8")
+                    self.assertEqual(load_application_settings(path), ApplicationSettings())
+
     def test_defaults_are_safe(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             settings = load_application_settings(Path(temp_dir) / "missing.json")

@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+cd /d "%~dp0.."
 title Build IRBIS64 Control EXE
 
 set "PYTHON_CMD="
@@ -20,7 +20,7 @@ exit /b 1
 
 :python_found
 set "VENV_PY=.venv\Scripts\python.exe"
-set "BOOTSTRAP_TMP=%~dp0.venv\.tmp"
+set "BOOTSTRAP_TMP=%CD%\.venv\.tmp"
 if not exist "%BOOTSTRAP_TMP%" (
   mkdir "%BOOTSTRAP_TMP%"
   if errorlevel 1 goto error

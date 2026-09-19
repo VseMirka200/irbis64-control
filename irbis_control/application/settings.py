@@ -7,12 +7,14 @@ from pathlib import Path
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 
 
+# Хранит общие настройки с безопасными значениями для первого запуска.
 @dataclass
 class ApplicationSettings:
     create_database_backup: bool = True
     check_updates_on_start: bool = True
 
 
+# Читает настройки по пути и возвращает безопасные значения, если файл повреждён или имеет неверную структуру.
 def load_application_settings(path: str | Path) -> ApplicationSettings:
     source = Path(path)
     if not source.is_file():
@@ -20,6 +22,9 @@ def load_application_settings(path: str | Path) -> ApplicationSettings:
     try:
         payload = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
+        return ApplicationSettings()
+
+    if not isinstance(payload, dict):
         return ApplicationSettings()
 
     create_backup = payload.get("create_database_backup", True)
@@ -34,6 +39,7 @@ def load_application_settings(path: str | Path) -> ApplicationSettings:
     )
 
 
+# Принимает путь и настройки, сохраняет их целиком и возвращает путь к готовому файлу.
 def save_application_settings(path: str | Path, settings: ApplicationSettings) -> Path:
     payload = asdict(settings)
     payload["schema_version"] = 1

@@ -25,6 +25,8 @@ jobs:
           python -m pip install "ruff>=0.6,<1"
       - name: Lint
         run: python -m ruff check .
+      - name: Check formatting
+        run: python -m ruff format --check .
       - name: Compile sources
         run: python -m compileall -q irbis_control main.py db_connector.py matcher.py irbis_bridge.py result_diff.py atomic_io.py ui_locale.py
       - name: Run tests

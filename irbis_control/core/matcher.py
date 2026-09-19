@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import html
-import json
 import re
 import unicodedata
-import warnings
 from collections import defaultdict
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from dataclasses import asdict, dataclass
 from itertools import combinations
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any
 
+from irbis_control.core.models import (
+    ComparisonSummary,
+    DatabaseRecord,
+    ExcelEntry,
+    ForeignAgentEntry,
+    MarkerApplicationStats,
+    MatchResult,
+)
+from irbis_control.core.text import safe_text as safe_text
 from irbis_control.infrastructure.atomic_io import atomic_write_via_path
+from irbis_control.infrastructure.excel_io import load_workbook_quiet as _load_workbook_quiet
 
 try:
     from rapidfuzz import fuzz, process
@@ -26,144 +34,48 @@ ProgressCallback = Callable[[int, str], None]
 CancelCallback = Callable[[], bool]
 
 
-def _load_workbook_quiet(path: str | Path, **kwargs):
-    from openpyxl import load_workbook
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Workbook contains no default style, apply openpyxl's default",
-            category=UserWarning,
-            module=r"openpyxl\.styles\.stylesheet",
-        )
-        return load_workbook(path, **kwargs)
-
-
-@dataclass
-class DatabaseRecord:
-    record_number: int
-    source_file: str = ""
-    source_record_number: int = 0
-    isbns: list[str] = field(default_factory=list)
-    titles: list[str] = field(default_factory=list)
-    authors: list[str] = field(default_factory=list)
-    primary_authors: list[str] = field(default_factory=list)
-    organizations: list[str] = field(default_factory=list)
-    inventory_numbers: list[str] = field(default_factory=list)
-    publication: list[str] = field(default_factory=list)
-    raw_record: str = ""
-
-    @property
-    def main_isbn(self) -> str:
-        return self.isbns[0] if self.isbns else ""
-
-    @property
-    def main_title(self) -> str:
-        return self.titles[0] if self.titles else ""
-
-    @property
-    def main_author(self) -> str:
-        return self.authors[0] if self.authors else ""
-
-
-@dataclass
-class ExcelEntry:
-    entry_id: int
-    source_file: str
-    sheet_name: str
-    row_number: int
-    author: str = ""
-    title: str = ""
-    isbn: str = ""
-    registration_number: str = ""
-    raw_data: dict[str, Any] = field(default_factory=dict)
-    publisher: str = ""
-    year: str = ""
-
-
-@dataclass
-class ForeignAgentEntry:
-    entry_id: int
-    source_file: str
-    sheet_name: str
-    row_number: int
-    registry_number: str = ""
-    name: str = ""
-    participants: list[str] = field(default_factory=list)
-    agent_type: str = ""
-    inclusion_date: str = ""
-    exclusion_date: str = ""
-    raw_data: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def is_active(self) -> bool:
-        return not bool(self.exclusion_date.strip())
-
-
-@dataclass
-class MatchResult:
-    status: str
-    method: str
-    confidence: float
-    excel: ExcelEntry
-    database: Optional[DatabaseRecord] = None
-    note: str = ""
-    source_type: str = "Вещества"
-    matched_value: str = ""
-    foreign_agent: Optional[ForeignAgentEntry] = None
-
-
-@dataclass
-class ComparisonSummary:
-    database_file: str
-    excel_files: list[str]
-    database_records: int
-    database_records_with_isbn: int
-    excel_rows: int
-    matched_excel_rows: int
-    unmatched_excel_rows: int
-    result_rows: int
-    exact_isbn_rows: int
-    exact_title_rows: int
-    probable_rows: int
-    foreign_agents_file: str = ""
-    foreign_agent_rows: int = 0
-    matched_foreign_agent_rows: int = 0
-    foreign_agent_result_rows: int = 0
-    substance_matched_records: int = 0
-    foreign_agent_matched_records: int = 0
-    review_rows: int = 0
-    output_file: str = ""
-    modified_database_file: str = ""
-    modified_database_records: int = 0
-    markers_already_present: int = 0
-    markers_added: int = 0
-    marker_duplicates_repaired: int = 0
-    warnings: list[str] = field(default_factory=list)
-
-
-@dataclass
-class MarkerApplicationStats:
-    already_present: int = 0
-    added: int = 0
-    duplicates_repaired: int = 0
-
-
 HEADER_SYNONYMS = {
-    "publisher": {"издательство", "издатель", "наименование издательства", "publisher", "publishing house"},
+    "publisher": {
+        "издательство",
+        "издатель",
+        "изд-во",
+        "изд во",
+        "наименование издательства",
+        "publisher",
+        "publishing house",
+    },
     "year": {"год", "год издания", "год выпуска", "год публикации", "year", "publication year"},
     "author": {
-        "автор", "авторы", "фио автора", "author", "authors",
+        "автор",
+        "авторы",
+        "фио автора",
+        "author",
+        "authors",
     },
     "title": {
-        "заглавие", "название", "наименование", "название книги", "title", "book title",
+        "заглавие",
+        "название",
+        "наименование",
+        "название книги",
+        "title",
+        "book title",
     },
     "isbn": {
-        "isbn", "isbn 10", "isbn 13", "исбн", "международный стандартный номер книги",
+        "isbn",
+        "isbn 10",
+        "isbn 13",
+        "исбн",
+        "международный стандартный номер книги",
     },
     "registration_number": {
-        "рег №", "рег номер", "регистрационный номер", "регистрационный №",
-        "инв №", "инвентарный номер", "номер", "рег. №",
+        "рег №",
+        "рег номер",
+        "регистрационный номер",
+        "регистрационный №",
+        "инв №",
+        "инвентарный номер",
+        "номер",
+        "рег. №",
     },
 }
 
@@ -190,7 +102,11 @@ FOREIGN_AGENT_HEADER_SYNONYMS = {
 
 SOURCE_SUBSTANCES = "Вещества"
 MATCH_FIELDS = {
-    "isbn": "ISBN", "title": "Название", "author": "автор", "publisher": "издательство", "year": "год",
+    "isbn": "ISBN",
+    "title": "Название",
+    "author": "автор",
+    "publisher": "издательство",
+    "year": "год",
 }
 EXTRA_MATCH_RULES = {
     "_".join(fields): (" + ".join(MATCH_FIELDS[key] for key in fields), fields)
@@ -207,8 +123,7 @@ MATCH_RULE_LABELS = {
 
 def match_rule_needs_review(fields: tuple[str, ...]) -> bool:
     return not (
-        "isbn" in fields
-        or "title" in fields and ("author" in fields or {"publisher", "year"}.issubset(fields))
+        "isbn" in fields or "title" in fields and ("author" in fields or {"publisher", "year"}.issubset(fields))
     )
 
 
@@ -220,9 +135,10 @@ def parse_match_rule(value: str) -> str:
     fields: set[str] = set()
     for part in parts:
         normalized = normalize_header(part)
-        key = next((key for key in MATCH_FIELDS if normalized in {
-            normalize_header(alias) for alias in HEADER_SYNONYMS[key]
-        }), None)
+        key = next(
+            (key for key in MATCH_FIELDS if normalized in {normalize_header(alias) for alias in HEADER_SYNONYMS[key]}),
+            None,
+        )
         if key is None:
             raise ValueError(f"Неизвестное поле «{part.strip()}». Доступны: ISBN, название, автор, издательство, год.")
         if key in fields:
@@ -234,8 +150,12 @@ def parse_match_rule(value: str) -> str:
         return "use_title_fallback"
     key = "_".join(field for field in MATCH_FIELDS if field in fields)
     if key not in EXTRA_MATCH_RULES:
-        raise ValueError("Выберите ISBN либо название или автора с другим полем. Одного автора, года или издательства недостаточно.")
+        raise ValueError(
+            "Выберите ISBN либо название или автора с другим полем. Одного автора, года или издательства недостаточно."
+        )
     return key
+
+
 SOURCE_FOREIGN_AGENTS = "Иностранные агенты"
 DEFAULT_SUBSTANCE_MARKER = "^AIII"
 DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE = "^AI^@{name}"
@@ -245,28 +165,44 @@ DEFAULT_FOREIGN_AGENT_MARKER_FIELD = 333
 DEFAULT_AGE_MARKER_FIELD = 900
 
 TITLE_STOP_WORDS = {
-    "роман", "романы", "повесть", "повести", "рассказ", "рассказы", "сборник",
-    "издание", "изд", "учебник", "учебное", "пособие", "текст", "перевод",
-    "английского", "англ", "русского", "рус", "книга", "кн", "том", "часть",
-    "16", "18", "12", "6", "0",
+    "роман",
+    "романы",
+    "повесть",
+    "повести",
+    "рассказ",
+    "рассказы",
+    "сборник",
+    "издание",
+    "изд",
+    "учебник",
+    "учебное",
+    "пособие",
+    "текст",
+    "перевод",
+    "английского",
+    "англ",
+    "русского",
+    "рус",
+    "книга",
+    "кн",
+    "том",
+    "часть",
+    "16",
+    "18",
+    "12",
+    "6",
+    "0",
 }
 
 
+# Позволяет отличить отмену пользователем от ошибки чтения или сравнения.
 class ComparisonCancelled(RuntimeError):
     pass
 
 
-def _cancelled(cancel_cb: Optional[CancelCallback]) -> None:
+def _cancelled(cancel_cb: CancelCallback | None) -> None:
     if cancel_cb and cancel_cb():
         raise ComparisonCancelled("Операция отменена пользователем")
-
-
-def safe_text(value: Any) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, float) and value.is_integer():
-        return str(int(value))
-    return str(value).strip()
 
 
 def normalize_header(value: Any) -> str:
@@ -320,11 +256,23 @@ def normalize_isbn(value: Any) -> str:
 
 def normalize_title(value: Any) -> str:
     text = unicodedata.normalize("NFKC", safe_text(value)).lower().replace("ё", "е")
-    text = re.sub(r"\[[^\]]*\]|\([^)]*\)", " ", text)
+    # Содержимое скобок может быть частью настоящего названия (например,
+    # «Я (не) робот»). Убираем сами скобки, а возрастные пометы удаляем ниже.
+    text = re.sub(r"[\[\]()]", " ", text)
     text = re.sub(r"\b\d+\+\b", " ", text)
     text = re.sub(r"[^0-9a-zа-я]+", " ", text)
-    tokens = [token for token in text.split() if token not in TITLE_STOP_WORDS]
-    return " ".join(tokens)
+    tokens = text.split()
+    filtered = [token for token in tokens if token not in TITLE_STOP_WORDS]
+    if filtered:
+        return " ".join(filtered)
+
+    # Иногда служебным словом является само название произведения: «Текст»,
+    # «Роман», «Рассказы». В таком случае сохраняем главный сегмент до
+    # первого двоеточия, иначе книга становится принципиально ненахожимой.
+    main_part = re.split(r"[:;/]", unicodedata.normalize("NFKC", safe_text(value)), maxsplit=1)[0]
+    main_part = main_part.lower().replace("ё", "е")
+    main_part = re.sub(r"[\[\]()]|\b\d+\+\b", " ", main_part)
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zа-я]+", " ", main_part)).strip()
 
 
 def normalize_author(value: Any) -> str:
@@ -366,15 +314,39 @@ def author_surname(value: Any) -> str:
 
 
 def normalize_publication_year(value: Any) -> str:
-    match = re.fullmatch(r"\[?(\d{4})\]?(?:\s*г(?:од)?\.?)?", safe_text(value), re.IGNORECASE)
-    return match.group(1) if match else ""
+    match = re.fullmatch(
+        r"(?:cop|сор|печ)\.?\s*\[?(\d{4})\]?|\[?(\d{4})\]?(?:\s*г(?:од)?\.?)?",
+        safe_text(value),
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1) or match.group(2)
 
 
 def normalize_publisher(value: Any) -> str:
     normalized = normalize_header(value)
-    if normalized in {"нет", "не указано", "не указан", "неизвестно", "б и", "без издательства", "unknown", "na", "n a"}:
+    if normalized in {
+        "нет",
+        "не указано",
+        "не указан",
+        "неизвестно",
+        "б и",
+        "без издательства",
+        "unknown",
+        "na",
+        "n a",
+    }:
         return ""
     return normalized
+
+
+def publisher_variants(value: Any) -> set[str]:
+    """Возвращает полное название издателя и отдельные элементы списка."""
+    raw = safe_text(value)
+    variants = {normalize_publisher(raw)}
+    variants.update(normalize_publisher(part) for part in re.split(r"[;,/|]+", raw))
+    return variants - {""}
 
 
 def _extract_subfield(value: str, code: str) -> str:
@@ -389,7 +361,7 @@ def _read_text_file_with_encoding(path: str | Path) -> tuple[str, str]:
     if raw.startswith(b"\xef\xbb\xbf"):
         return raw.decode("utf-8-sig"), "utf-8-sig"
 
-    last_error: Optional[Exception] = None
+    last_error: Exception | None = None
     for encoding in ("utf-8", "cp1251"):
         try:
             return raw.decode(encoding), encoding
@@ -420,12 +392,8 @@ def database_record_from_tag_values(
             key = str(tag).strip().lstrip("0") or "0"
         fields[key].append(safe_text(value))
 
-    isbns = [
-        value for value in (_extract_subfield(item, "A") for item in fields.get("10", [])) if value
-    ]
-    titles = [
-        value for value in (_extract_subfield(item, "A") for item in fields.get("200", [])) if value
-    ]
+    isbns = [value for value in (_extract_subfield(item, "A") for item in fields.get("10", [])) if value]
+    titles = [value for value in (_extract_subfield(item, "A") for item in fields.get("200", [])) if value]
 
     authors: list[str] = []
     primary_authors: list[str] = []
@@ -449,9 +417,7 @@ def database_record_from_tag_values(
             if organization:
                 organizations.append(organization)
 
-    inventory_numbers = [
-        value for value in (_extract_subfield(item, "B") for item in fields.get("910", [])) if value
-    ]
+    inventory_numbers = [value for value in (_extract_subfield(item, "B") for item in fields.get("910", [])) if value]
 
     return DatabaseRecord(
         record_number=record_number,
@@ -470,8 +436,8 @@ def database_record_from_tag_values(
 
 def parse_database(
     path: str | Path,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> list[DatabaseRecord]:
     path = Path(path)
     if progress_cb:
@@ -583,7 +549,7 @@ def _make_entry(
 def _read_xlsx_entries(
     path: Path,
     start_entry_id: int,
-    cancel_cb: Optional[CancelCallback] = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[ExcelEntry], list[str]]:
     entries: list[ExcelEntry] = []
     warnings: list[str] = []
@@ -623,7 +589,7 @@ def _read_xlsx_entries(
 def _read_xls_entries(
     path: Path,
     start_entry_id: int,
-    cancel_cb: Optional[CancelCallback] = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[ExcelEntry], list[str]]:
     try:
         import xlrd
@@ -688,8 +654,8 @@ def _deduplicate_cross_sheet_entries(entries: list[ExcelEntry]) -> tuple[list[Ex
 
 def read_excel_entries(
     paths: list[str | Path],
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[ExcelEntry], list[str]]:
     all_entries: list[ExcelEntry] = []
     warnings: list[str] = []
@@ -729,13 +695,11 @@ def read_excel_entries(
     return all_entries, warnings
 
 
-
 def _detect_foreign_agent_header(
     rows: list[tuple[Any, ...]],
 ) -> tuple[int, dict[str, int], list[str]]:
     normalized_synonyms = {
-        key: {normalize_header(item) for item in values}
-        for key, values in FOREIGN_AGENT_HEADER_SYNONYMS.items()
+        key: {normalize_header(item) for item in values} for key, values in FOREIGN_AGENT_HEADER_SYNONYMS.items()
     }
     best_score = 0
     best_row = -1
@@ -761,9 +725,7 @@ def _detect_foreign_agent_header(
             best_headers = headers
 
     if best_row < 0 or "name" not in best_map:
-        raise ValueError(
-            "Не удалось найти столбец с полным наименованием/ФИО иностранного агента."
-        )
+        raise ValueError("Не удалось найти столбец с полным наименованием/ФИО иностранного агента.")
     return best_row, best_map, best_headers
 
 
@@ -773,13 +735,13 @@ def _split_registry_participants(value: Any) -> list[str]:
         return []
     if text.startswith("[") and text.endswith("]"):
         text = text[1:-1].strip()
-    parts = re.split(r'\s*,\s*(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)', text)
+    parts = re.split(r"\s*,\s*(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)", text)
     return [part.strip() for part in parts if part.strip()]
 
 
 def _read_foreign_agents_xlsx(
     path: Path,
-    cancel_cb: Optional[CancelCallback] = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[ForeignAgentEntry], list[str]]:
     entries: list[ForeignAgentEntry] = []
     warnings: list[str] = []
@@ -858,8 +820,8 @@ def _read_foreign_agents_xlsx(
 
 def read_foreign_agent_entries(
     path: str | Path | None,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[ForeignAgentEntry], list[str]]:
     if not path:
         return [], []
@@ -876,7 +838,7 @@ def read_foreign_agent_entries(
 
 def _registry_plain_name(value: str) -> str:
     text = unicodedata.normalize("NFKC", safe_text(value)).replace("ё", "е").replace("Ё", "Е")
-    text = re.sub(r'[«»„“”"]', ' ', text)
+    text = re.sub(r'[«»„“”"]', " ", text)
     text = re.sub(r"\([^)]*\)", " ", text)
     text = re.sub(r"[^0-9A-Za-zА-Яа-я]+", " ", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -894,12 +856,12 @@ def _name_order_variants(value: str) -> list[str]:
 def _registry_name_variants(value: str, *, is_person: bool) -> list[str]:
     raw = safe_text(value)
     variants: list[str] = []
-    quoted_values = re.findall(r'[«\"]([^»\"]+)[»\"]', raw)
+    quoted_values = re.findall(r"[«\"]([^»\"]+)[»\"]", raw)
     pseudonym_values = re.findall(r"\(\s*псевдоним\s*:\s*([^)]+)\)", raw, flags=re.IGNORECASE)
 
     if is_person:
         # Для ФИО кавычки обычно содержат псевдоним или прежнее имя.
-        main_value = _registry_plain_name(re.sub(r'[«\"]([^»\"]+)[»\"]', ' ', raw))
+        main_value = _registry_plain_name(re.sub(r"[«\"]([^»\"]+)[»\"]", " ", raw))
         main_value = _registry_plain_name(re.sub(r"\(\s*псевдоним\s*:\s*[^)]+\)", " ", main_value, flags=re.IGNORECASE))
     else:
         # Для организаций сохраняем полное официальное наименование. Не добавляем
@@ -968,13 +930,7 @@ def _person_identity_match_kind(
     return None
 
 
-def _person_identities_match(
-    database_identity: tuple[str, tuple[str, ...], tuple[str, ...]],
-    registry_identity: tuple[str, tuple[str, ...], tuple[str, ...]],
-) -> bool:
-    return _person_identity_match_kind(database_identity, registry_identity) is not None
-
-
+# Связывает вариант имени с записью реестра и полем, в котором его нужно искать.
 @dataclass(frozen=True)
 class ForeignAgentSearchTerm:
     entry_id: int
@@ -985,6 +941,7 @@ class ForeignAgentSearchTerm:
     person_identity: tuple[str, tuple[str, ...], tuple[str, ...]] | None
 
 
+# Подготавливает варианты имён один раз для поиска по всему реестру.
 class ForeignAgentIndex:
     def __init__(self, entries: list[ForeignAgentEntry]) -> None:
         self.entries = {entry.entry_id: entry for entry in entries}
@@ -1000,8 +957,7 @@ class ForeignAgentIndex:
             )
             for participant in entry.participants:
                 terms.extend(
-                    (variant, "Участник", True)
-                    for variant in _registry_name_variants(participant, is_person=True)
+                    (variant, "Участник", True) for variant in _registry_name_variants(participant, is_person=True)
                 )
 
             seen: set[tuple[str, str, bool]] = set()
@@ -1090,8 +1046,8 @@ class ForeignAgentIndex:
 def compare_foreign_agents(
     records: list[DatabaseRecord],
     entries: list[ForeignAgentEntry],
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> list[MatchResult]:
     if not entries:
         return []
@@ -1132,14 +1088,14 @@ def compare_foreign_agents(
 
 
 def compare_substance_entries(
-    index: "DatabaseIndex",
+    index: DatabaseIndex,
     entries: list[ExcelEntry],
     use_isbn_matching: bool,
     use_title_fallback: bool,
     use_fuzzy: bool,
     fuzzy_threshold: int,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
     match_rules: dict[str, bool] | None = None,
 ) -> tuple[list[MatchResult], set[int], set[int], set[int], set[int]]:
     results: list[MatchResult] = []
@@ -1176,12 +1132,12 @@ def compare_substance_entries(
     return results, matched_entry_ids, exact_isbn_ids, exact_title_ids, probable_ids
 
 
+# Индексирует поля базы, чтобы не перебирать все записи для каждой строки Excel.
 class DatabaseIndex:
     def __init__(self, records: list[DatabaseRecord]) -> None:
         self.records = records
         self.by_isbn: dict[str, list[DatabaseRecord]] = defaultdict(list)
         self.by_title: dict[str, list[DatabaseRecord]] = defaultdict(list)
-        self.by_full_title: dict[str, list[DatabaseRecord]] = defaultdict(list)
         self.by_author_surname: dict[str, list[DatabaseRecord]] = defaultdict(list)
         self.publications: dict[int, list[tuple[str, str]]] = {}
 
@@ -1189,16 +1145,16 @@ class DatabaseIndex:
             for surname in {author_surname(author) for author in record.authors} - {""}:
                 self.by_author_surname[surname].append(record)
             self.publications[record.record_number] = [
-                (normalize_publisher(_extract_subfield(item, "C")), normalize_publication_year(_extract_subfield(item, "D")))
+                (
+                    normalize_publisher(_extract_subfield(item, "C")),
+                    normalize_publication_year(_extract_subfield(item, "D")),
+                )
                 for item in record.publication
             ]
             for isbn in record.isbns:
                 for normalized in extract_isbns(isbn):
                     self.by_isbn[normalized].append(record)
             for title in record.titles:
-                full_title = normalize_header(title)
-                if full_title:
-                    self.by_full_title[full_title].append(record)
                 normalized = normalize_title(title)
                 if normalized:
                     self.by_title[normalized].append(record)
@@ -1206,11 +1162,12 @@ class DatabaseIndex:
         self.unique_titles = list(self.by_title.keys())
 
     @staticmethod
-    def _author_matches(entry_author: str, record: DatabaseRecord) -> bool:
+    def _author_match_kind(entry_author: str, record: DatabaseRecord) -> str | None:
         excel_identity = _author_identity(entry_author)
         if not excel_identity or not record.authors:
-            return True
+            return None
         excel_surname, excel_initials = excel_identity
+        entry_normalized = normalize_author(entry_author)
 
         for author in record.authors:
             record_identity = _author_identity(author)
@@ -1219,12 +1176,20 @@ class DatabaseIndex:
             record_surname, record_initials = record_identity
             if record_surname != excel_surname:
                 continue
+            if normalize_author(author) == entry_normalized:
+                return "exact"
             if excel_initials and record_initials:
                 compare_count = min(len(excel_initials), len(record_initials))
                 if excel_initials[:compare_count] != record_initials[:compare_count]:
                     continue
-            return True
-        return False
+                if len(excel_initials) >= 2 and len(record_initials) >= 2:
+                    return "exact"
+            return "partial"
+        return None
+
+    @staticmethod
+    def _author_matches(entry_author: str, record: DatabaseRecord) -> bool:
+        return DatabaseIndex._author_match_kind(entry_author, record) == "exact"
 
     @staticmethod
     def _author_similarity(entry_author: str, record: DatabaseRecord) -> float:
@@ -1272,26 +1237,29 @@ class DatabaseIndex:
             if not use_isbn_matching:
                 note = "Поиск по ISBN и названию отключён"
             else:
-                note = "Корректный ISBN не найден" if entry.isbn and not normalized_isbns else "Совпадение по ISBN отсутствует"
+                note = (
+                    "Корректный ISBN не найден"
+                    if entry.isbn and not normalized_isbns
+                    else "Совпадение по ISBN отсутствует"
+                )
             return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
         normalized_title = normalize_title(entry.title)
-        full_title = normalize_header(entry.title)
-        author_search = any(
-            not {"isbn", "title"}.intersection(EXTRA_MATCH_RULES[key][1]) for key in enabled_rules
-        )
-        if not normalized_title and not (enabled_rules and (full_title or normalized_isbns or author_search and author_surname(entry.author))):
+        author_search = any(not {"isbn", "title"}.intersection(EXTRA_MATCH_RULES[key][1]) for key in enabled_rules)
+        if not normalized_title and not (
+            enabled_rules and (normalized_isbns or author_search and author_surname(entry.author))
+        ):
             if entry.isbn and not normalized_isbns:
                 note = "ISBN имеет неверный формат или контрольную цифру; названия для резервного поиска нет"
             else:
                 note = "Нет ISBN или названия для поиска"
             return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
-        extra_candidates = self.by_full_title.get(full_title, []) if enabled_rules else []
+        extra_candidates = self.by_title.get(normalized_title, []) if enabled_rules else []
         extra_candidate_ids = {record.record_number for record in extra_candidates}
-        custom_isbn_candidates = [
-            record for isbn in normalized_isbns for record in self.by_isbn.get(isbn, [])
-        ] if enabled_rules else []
+        custom_isbn_candidates = (
+            [record for isbn in normalized_isbns for record in self.by_isbn.get(isbn, [])] if enabled_rules else []
+        )
         custom_isbn_ids = {record.record_number for record in custom_isbn_candidates}
         legacy_candidates = self.by_title.get(normalized_title, []) if use_title_fallback else []
         legacy_ids = {record.record_number for record in legacy_candidates}
@@ -1306,22 +1274,26 @@ class DatabaseIndex:
                 seen_titles.add(record.record_number)
                 excel_author = _author_identity(entry.author)
                 record_has_authors = bool(record.authors)
-                author_confirmed = bool(
-                    excel_author
-                    and record_has_authors
-                    and self._author_matches(entry.author, record)
+                author_match_kind = (
+                    self._author_match_kind(entry.author, record) if excel_author and record_has_authors else None
                 )
-                if entry.author and record_has_authors and not author_confirmed:
+                author_confirmed = author_match_kind == "exact"
+                if entry.author and record_has_authors and author_match_kind is None:
                     continue
 
                 extra_method = ""
                 extra_confirmed = False
                 if enabled_rules:
-                    publisher = normalize_publisher(entry.publisher)
+                    publishers = publisher_variants(entry.publisher)
                     year = normalize_publication_year(entry.year)
-                    for key in sorted(enabled_rules, key=lambda key: (
-                        match_rule_needs_review(EXTRA_MATCH_RULES[key][1]), -len(EXTRA_MATCH_RULES[key][1]), key,
-                    )):
+                    for key in sorted(
+                        enabled_rules,
+                        key=lambda key: (
+                            match_rule_needs_review(EXTRA_MATCH_RULES[key][1]),
+                            -len(EXTRA_MATCH_RULES[key][1]),
+                            key,
+                        ),
+                    ):
                         label, required = EXTRA_MATCH_RULES[key]
                         if "author" in required and not author_confirmed:
                             continue
@@ -1330,7 +1302,7 @@ class DatabaseIndex:
                         if "isbn" in required and record.record_number not in custom_isbn_ids:
                             continue
                         if not {"publisher", "year"}.intersection(required) or any(
-                            ("publisher" not in required or bool(publisher) and publisher == record_publisher)
+                            ("publisher" not in required or bool(publishers & publisher_variants(record_publisher)))
                             and ("year" not in required or bool(year) and year == record_year)
                             for record_publisher, record_year in self.publications[record.record_number]
                         ):
@@ -1343,10 +1315,14 @@ class DatabaseIndex:
                     status = "Совпадение" if extra_confirmed else "Возможное совпадение"
                     method = extra_method
                     confidence = 100.0 if extra_confirmed else 85.0
-                    note = "" if extra_confirmed else (
-                        "Совпали автор и данные издания без проверки названия или ISBN; проверьте вручную"
-                        if "title" not in EXTRA_MATCH_RULES[key][1]
-                        else "Совпало название и одно поле издания; проверьте вручную"
+                    note = (
+                        ""
+                        if extra_confirmed
+                        else (
+                            "Совпали автор и данные издания без проверки названия или ISBN; проверьте вручную"
+                            if "title" not in EXTRA_MATCH_RULES[key][1]
+                            else "Совпало название и одно поле издания; проверьте вручную"
+                        )
                     )
                 elif not use_title_fallback or record.record_number not in legacy_ids:
                     continue
@@ -1355,6 +1331,11 @@ class DatabaseIndex:
                     method = "Название и автор"
                     confidence = 100.0
                     note = ""
+                elif author_match_kind == "partial":
+                    status = "Возможное совпадение"
+                    method = "Название и неполные данные автора"
+                    confidence = 90.0
+                    note = "Название совпало, но для надёжной проверки автора недостаточно инициалов"
                 elif not entry.author:
                     status = "Возможное совпадение"
                     method = "Только название"
@@ -1426,6 +1407,7 @@ class DatabaseIndex:
         return [MatchResult("Не найдено", "—", 0.0, entry, note=note)]
 
 
+# Принимает записи базы и пути перечней, возвращает совпадения и сводку. Проверки отмены позволяют остановить долгий запуск.
 def compare_database_records(
     records: list[DatabaseRecord],
     excel_paths: list[str | Path],
@@ -1437,8 +1419,8 @@ def compare_database_records(
     match_rules: dict[str, bool] | None = None,
     use_fuzzy: bool = False,
     fuzzy_threshold: int = 90,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[MatchResult], ComparisonSummary]:
     """Сверяет уже загруженные записи, в том числе полученные напрямую с ИРБИС."""
     _cancelled(cancel_cb)
@@ -1475,7 +1457,9 @@ def compare_database_records(
                 progress_cb,
                 cancel_cb,
             )
-            substance_results, matched_entry_ids, exact_isbn_ids, exact_title_ids, probable_ids = substance_future.result()
+            substance_results, matched_entry_ids, exact_isbn_ids, exact_title_ids, probable_ids = (
+                substance_future.result()
+            )
             foreign_results = foreign_future.result()
     else:
         (
@@ -1508,9 +1492,7 @@ def compare_database_records(
     substance_records = {
         result.database.record_number
         for result in results
-        if result.status == "Совпадение"
-        and result.database is not None
-        and result.source_type == SOURCE_SUBSTANCES
+        if result.status == "Совпадение" and result.database is not None and result.source_type == SOURCE_SUBSTANCES
     }
     foreign_records = {
         result.database.record_number
@@ -1555,8 +1537,8 @@ def compare_files(
     match_rules: dict[str, bool] | None = None,
     use_fuzzy: bool = False,
     fuzzy_threshold: int = 90,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[MatchResult], ComparisonSummary]:
     database_paths = database_path if isinstance(database_path, list) else [database_path]
     records: list[DatabaseRecord] = []
@@ -1580,7 +1562,7 @@ def compare_files(
     )
 
 
-def _publication_text(record: Optional[DatabaseRecord]) -> str:
+def _publication_text(record: DatabaseRecord | None) -> str:
     if not record:
         return ""
     parts: list[str] = []
@@ -1628,6 +1610,8 @@ SUBSTANCE_MATCH_HEADERS = [
     *COMMON_MATCH_HEADERS,
     "Почему добавлено",
     "Файл-источник",
+    "Лист",
+    "Строка",
 ]
 
 FOREIGN_AGENT_MATCH_HEADERS = [
@@ -1748,16 +1732,13 @@ def _substance_match_row(
     for result in record_results:
         method = safe_text(result.method).strip()
         matched_value = safe_text(result.matched_value).strip()
-        reasons.append(
-            f"{method} — {matched_value}" if method and matched_value else method or matched_value
-        )
+        reasons.append(f"{method} — {matched_value}" if method and matched_value else method or matched_value)
     return [
         *_base_txt_row(number, record),
-        _unique_join(reasons, "\n"),
-        _unique_join(
-            (Path(result.excel.source_file).name for result in record_results),
-            "\n",
-        ),
+        _parallel_join(reasons),
+        _parallel_join(Path(result.excel.source_file).name for result in record_results),
+        _parallel_join(result.excel.sheet_name for result in record_results),
+        _parallel_join(result.excel.row_number for result in record_results),
     ]
 
 
@@ -1821,14 +1802,10 @@ def _style_match_sheet(
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = (
-        f"A1:{get_column_letter(len(headers))}{max(row_count, 1)}"
-    )
+    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{max(row_count, 1)}"
     worksheet.row_dimensions[1].height = 42
 
-    for row_number, row in enumerate(
-        worksheet.iter_rows(min_row=2, max_row=row_count), start=2
-    ):
+    for row_number, row in enumerate(worksheet.iter_rows(min_row=2, max_row=row_count), start=2):
         max_lines = max(
             (safe_text(cell.value).count("\n") + 1 for cell in row),
             default=1,
@@ -1855,10 +1832,10 @@ def _add_results_sheet(
     row_fill_color: str,
     widths: dict[str, int],
     active: bool = False,
-    cancel_cb: Optional[CancelCallback] = None,
+    cancel_cb: CancelCallback | None = None,
 ):
-    from openpyxl.worksheet.table import Table, TableStyleInfo
     from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
 
     worksheet = workbook.active if active else workbook.create_sheet()
     worksheet.title = title
@@ -1867,9 +1844,7 @@ def _add_results_sheet(
     for number, record in enumerate(records, start=1):
         if number % 500 == 0:
             _cancelled(cancel_cb)
-        worksheet.append(
-            row_builder(number, record, grouped_results.get(record.record_number, []))
-        )
+        worksheet.append(row_builder(number, record, grouped_results.get(record.record_number, [])))
 
     _style_match_sheet(
         worksheet,
@@ -1930,13 +1905,11 @@ def _add_review_sheet(
     results: list[MatchResult],
     *,
     active: bool = False,
-    cancel_cb: Optional[CancelCallback] = None,
+    cancel_cb: CancelCallback | None = None,
 ):
     """Добавляет пограничные результаты, которые запрещено применять автоматически."""
     review_results = [
-        result
-        for result in results
-        if result.status == "Возможное совпадение" and result.database is not None
+        result for result in results if result.status == "Возможное совпадение" and result.database is not None
     ]
     if not review_results:
         return None
@@ -1969,20 +1942,30 @@ def _add_review_sheet(
         len(review_results) + 1,
         REVIEW_MATCH_HEADERS,
         {
-            "A": 24, "B": 38, "C": 14, "D": 62, "E": 48, "F": 34,
-            "G": 52, "H": 24, "I": 34, "J": 22, "K": 12,
+            "A": 24,
+            "B": 38,
+            "C": 14,
+            "D": 62,
+            "E": 48,
+            "F": 34,
+            "G": 52,
+            "H": 24,
+            "I": 34,
+            "J": 22,
+            "K": 12,
         },
         "FCE4D6",
     )
     return worksheet
 
 
+# Принимает совпадения и сводку, формирует выбранные листы Excel и сохраняет отчёт атомарно.
 def export_results(
     output_path: str | Path,
     results: list[MatchResult],
     summary: ComparisonSummary,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
     report_options: dict[str, Any] | None = None,
 ) -> Path:
     """Создаёт выбранные пользователем листы с точными совпадениями."""
@@ -2032,8 +2015,17 @@ def export_results(
             table_style="TableStyleMedium4",
             row_fill_color="E2F0D9",
             widths={
-                "A": 7, "B": 34, "C": 52, "D": 24, "E": 24, "F": 42,
-                "G": 24, "H": 48, "I": 34,
+                "A": 7,
+                "B": 34,
+                "C": 52,
+                "D": 24,
+                "E": 24,
+                "F": 42,
+                "G": 24,
+                "H": 48,
+                "I": 34,
+                "J": 22,
+                "K": 12,
             },
             active=not sheet_created,
             cancel_cb=cancel_cb,
@@ -2051,9 +2043,23 @@ def export_results(
             table_style="TableStyleMedium9",
             row_fill_color="DDEBF7",
             widths={
-                "A": 7, "B": 34, "C": 52, "D": 24, "E": 24, "F": 42,
-                "G": 24, "H": 24, "I": 38, "J": 16, "K": 48, "L": 28,
-                "M": 18, "N": 24, "O": 34, "P": 22, "Q": 12,
+                "A": 7,
+                "B": 34,
+                "C": 52,
+                "D": 24,
+                "E": 24,
+                "F": 42,
+                "G": 24,
+                "H": 24,
+                "I": 38,
+                "J": 16,
+                "K": 48,
+                "L": 28,
+                "M": 18,
+                "N": 24,
+                "O": 34,
+                "P": 22,
+                "Q": 12,
             },
             active=not sheet_created,
             cancel_cb=cancel_cb,
@@ -2071,8 +2077,16 @@ def export_results(
             table_style="TableStyleMedium2",
             row_fill_color="FFF2CC",
             widths={
-                "A": 7, "B": 34, "C": 52, "D": 24, "E": 24,
-                "F": 42, "G": 24, "H": 28, "I": 34, "J": 42,
+                "A": 7,
+                "B": 34,
+                "C": 52,
+                "D": 24,
+                "E": 24,
+                "F": 42,
+                "G": 24,
+                "H": 28,
+                "I": 34,
+                "J": 42,
             },
             active=not sheet_created,
             cancel_cb=cancel_cb,
@@ -2081,12 +2095,15 @@ def export_results(
 
     # Пограничные совпадения всегда выводятся отдельно: они видны оператору,
     # но никогда не попадают в списки подтверждённых совпадений и в метки.
-    if _add_review_sheet(
-        workbook,
-        results,
-        active=not sheet_created,
-        cancel_cb=cancel_cb,
-    ) is not None:
+    if (
+        _add_review_sheet(
+            workbook,
+            results,
+            active=not sheet_created,
+            cancel_cb=cancel_cb,
+        )
+        is not None
+    ):
         sheet_created = True
     if options["summary"]:
         _add_summary_sheet(workbook, summary, active=not sheet_created)
@@ -2104,6 +2121,7 @@ def export_results(
         )
     return output_path
 
+
 def _detect_newline(text: str) -> str:
     if "\r\n" in text:
         return "\r\n"
@@ -2114,7 +2132,7 @@ def _detect_newline(text: str) -> str:
     return "\n"
 
 
-def _field_number(line: str) -> Optional[int]:
+def _field_number(line: str) -> int | None:
     """Возвращает номер поля строки вида ``#333: ...``."""
     match = re.match(r"^\s*#(\d+):", line)
     return int(match.group(1)) if match else None
@@ -2127,7 +2145,7 @@ def _ordered_field_insert_index(lines: list[str], target_field: int) -> int:
     перед первым полем с большим номером. Благодаря этому #333 не уезжает
     к #900, а отсутствующее #900 появляется перед #910 и последующими полями.
     """
-    last_field_index: Optional[int] = None
+    last_field_index: int | None = None
     for index, line in enumerate(lines):
         field_number = _field_number(line)
         if field_number is None:
@@ -2171,17 +2189,13 @@ def _registry_person_marker_name(value: str) -> str:
     if not raw:
         return ""
 
-    explicit_aliases = re.findall(
-        r"\(\s*псевдоним\s*:\s*([^)]+)\)", raw, flags=re.IGNORECASE
-    )
+    explicit_aliases = re.findall(r"\(\s*псевдоним\s*:\s*([^)]+)\)", raw, flags=re.IGNORECASE)
     quoted_aliases = re.findall(r'[«"]([^»"]+)[»"]', raw)
 
     # Для персональных записей текст в кавычках в реестре используется как
     # псевдоним. Убираем его из основного ФИО и выводим отдельно.
-    main_raw = re.sub(
-        r"\(\s*псевдоним\s*:\s*[^)]+\)", " ", raw, flags=re.IGNORECASE
-    )
-    main_raw = re.sub(r'[«"]([^»"]+)[»"]', ' ', main_raw)
+    main_raw = re.sub(r"\(\s*псевдоним\s*:\s*[^)]+\)", " ", raw, flags=re.IGNORECASE)
+    main_raw = re.sub(r'[«"]([^»"]+)[»"]', " ", main_raw)
     main_name = _registry_plain_name(main_raw)
     if not main_name:
         main_name = _registry_plain_name(raw)
@@ -2237,11 +2251,7 @@ def _foreign_agent_marker_name(result: MatchResult) -> str:
 
 def _result_is_eligible_for_txt_marker(result: MatchResult) -> bool:
     """Для иноагентов разрешает TXT-пометку только при совпадении по автору."""
-    if (
-        result.status != "Совпадение"
-        or result.confidence < 100.0
-        or result.database is None
-    ):
+    if result.status != "Совпадение" or result.confidence < 100.0 or result.database is None:
         return False
     if result.source_type != SOURCE_FOREIGN_AGENTS:
         return True
@@ -2287,7 +2297,7 @@ def _foreign_marker_identity(value: str) -> str | None:
     prefix = "^ai^@"
     if not normalized.startswith(prefix):
         return None
-    name = normalized[len(prefix):].strip()
+    name = normalized[len(prefix) :].strip()
     if not name:
         return None
     pseudonym_match = re.search(r"\(\s*псевдоним\s*:\s*([^)]+)\)", name, flags=re.IGNORECASE)
@@ -2315,7 +2325,7 @@ def _marker_only_repeat_count(value: str, marker: str) -> int:
     remaining = normalized_value
     while remaining.startswith(normalized_marker):
         count += 1
-        remaining = remaining[len(normalized_marker):].strip()
+        remaining = remaining[len(normalized_marker) :].strip()
     return count if count and not remaining else 0
 
 
@@ -2354,9 +2364,7 @@ def _modify_matched_record(
     changed = False
 
     requested_markers = list(
-        field_markers
-        if field_markers is not None
-        else ((marker_field, marker) for marker in markers_333)
+        field_markers if field_markers is not None else ((marker_field, marker) for marker in markers_333)
     )
     markers: list[tuple[int, str]] = []
     marker_keys: set[tuple[int, str]] = set()
@@ -2438,10 +2446,7 @@ def _modify_matched_record(
             changed = True
 
     for field_number, marker in markers:
-        if not any(
-            _field_contains_marker(value, marker)
-            for value in existing_field_values[field_number]
-        ):
+        if not any(_field_contains_marker(value, marker) for value in existing_field_values[field_number]):
             lines.insert(
                 _ordered_field_insert_index(lines, field_number),
                 f"#{field_number:03d}: {marker}",
@@ -2511,14 +2516,9 @@ def _remove_markers_from_record(
         lines = lines[:-1]
 
     effective_removals: dict[int, list[tuple[str, bool]]] = {
-        field_number: list(patterns)
-        for field_number, patterns in removals.items()
+        field_number: list(patterns) for field_number, patterns in removals.items()
     }
-    if (
-        conditional_removals
-        and conditional_on
-        and _record_contains_removal_marker(raw_record, conditional_on)
-    ):
+    if conditional_removals and conditional_on and _record_contains_removal_marker(raw_record, conditional_on):
         for field_number, patterns in conditional_removals.items():
             effective_removals.setdefault(field_number, []).extend(patterns)
 
@@ -2586,9 +2586,7 @@ def remove_markers_from_tag_values(
         removals[field_number].extend(patterns)
         classification_removals[field_number].extend(patterns)
     for field_number in age_fields:
-        removals[field_number].extend(
-            [(DEFAULT_AGE_MARKER, False), (age_marker, False)]
-        )
+        removals[field_number].extend([(DEFAULT_AGE_MARKER, False), (age_marker, False)])
 
     # Совместимость со старой схемой: ^A18+ удаляется только из записи,
     # где присутствует наша классификационная метка.
@@ -2664,10 +2662,12 @@ def remove_database_markers(
         removals[field_number].extend(patterns)
         classification_removals[field_number].extend(patterns)
     for field_number in age_fields:
-        removals[field_number].extend([
-            (DEFAULT_AGE_MARKER, False),
-            (age_marker, False),
-        ])
+        removals[field_number].extend(
+            [
+                (DEFAULT_AGE_MARKER, False),
+                (age_marker, False),
+            ]
+        )
 
     # Старая пометка ^A18+ удаляется только из записей, где действительно была
     # пометка вещества или иноагента. Самостоятельные ^A18+ в базе сохраняются.
@@ -2700,6 +2700,7 @@ def remove_database_markers(
     return output, cleaned_records
 
 
+# Возвращает метки по номерам записей. Пограничные совпадения не должны менять базу.
 def build_markers_by_record(
     results: list[MatchResult],
     *,
@@ -2731,7 +2732,9 @@ def build_markers_by_record(
         existing_keys = {
             (
                 int(existing_field),
-                f"foreign:{existing_identity}" if (existing_identity := _foreign_marker_identity(existing_marker)) is not None else _normalized_marker_text(existing_marker),
+                f"foreign:{existing_identity}"
+                if (existing_identity := _foreign_marker_identity(existing_marker)) is not None
+                else _normalized_marker_text(existing_marker),
             )
             for existing_field, existing_marker in markers_by_record[record_number]
         }
@@ -2740,6 +2743,7 @@ def build_markers_by_record(
     return dict(markers_by_record)
 
 
+# Принимает поля записи и метки, возвращает новые поля и признак изменений; сохраняет постороннее содержимое полей.
 def apply_markers_to_tag_values(
     tag_values: Iterable[tuple[int, str]],
     field_markers: Iterable[tuple[int, str]],
@@ -2778,10 +2782,7 @@ def apply_markers_to_tag_values(
             for existing_tag, value in fields:
                 if existing_tag != tag:
                     continue
-                same_foreign_marker = (
-                    marker_identity is not None
-                    and _foreign_marker_identity(value) == marker_identity
-                )
+                same_foreign_marker = marker_identity is not None and _foreign_marker_identity(value) == marker_identity
                 if not same_foreign_marker and not _field_contains_marker(value, marker):
                     continue
                 repeat_count = _marker_only_repeat_count(value, marker)
@@ -2797,9 +2798,7 @@ def apply_markers_to_tag_values(
     # ключу. Это закрывает случай из АРМ Каталогизатора, когда два повторения
     # выглядят абсолютно одинаково, но одно содержит невидимый Unicode-символ.
     requested_foreign_keys = {
-        (tag, key)
-        for tag, marker in requested
-        if (key := _foreign_marker_identity(marker)) is not None
+        (tag, key) for tag, marker in requested if (key := _foreign_marker_identity(marker)) is not None
     }
     if requested_foreign_keys:
         seen_foreign: set[tuple[int, str]] = set()
@@ -2836,7 +2835,6 @@ def apply_markers_to_tag_values(
         # оставляем первое. Удаляем только marker-only повторения, чтобы не
         # потерять дополнительное содержимое служебного поля.
         if len(matching_indices) > 1:
-            keep_index = matching_indices[0]
             for index in reversed(matching_indices[1:]):
                 if _marker_only_repeat_count(fields[index][1], marker) == 1:
                     del fields[index]
@@ -2880,8 +2878,7 @@ def apply_markers_to_tag_values(
         already_present = any(_field_contains_marker(value, marker) for value in existing_by_tag[tag])
         if not already_present and requested_foreign_key is not None:
             already_present = any(
-                _foreign_marker_identity(value) == requested_foreign_key
-                for value in existing_by_tag[tag]
+                _foreign_marker_identity(value) == requested_foreign_key for value in existing_by_tag[tag]
             )
         if not already_present:
             insert_ordered(tag, marker)
@@ -2900,8 +2897,8 @@ def export_modified_database(
     output_path: str | Path,
     results: list[MatchResult],
     summary: ComparisonSummary,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
@@ -2925,18 +2922,20 @@ def export_modified_database(
         for result in results
         if _result_is_eligible_for_txt_marker(result)
         and result.database is not None
-        and (
-            not result.database.source_file
-            or Path(result.database.source_file).resolve() == source_path.resolve()
-        )
+        and (not result.database.source_file or Path(result.database.source_file).resolve() == source_path.resolve())
     }
-    source_results = [result for result in results if result.database is not None and (
-        not result.database.source_file or Path(result.database.source_file).resolve() == source_path.resolve()
-    )]
+    source_results = [
+        result
+        for result in results
+        if result.database is not None
+        and (not result.database.source_file or Path(result.database.source_file).resolve() == source_path.resolve())
+    ]
     markers_by_record = build_markers_by_record(
-        source_results, substance_marker=substance_marker,
+        source_results,
+        substance_marker=substance_marker,
         foreign_agent_marker_template=foreign_agent_marker_template,
-        substance_marker_field=substance_marker_field, foreign_agent_marker_field=foreign_agent_marker_field,
+        substance_marker_field=substance_marker_field,
+        foreign_agent_marker_field=foreign_agent_marker_field,
     )
     text, encoding = _read_text_file_with_encoding(source_path)
     newline = _detect_newline(text)
@@ -2988,8 +2987,8 @@ def export_modified_databases(
     output_path: str | Path,
     results: list[MatchResult],
     summary: ComparisonSummary,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
     *,
     substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
     foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
@@ -3029,6 +3028,7 @@ def export_modified_databases(
     return written
 
 
+# Сверяет файлы по переданным настройкам и возвращает результаты со сводкой после сохранения выбранных выходных файлов.
 def compare_and_export(
     database_path: str | Path | list[str | Path],
     excel_paths: list[str | Path],
@@ -3048,8 +3048,8 @@ def compare_and_export(
     substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
     foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
-    progress_cb: Optional[ProgressCallback] = None,
-    cancel_cb: Optional[CancelCallback] = None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
 ) -> tuple[list[MatchResult], ComparisonSummary]:
     database_paths = database_path if isinstance(database_path, list) else [database_path]
     results, summary = compare_files(
@@ -3092,5 +3092,4 @@ def compare_and_export(
 
 
 def result_to_dict(result: MatchResult) -> dict[str, Any]:
-    data = asdict(result)
-    return data
+    return asdict(result)

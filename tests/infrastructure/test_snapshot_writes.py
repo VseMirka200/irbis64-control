@@ -78,9 +78,7 @@ class SnapshotWriteTests(unittest.TestCase):
             }
             client = FakeIrbisClient(live)
 
-            written, conflicts, backup = apply_modified_snapshot(
-                client, manifest, modified, root / "backups"
-            )
+            written, conflicts, backup = apply_modified_snapshot(client, manifest, modified, root / "backups")
 
             self.assertEqual((1, 1), (written, conflicts))
             self.assertEqual([10], client.written_mfns)

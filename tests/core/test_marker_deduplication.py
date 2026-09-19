@@ -15,14 +15,8 @@ from irbis_control.core.matcher import (
 
 class ForeignAgentMarkerDeduplicationTests(unittest.TestCase):
     def test_same_pseudonym_with_typo_in_legal_name_is_one_marker(self) -> None:
-        correct = (
-            "^AI^@ЧХАРТИШВИЛИ ГРИГОРИЙ ШАЛВОВИЧ "
-            "(ПСЕВДОНИМ: БОРИС АКУНИН)"
-        )
-        typo = (
-            "^AI^@ЧХАРТИШВИЛЛИ ГРИГОРИЙ ШАЛВОВИЧ "
-            "(ПСЕВДОНИМ: БОРИС АКУНИН)"
-        )
+        correct = "^AI^@ЧХАРТИШВИЛИ ГРИГОРИЙ ШАЛВОВИЧ (ПСЕВДОНИМ: БОРИС АКУНИН)"
+        typo = "^AI^@ЧХАРТИШВИЛЛИ ГРИГОРИЙ ШАЛВОВИЧ (ПСЕВДОНИМ: БОРИС АКУНИН)"
 
         fields, changed = apply_markers_to_tag_values(
             [(333, correct), (333, typo)],
