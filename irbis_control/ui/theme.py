@@ -275,7 +275,10 @@ def main_window_stylesheet() -> str:
 
 def database_connector_stylesheet() -> str:
     """Стиль отдельного окна работы с базой."""
-    return common_button_stylesheet() + component_stylesheet() + """
+    return (
+        common_button_stylesheet()
+        + component_stylesheet()
+        + """
         QMainWindow, QWidget#root, QWidget#tabPage { background: palette(window); color: palette(window-text); }
         QFrame#card { border: none; background: transparent; }
         QLabel#title, QLabel#cardTitle { font-weight: 600; }
@@ -283,16 +286,15 @@ def database_connector_stylesheet() -> str:
         QTextEdit#log { font-family: Consolas, monospace; }
         QProgressBar { min-height: 10px; max-height: 10px; }
     """
+    )
 
 
 def about_page_stylesheet() -> str:
     """Стиль области с информацией о программе."""
     colors = _colors()
-    return (
-        "QTextBrowser#aboutPage { border: none; background: @page@; color: @text@; }"
-        .replace("@page@", colors["page"])
-        .replace("@text@", colors["text"])
-    )
+    return "QTextBrowser#aboutPage { border: none; background: @page@; color: @text@; }".replace(
+        "@page@", colors["page"]
+    ).replace("@text@", colors["text"])
 
 
 def about_document_stylesheet() -> str:
@@ -319,11 +321,11 @@ def apply_application_theme(app: QApplication, theme: str) -> None:
         system_scheme = _system_color_scheme or Qt.ColorScheme.Unknown
         try:
             app.styleHints().setColorScheme(Qt.ColorScheme.Unknown)
-        except Exception:
+        except (AttributeError, RuntimeError):
+            # Не все платформенные плагины Qt позволяют менять системную схему.
             pass
         dark = system_scheme == Qt.ColorScheme.Dark or (
-            system_scheme != Qt.ColorScheme.Light
-            and _system_palette.color(QPalette.ColorRole.Window).lightness() < 128
+            system_scheme != Qt.ColorScheme.Light and _system_palette.color(QPalette.ColorRole.Window).lightness() < 128
         )
         if not dark:
             _current_dark = False
@@ -335,7 +337,8 @@ def apply_application_theme(app: QApplication, theme: str) -> None:
     if not system_theme:
         try:
             app.styleHints().setColorScheme(Qt.ColorScheme.Dark if dark else Qt.ColorScheme.Light)
-        except Exception:
+        except (AttributeError, RuntimeError):
+            # При отсутствии поддержки setColorScheme достаточно собственной палитры.
             pass
 
     palette = QPalette()

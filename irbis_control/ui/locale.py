@@ -26,10 +26,10 @@ class _RussianButtonTranslator(QTranslator):
 
     def translate(
         self,
-        context: str | None,
+        _context: str | None,
         source_text: str | None,
-        disambiguation: str | None = None,
-        n: int = -1,
+        _disambiguation: str | None = None,
+        _n: int = -1,
     ) -> str:
         return self._translations.get(source_text or "", "")
 

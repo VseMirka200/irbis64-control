@@ -20,9 +20,6 @@ from irbis_control.infrastructure.irbis_models import (
     SnapshotManifest,
 )
 
-TXT_SEPARATOR = "*****"
-
-
 ProgressCallback = Callable[[int, str], None]
 
 
@@ -52,8 +49,6 @@ def parse_txt_records(text: str) -> list[list[IrbisField]]:
                 fields.append(IrbisField(int(match.group(1)), match.group(2)))
         result.append(fields)
     return result
-
-
 
 
 def write_snapshot_txt(records: Iterable[IrbisRecord], path: str | Path) -> list[SnapshotEntry]:
@@ -93,8 +88,6 @@ def save_manifest(manifest: SnapshotManifest, path: str | Path) -> Path:
         encoding="utf-8",
     )
     return path
-
-
 
 
 def read_records_parallel(

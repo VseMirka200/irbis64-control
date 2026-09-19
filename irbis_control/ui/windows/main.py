@@ -41,10 +41,10 @@ from irbis_control.application.marker_settings import (
     save_marker_settings as _save_marker_settings,
 )
 from irbis_control.application.settings import (
-    ApplicationSettings,
     THEME_DARK,
     THEME_LIGHT,
     THEME_SYSTEM,
+    ApplicationSettings,
     load_application_settings,
     save_application_settings,
 )
@@ -119,14 +119,13 @@ from irbis_control.ui.services.workers import (
     UpdateWorker as UpdateWorker,
 )
 from irbis_control.ui.storage_paths import app_data_dir as app_data_dir
-from irbis_control.ui.storage_paths import application_settings_path
+from irbis_control.ui.storage_paths import application_settings_path, manual_review_memory_path
 from irbis_control.ui.storage_paths import database_connector_config_path as database_connector_config_path
-from irbis_control.ui.storage_paths import manual_review_memory_path
 from irbis_control.ui.theme import (
     about_document_stylesheet,
     about_page_stylesheet,
-    apply_application_theme,
     apply_about_title_font,
+    apply_application_theme,
 )
 from irbis_control.ui.windows.main_build import MainWindowBuildMixin
 from irbis_control.ui.windows.main_layout import MainWindowLayoutMixin
@@ -234,9 +233,7 @@ class MarkerSettingsDialog(QDialog):
         self.foreign_edit = QLineEdit(str(settings["foreign_agent_marker_template"]))
         self.foreign_edit.setObjectName("settingsField")
         self.foreign_edit.setPlaceholderText(DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE)
-        self.foreign_edit.setToolTip(
-            "{name} будет заменено на совпавшего автора"
-        )
+        self.foreign_edit.setToolTip("{name} будет заменено на совпавшего автора")
         form.addWidget(self.foreign_enabled_check, 2, 0)
         form.addWidget(self.foreign_field_spin, 2, 1)
         form.addWidget(self.foreign_edit, 2, 2)
@@ -251,9 +248,7 @@ class MarkerSettingsDialog(QDialog):
         form.addWidget(self.organization_field_spin, 3, 1)
         form.addWidget(self.organization_edit, 3, 2)
 
-        foreign_hint = QLabel(
-            "Используйте {name}, чтобы подставить совпавшего автора или название организации."
-        )
+        foreign_hint = QLabel("Используйте {name}, чтобы подставить совпавшего автора или название организации.")
         foreign_hint.setObjectName("cardDescription")
         foreign_hint.setWordWrap(True)
         form.addWidget(foreign_hint, 4, 2)
@@ -687,7 +682,7 @@ class MainWindow(
     def _restore_window_state(self) -> None:
         try:
             data = json.loads(window_state_path().read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             data = {}
 
         try:
@@ -868,15 +863,11 @@ class MainWindow(
         self._update_report_controls(self.create_excel_report_check.isChecked())
         self.substance_marker_edit.setText(str(self.marker_settings["substance_marker"]))
         self.foreign_marker_edit.setText(str(self.marker_settings["foreign_agent_marker_template"]))
-        self.foreign_organization_marker_edit.setText(
-            str(self.marker_settings["foreign_organization_marker_template"])
-        )
+        self.foreign_organization_marker_edit.setText(str(self.marker_settings["foreign_organization_marker_template"]))
         self.age_marker_edit.setText(str(self.marker_settings["age_marker"]))
         self.substance_field_spin.setValue(int(self.marker_settings["substance_marker_field"]))
         self.foreign_field_spin.setValue(int(self.marker_settings["foreign_agent_marker_field"]))
-        self.foreign_organization_field_spin.setValue(
-            int(self.marker_settings["foreign_organization_marker_field"])
-        )
+        self.foreign_organization_field_spin.setValue(int(self.marker_settings["foreign_organization_marker_field"]))
         self.age_field_spin.setValue(int(self.marker_settings["age_marker_field"]))
         self.substance_marker_check.setChecked(bool(self.marker_settings["substance_marker_enabled"]))
         self.foreign_marker_check.setChecked(bool(self.marker_settings["foreign_agent_marker_enabled"]))
@@ -1055,13 +1046,15 @@ class MainWindow(
                 path += ".txt"
             self.modified_database_edit.setText(path)
 
+
 def main() -> int:
     if sys.platform == "win32":
         try:
             import ctypes
 
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("IRBIS64Control.DesktopApp")
-        except Exception:
+        except (AttributeError, OSError):
+            # AppUserModelID поддерживается только подходящими версиями Windows.
             pass
 
     app = QApplication(sys.argv)

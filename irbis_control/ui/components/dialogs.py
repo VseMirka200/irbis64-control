@@ -12,7 +12,6 @@ from PyQt6.QtCore import QSize, QStandardPaths, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QIcon, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -22,9 +21,9 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QMenu,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -36,13 +35,13 @@ from PyQt6.QtWidgets import (
 )
 
 from irbis_control import APP_TITLE as APP_TITLE
-from irbis_control.core.models import MatchResult
 from irbis_control.core.manual_review_memory import (
     clear_approved_review_memory,
     load_approved_review_rows,
     remove_approved_review_keys,
     review_identity,
 )
+from irbis_control.core.models import MatchResult
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.paths import icon_path
 from irbis_control.reporting.models import ResultDiffRow, ResultDiffSummary
@@ -99,7 +98,6 @@ class CopyableTableWidget(QTableWidget):
         copy_action.setEnabled(bool(self.selectedIndexes()) or self.currentIndex().isValid())
         if menu.exec(self.viewport().mapToGlobal(position)) == copy_action:
             self.copy_selection_to_clipboard()
-
 
 
 def _powershell_literal(value: str) -> str:
@@ -219,7 +217,6 @@ class ManualMatchReviewDialog(QDialog):
         self.setWindowIcon(QIcon(icon_path("irbis64_control.ico")))
         self.resize(1500, 720)
         self.setMinimumSize(1000, 520)
-        self._rows = list(rows)
         self._decisions: dict[int, bool | None] = {result_index: None for result_index, _result in rows}
         self._action_buttons: dict[int, tuple[QPushButton, QPushButton]] = {}
         self._decision_group_keys: dict[int, str] = {}
@@ -290,12 +287,8 @@ class ManualMatchReviewDialog(QDialog):
             remove_button = QPushButton("Убрать")
             remove_button.setObjectName("dangerButton")
             remove_button.setToolTip("Отклонить совпадение и не ставить по нему метку")
-            confirm_button.clicked.connect(
-                lambda _checked=False, index=result_index: self._set_decision(index, True)
-            )
-            remove_button.clicked.connect(
-                lambda _checked=False, index=result_index: self._set_decision(index, False)
-            )
+            confirm_button.clicked.connect(lambda _checked=False, index=result_index: self._set_decision(index, True))
+            remove_button.clicked.connect(lambda _checked=False, index=result_index: self._set_decision(index, False))
             self._action_buttons[result_index] = (confirm_button, remove_button)
             action_container = QWidget()
             action_layout = QVBoxLayout(action_container)
@@ -317,7 +310,9 @@ class ManualMatchReviewDialog(QDialog):
             if foreign is not None:
                 registry_data = foreign.name
                 type_number = " · ".join(
-                    part for part in (foreign.agent_type, f"№ {foreign.registry_number}" if foreign.registry_number else "") if part
+                    part
+                    for part in (foreign.agent_type, f"№ {foreign.registry_number}" if foreign.registry_number else "")
+                    if part
                 )
             else:
                 registry_data = " | ".join(part for part in (excel.author, excel.title, excel.isbn) if part)
@@ -365,10 +360,7 @@ class ManualMatchReviewDialog(QDialog):
                     font.setUnderline(True)
                     item.setFont(font)
                     item.setForeground(useful_link_foreground())
-                    item.setToolTip(
-                        tooltip
-                        + "\n\nЩёлкните здесь, чтобы открыть исходный Excel на этой строке."
-                    )
+                    item.setToolTip(tooltip + "\n\nЩёлкните здесь, чтобы открыть исходный Excel на этой строке.")
                 self.table.setItem(row, column, item)
 
         for group_members in self._decision_groups.values():
@@ -480,9 +472,7 @@ class ManualMatchReviewDialog(QDialog):
         approved = sum(decision is True for decision in self._decisions.values())
         removed = sum(decision is False for decision in self._decisions.values())
         resolved = approved + removed
-        self.progress_label.setText(
-            f"Решено: {resolved} из {total} · подтверждено: {approved} · убрано: {removed}"
-        )
+        self.progress_label.setText(f"Решено: {resolved} из {total} · подтверждено: {approved} · убрано: {removed}")
         self.continue_button.setEnabled(resolved == total)
 
     def decisions(self) -> dict[int, bool]:
@@ -609,9 +599,7 @@ class ConfirmationMemoryDialog(QDialog):
             delete_button = QPushButton("Удалить")
             delete_button.setObjectName("dangerButton")
             delete_button.setToolTip("Удалить это сохранённое подтверждение")
-            delete_button.clicked.connect(
-                lambda _checked=False, key=row.get("key", ""): self._delete_keys({key})
-            )
+            delete_button.clicked.connect(lambda _checked=False, key=row.get("key", ""): self._delete_keys({key}))
             self.table.setCellWidget(table_row, 5, delete_button)
 
         self.table.resizeRowsToContents()
@@ -633,11 +621,7 @@ class ConfirmationMemoryDialog(QDialog):
 
     def _delete_selected(self) -> None:
         selected_rows = sorted({index.row() for index in self.table.selectedIndexes()})
-        keys = {
-            self._row_keys[row]
-            for row in selected_rows
-            if 0 <= row < len(self._row_keys) and self._row_keys[row]
-        }
+        keys = {self._row_keys[row] for row in selected_rows if 0 <= row < len(self._row_keys) and self._row_keys[row]}
         if not keys:
             QMessageBox.information(self, APP_TITLE, "Выберите одну или несколько строк для удаления.")
             return
@@ -858,7 +842,7 @@ class UsefulLinksDialog(QDialog):
                 if title and url:
                     links.append({"title": title, "url": url})
             return links or [dict(item) for item in DEFAULT_USEFUL_LINKS]
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             return [dict(item) for item in DEFAULT_USEFUL_LINKS]
 
     @staticmethod

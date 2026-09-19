@@ -63,6 +63,7 @@ def parse_all_format_record(payload: str, fallback_mfn: int = 0) -> IrbisRecord:
             continue
     return IrbisRecord(mfn or int(fallback_mfn or 0), status, version, fields)
 
+
 class IrbisClient:
     """Небольшой TCP-клиент ИРБИС64 для команд, нужных приложению.
 
@@ -205,10 +206,11 @@ class IrbisClient:
         self.register()
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
         try:
             self.unregister()
         except Exception:
+            # Ошибка завершения сеанса не должна скрывать исходное исключение.
             pass
 
     @staticmethod
@@ -285,13 +287,15 @@ class IrbisClient:
             databases = self._parse_database_menu(menu)
             if databases:
                 return databases
-        except Exception:
+        except IrbisError:
+            # На старых серверах меню может быть недоступно: ниже есть запасной
+            # поиск баз по PAR-файлам.
             pass
 
         names: list[str] = []
         try:
             files = self.list_files("1..*.PAR")
-        except Exception:
+        except IrbisError:
             files = []
         for item in files:
             filename = item.replace("/", "\\").rsplit("\\", 1)[-1]

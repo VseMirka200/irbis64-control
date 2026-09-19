@@ -19,8 +19,7 @@ class MainWindowRunMixin:
         if list_widget.property("sourceHeightManuallySet"):
             return
         selected_count = sum(
-            bool(list_widget.item(index).data(Qt.ItemDataRole.UserRole))
-            for index in range(list_widget.count())
+            bool(list_widget.item(index).data(Qt.ItemDataRole.UserRole)) for index in range(list_widget.count())
         )
         if list_widget.property("resizableSourceList"):
             target_height = 84
@@ -477,9 +476,7 @@ class MainWindowRunMixin:
         self._append_progress(f"Реестр иностранных агентов: {foreign_agents_path or 'не выбран'}")
         self._append_progress(f"Excel-отчёт: {output_path}" if output_path else "Excel-отчёт: не создаётся")
         substance_marker = (
-            str(self.marker_settings["substance_marker"])
-            if self.marker_settings["substance_marker_enabled"]
-            else ""
+            str(self.marker_settings["substance_marker"]) if self.marker_settings["substance_marker_enabled"] else ""
         )
         foreign_marker = (
             str(self.marker_settings["foreign_agent_marker_template"])
@@ -541,9 +538,7 @@ class MainWindowRunMixin:
                 age_marker=age_marker,
                 substance_marker_field=int(self.marker_settings["substance_marker_field"]),
                 foreign_agent_marker_field=int(self.marker_settings["foreign_agent_marker_field"]),
-                foreign_organization_marker_field=int(
-                    self.marker_settings["foreign_organization_marker_field"]
-                ),
+                foreign_organization_marker_field=int(self.marker_settings["foreign_organization_marker_field"]),
                 age_marker_field=int(self.marker_settings["age_marker_field"]),
                 backup_dir=str(self._app_data_dir() / "backups"),
                 create_backup=self.app_settings.create_database_backup,
@@ -589,11 +584,7 @@ class MainWindowRunMixin:
         if not isinstance(worker, (ComparisonWorker, DirectIrbisComparisonWorker)):
             return
         rows = payload if isinstance(payload, list) else []
-        valid_rows = [
-            item
-            for item in rows
-            if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], int)
-        ]
+        valid_rows = [item for item in rows if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], int)]
         if not valid_rows:
             worker.confirm_review({})
             return
@@ -608,9 +599,7 @@ class MainWindowRunMixin:
             decisions = dialog.decisions()
             approved = sum(decisions.values())
             removed = len(decisions) - approved
-            self._append_progress(
-                f"Ручная проверка: подтверждено {approved:,}, убрано {removed:,}."
-            )
+            self._append_progress(f"Ручная проверка: подтверждено {approved:,}, убрано {removed:,}.")
             worker.confirm_review(decisions)
         else:
             self._append_progress("Ручная проверка отменена пользователем.")
@@ -1008,10 +997,12 @@ class MainWindowRunMixin:
         try:
             self._save_irbis_config()
         except Exception:
+            # Ошибка сохранения настроек не должна мешать закрытию приложения.
             pass
         try:
             self._save_window_state()
         except Exception:
+            # Геометрию можно безопасно восстановить значениями по умолчанию.
             pass
         self._save_run_journal()
         event.accept()

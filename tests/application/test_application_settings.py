@@ -3,9 +3,9 @@ import unittest
 from pathlib import Path
 
 from irbis_control.application.settings import (
-    ApplicationSettings,
     THEME_DARK,
     THEME_SYSTEM,
+    ApplicationSettings,
     load_application_settings,
     save_application_settings,
 )

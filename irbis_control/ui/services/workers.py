@@ -15,6 +15,10 @@ from irbis_control.application.updater import (
     download_asset,
     fetch_latest_release,
 )
+from irbis_control.core.manual_review_memory import (
+    apply_remembered_confirmations,
+    remember_approved_results,
+)
 from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER,
     DEFAULT_AGE_MARKER_FIELD,
@@ -36,10 +40,6 @@ from irbis_control.core.matcher import (
     remove_markers_from_tag_values,
 )
 from irbis_control.core.models import ComparisonOptions, MarkerApplicationStats
-from irbis_control.core.manual_review_memory import (
-    apply_remembered_confirmations,
-    remember_approved_results,
-)
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 from irbis_control.infrastructure.irbis_bridge import (
     IrbisClient,
