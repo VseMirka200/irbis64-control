@@ -55,6 +55,7 @@ from matcher import (
     DEFAULT_SUBSTANCE_MARKER_FIELD,
     ComparisonCancelled,
     ComparisonSummary,
+    MarkerApplicationStats,
     MatchResult,
     apply_markers_to_tag_values,
     build_markers_by_record,
@@ -306,6 +307,7 @@ class DirectIrbisComparisonWorker(QObject):
     finished = pyqtSignal(object, object)
     failed = pyqtSignal(str)
     cancelled = pyqtSignal(str)
+    preview_requested = pyqtSignal(object)
 
     def __init__(
         self,
@@ -357,9 +359,16 @@ class DirectIrbisComparisonWorker(QObject):
         self.age_marker_field = int(age_marker_field)
         self.backup_dir = Path(backup_dir)
         self.cancel_event = Event()
+        self.preview_event = Event()
+        self.preview_approved = False
 
     def request_cancel(self) -> None:
         self.cancel_event.set()
+        self.preview_event.set()
+
+    def confirm_preview(self, approved: bool) -> None:
+        self.preview_approved = bool(approved)
+        self.preview_event.set()
 
     def _cancelled(self) -> bool:
         return self.cancel_event.is_set()
@@ -475,6 +484,8 @@ class DirectIrbisComparisonWorker(QObject):
 
                 pending: list[IrbisRecord] = []
                 rollback_records: list[IrbisRecord] = []
+                preview_records: list[dict[str, object]] = []
+                marker_stats = MarkerApplicationStats()
                 conflicts = 0
                 total_candidates = len(markers_by_mfn)
                 for index, mfn in enumerate(sorted(markers_by_mfn), start=1):
@@ -485,12 +496,17 @@ class DirectIrbisComparisonWorker(QObject):
                     if scanned_version is not None and live.version != scanned_version:
                         conflicts += 1
                         continue
+                    record_stats = MarkerApplicationStats()
                     tag_values, changed = apply_markers_to_tag_values(
                         ((field.tag, field.value) for field in live.fields),
                         markers_by_mfn[mfn],
                         age_marker=self.age_marker,
                         age_marker_field=self.age_marker_field,
+                        stats=record_stats,
                     )
+                    marker_stats.already_present += record_stats.already_present
+                    marker_stats.added += record_stats.added
+                    marker_stats.duplicates_repaired += record_stats.duplicates_repaired
                     if changed:
                         rollback_records.append(live)
                         pending.append(
@@ -501,10 +517,67 @@ class DirectIrbisComparisonWorker(QObject):
                                 [IrbisField(tag, value) for tag, value in tag_values],
                             )
                         )
+                        requested_markers = [
+                            f"#{int(tag):03d}: {marker}"
+                            for tag, marker in markers_by_mfn[mfn]
+                            if str(marker).strip()
+                        ]
+                        if self.age_marker.strip():
+                            requested_markers.append(
+                                f"#{self.age_marker_field:03d}: {self.age_marker.strip()}"
+                            )
+                        preview_records.append(
+                            {
+                                "mfn": live.mfn,
+                                "markers": requested_markers,
+                                "added": record_stats.added,
+                                "already_present": record_stats.already_present,
+                                "duplicates_repaired": record_stats.duplicates_repaired,
+                            }
+                        )
                     if index == total_candidates or index % 25 == 0:
                         self.progress.emit(
                             92 + int(index / max(total_candidates, 1) * 4),
                             f"Проверка найденных MFN перед записью: {index:,} из {total_candidates:,}",
+                        )
+
+                if pending:
+                    self.progress.emit(96, "Ожидание подтверждения записи в ИРБИС")
+                    self.preview_event.clear()
+                    self.preview_approved = False
+                    self.preview_requested.emit(
+                        {
+                            "database": self.database,
+                            "records": preview_records,
+                            "record_count": len(pending),
+                            "markers_added": marker_stats.added,
+                            "markers_already_present": marker_stats.already_present,
+                            "duplicates_repaired": marker_stats.duplicates_repaired,
+                            "conflicts": conflicts,
+                        }
+                    )
+                    self.preview_event.wait()
+                    if self._cancelled() or not self.preview_approved:
+                        suffix = " Excel-отчёт уже сохранён." if self.output_path else ""
+                        raise ComparisonCancelled(
+                            "Запись изменений в ИРБИС отменена пользователем." + suffix
+                        )
+
+                    self.progress.emit(96, "Повторная проверка версий MFN перед записью")
+                    changed_during_confirmation: list[int] = []
+                    for original in rollback_records:
+                        latest = connected.read_record(self.database, original.mfn)
+                        if latest.version != original.version:
+                            changed_during_confirmation.append(original.mfn)
+                    if changed_during_confirmation:
+                        preview = ", ".join(
+                            str(mfn) for mfn in changed_during_confirmation[:20]
+                        )
+                        if len(changed_during_confirmation) > 20:
+                            preview += f" и ещё {len(changed_during_confirmation) - 20}"
+                        raise IrbisError(
+                            "Запись отменена: после показа предварительного просмотра "
+                            f"на сервере изменились MFN {preview}. Запустите проверку заново."
                         )
 
                 backup = self._save_rollback(rollback_records)
@@ -556,6 +629,11 @@ class DirectIrbisComparisonWorker(QObject):
 
                 summary.modified_database_file = source_label
                 summary.modified_database_records = written
+                summary.markers_already_present = marker_stats.already_present
+                summary.markers_added = marker_stats.added
+                summary.marker_duplicates_repaired = (
+                    marker_stats.duplicates_repaired + readback_repairs
+                )
                 if conflicts:
                     summary.warnings.append(
                         f"Пропущено записей, изменённых на сервере во время проверки: {conflicts}. "
@@ -600,8 +678,13 @@ class IrbisOperationWorker(QObject):
                 str(self.params.get("login", "")),
                 str(self.params.get("password", "")),
                 "C",
-                timeout=20,
+                timeout=5 if self.mode == "health" else 20,
             )
+            if self.mode == "health":
+                with client:
+                    pass
+                self.finished.emit(self.mode, {"ok": True})
+                return
             if self.mode in {"test", "databases", "tune_read"}:
                 self.progress.emit(20, "Подключение к серверу ИРБИС…")
                 with client as connected:
@@ -1832,6 +1915,7 @@ class MarkerSettingsDialog(QDialog):
 
 class MainWindow(QMainWindow):
     RUN_JOURNAL_MAX_LINES = 10_000
+    IRBIS_HEALTH_CHECK_INTERVAL_MS = 60_000
 
     def __init__(self) -> None:
         super().__init__()
@@ -1849,6 +1933,9 @@ class MainWindow(QMainWindow):
         self.irbis_thread: QThread | None = None
         self.irbis_worker: IrbisOperationWorker | None = None
         self._irbis_operation = ""
+        self._irbis_operation_silent = False
+        self._irbis_connection_state = "error"
+        self._irbis_connection_status_text = "Готово к подключению"
         self.last_results: list[MatchResult] = []
         self.last_summary: ComparisonSummary | None = None
         self.last_output_path = ""
@@ -1866,6 +1953,14 @@ class MainWindow(QMainWindow):
         self._apply_style()
         self._align_all_control_heights()
         self._restore_window_state()
+        self._irbis_health_timer = QTimer(self)
+        self._irbis_health_timer.setInterval(self.IRBIS_HEALTH_CHECK_INTERVAL_MS)
+        self._irbis_health_timer.timeout.connect(self._auto_check_irbis_connection)
+        self._irbis_health_timer.start()
+        self._irbis_health_debounce = QTimer(self)
+        self._irbis_health_debounce.setSingleShot(True)
+        self._irbis_health_debounce.timeout.connect(self._auto_check_irbis_connection)
+        QTimer.singleShot(1_500, self._auto_check_irbis_connection)
 
     def _asset_icon(self, filename: str) -> QIcon:
         return QIcon(resource_path("assets", filename))
@@ -2212,14 +2307,7 @@ class MainWindow(QMainWindow):
             self.direct_source_label.setText(
                 f"ИРБИС · {database}" if direct else "Локальная TXT-база"
             )
-            self.direct_source_detail_label.setText(
-                "Прямое подключение, TXT-копия не создаётся"
-                if direct else "Резервный режим работы с TXT-файлом"
-            )
-            self.direct_source_dot.setProperty("state", "direct" if direct else "local")
-            self.direct_source_dot.style().unpolish(self.direct_source_dot)
-            self.direct_source_dot.style().polish(self.direct_source_dot)
-            self.direct_source_dot.update()
+            self._sync_direct_source_status()
         if hasattr(self, "irbis_base_status"):
             self.irbis_base_status.setText(
                 "База читается пакетами при запуске"
@@ -2245,6 +2333,55 @@ class MainWindow(QMainWindow):
             self.cleanup_button.setText(
                 "Удалить метки из ИРБИС" if direct else "Удалить все метки из TXT"
             )
+        if direct and hasattr(self, "_irbis_health_debounce"):
+            self._set_irbis_status("Проверка подключения к ИРБИС…", "running")
+            self._irbis_health_debounce.start(250)
+
+    def _sync_direct_source_status(self) -> None:
+        if not hasattr(self, "direct_source_dot"):
+            return
+        direct = self.direct_irbis_checkbox.isChecked()
+        state = self._irbis_connection_state if direct else "local"
+        status_text = (
+            self._irbis_connection_status_text
+            if direct
+            else "Используется локальная TXT-база"
+        )
+        self.direct_source_dot.setProperty("state", state)
+        short_status = {
+            "success": "Подключено",
+            "running": "Проверка…",
+            "warning": "Внимание",
+            "error": "Нет подключения",
+            "local": "Локальный файл",
+        }.get(state, "Нет подключения")
+        self.direct_source_state_label.setText(short_status)
+        self.direct_source_state_label.setProperty("state", state)
+        self.direct_source_dot.setToolTip(status_text)
+        self.direct_source_label.setToolTip(status_text)
+        self.direct_source_state_label.setToolTip(status_text)
+        self.direct_source_dot.style().unpolish(self.direct_source_dot)
+        self.direct_source_dot.style().polish(self.direct_source_dot)
+        self.direct_source_state_label.style().unpolish(self.direct_source_state_label)
+        self.direct_source_state_label.style().polish(self.direct_source_state_label)
+        self.direct_source_dot.update()
+        self.direct_source_state_label.update()
+
+    def _invalidate_irbis_connection_status(self) -> None:
+        if self.irbis_thread and self.irbis_thread.isRunning():
+            return
+        self._set_irbis_status("Параметры подключения изменены", "error")
+        if hasattr(self, "_irbis_health_debounce") and self.direct_irbis_checkbox.isChecked():
+            self._irbis_health_debounce.start(1_200)
+
+    def _auto_check_irbis_connection(self) -> None:
+        if not self.direct_irbis_checkbox.isChecked():
+            return
+        if self.irbis_thread and self.irbis_thread.isRunning():
+            return
+        if self.thread and self.thread.isRunning():
+            return
+        self._start_irbis_operation("health", silent=True)
 
     def _restore_irbis_config(self) -> None:
         try:
@@ -2319,9 +2456,10 @@ class MainWindow(QMainWindow):
             "age_marker_field": int(self.marker_settings.get("age_marker_field", DEFAULT_AGE_MARKER_FIELD)),
         }
 
-    def _start_irbis_operation(self, mode: str) -> None:
+    def _start_irbis_operation(self, mode: str, *, silent: bool = False) -> None:
         if self.irbis_thread and self.irbis_thread.isRunning():
-            QMessageBox.information(self, APP_TITLE, "Операция с ИРБИС уже выполняется.")
+            if not silent:
+                QMessageBox.information(self, APP_TITLE, "Операция с ИРБИС уже выполняется.")
             return
         params = self._irbis_params()
         if mode in {"fetch", "apply", "clean_markers", "tune_read"} and not str(params["database"]).strip():
@@ -2335,19 +2473,23 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, APP_TITLE, "Нет карты MFN или готовой TXT-копии с изменениями.")
                 return
 
-        self._save_irbis_config()
+        if not silent:
+            self._save_irbis_config()
         self._irbis_operation = mode
-        self.irbis_progress.setValue(0)
-        self.irbis_progress.show()
-        QTimer.singleShot(0, self._fit_scroll_content)
-        self.irbis_test_button.setEnabled(False)
-        self.irbis_tune_read_button.setEnabled(False)
-        self.irbis_refresh_databases_button.setEnabled(False)
-        self.irbis_fetch_button.setEnabled(False)
-        self.write_irbis_button.setEnabled(False)
-        if hasattr(self, "cleanup_button"):
-            self.cleanup_button.setEnabled(False)
+        self._irbis_operation_silent = silent
+        if not silent:
+            self.irbis_progress.setValue(0)
+            self.irbis_progress.show()
+            QTimer.singleShot(0, self._fit_scroll_content)
+            self.irbis_test_button.setEnabled(False)
+            self.irbis_tune_read_button.setEnabled(False)
+            self.irbis_refresh_databases_button.setEnabled(False)
+            self.irbis_fetch_button.setEnabled(False)
+            self.write_irbis_button.setEnabled(False)
+            if hasattr(self, "cleanup_button"):
+                self.cleanup_button.setEnabled(False)
         captions = {
+            "health": "Проверка подключения к ИРБИС…",
             "test": "Подключение к ИРБИС…",
             "tune_read": "Тест пакета чтения…",
             "databases": "Обновление списка баз ИРБИС…",
@@ -2356,7 +2498,8 @@ class MainWindow(QMainWindow):
             "clean_markers": "Очистка меток прямо в ИРБИС…",
         }
         self._set_irbis_status(captions.get(mode, "Выполнение операции…"), "running")
-        self._append_progress(captions.get(mode, "Операция ИРБИС"))
+        if not silent:
+            self._append_progress(captions.get(mode, "Операция ИРБИС"))
 
         self.irbis_thread = QThread(self)
         self.irbis_worker = IrbisOperationWorker(mode, params)
@@ -2381,6 +2524,10 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, object)
     def _on_irbis_finished(self, mode: str, result: object) -> None:
+        if mode == "health":
+            checked_at = datetime.now().strftime("%H:%M:%S")
+            self._set_irbis_status(f"Подключено • проверено в {checked_at}", "success")
+            return
         self.irbis_progress.setValue(100)
         self.irbis_progress.hide()
         QTimer.singleShot(0, self._fit_scroll_content)
@@ -2406,7 +2553,11 @@ class MainWindow(QMainWindow):
             self._populate_irbis_databases(databases, previous)
             count = self.irbis_db_combo.count() if self._current_irbis_database() else 0
             if mode == "test":
-                self._set_irbis_status(f"Подключено к ИРБИС • доступно баз: {count}", "success")
+                checked_at = datetime.now().strftime("%H:%M:%S")
+                self._set_irbis_status(
+                    f"Подключено к ИРБИС • доступно баз: {count} • проверено в {checked_at}",
+                    "success",
+                )
                 self._append_progress(f"Подключение к ИРБИС выполнено. Загружено баз: {count}.")
             else:
                 self._set_irbis_status(f"Список баз обновлён • доступно: {count}", "success")
@@ -2477,6 +2628,10 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str)
     def _on_irbis_failed(self, mode: str, error: str) -> None:
+        if mode == "health":
+            checked_at = datetime.now().strftime("%H:%M:%S")
+            self._set_irbis_status(f"Нет подключения • проверено в {checked_at}", "error")
+            return
         self.irbis_progress.setValue(0)
         self.irbis_progress.hide()
         QTimer.singleShot(0, self._fit_scroll_content)
@@ -2490,6 +2645,7 @@ class MainWindow(QMainWindow):
             self.irbis_thread.deleteLater()
         self.irbis_thread = None
         self.irbis_worker = None
+        self._irbis_operation_silent = False
         self.irbis_test_button.setEnabled(True)
         self.irbis_tune_read_button.setEnabled(True)
         self.irbis_refresh_databases_button.setEnabled(True)
@@ -3058,17 +3214,23 @@ class MainWindow(QMainWindow):
         self.database_card = SectionCard("Источник записей", "")
         self.direct_source_dot = QLabel()
         self.direct_source_dot.setObjectName("directSourceDot")
-        self.direct_source_dot.setProperty("state", "direct")
+        self.direct_source_dot.setProperty("state", "error")
         self.direct_source_dot.setFixedSize(9, 9)
         self.direct_source_label = QLabel("ИРБИС")
         self.direct_source_label.setObjectName("sourceStatusTitle")
-        self.direct_source_detail_label = QLabel("Прямое подключение, TXT-копия не создаётся")
-        self.direct_source_detail_label.setObjectName("statusLabel")
+        self.direct_source_state_label = QLabel("Нет подключения")
+        self.direct_source_state_label.setObjectName("sourceStateLabel")
+        self.direct_source_state_label.setProperty("state", "error")
         source_text = QVBoxLayout()
         source_text.setContentsMargins(0, 0, 0, 0)
         source_text.setSpacing(0)
-        source_text.addWidget(self.direct_source_label)
-        source_text.addWidget(self.direct_source_detail_label)
+        source_title_row = QHBoxLayout()
+        source_title_row.setContentsMargins(0, 0, 0, 0)
+        source_title_row.setSpacing(7)
+        source_title_row.addWidget(self.direct_source_label)
+        source_title_row.addWidget(self.direct_source_state_label)
+        source_title_row.addStretch()
+        source_text.addLayout(source_title_row)
         source_status_row = QHBoxLayout()
         source_status_row.setContentsMargins(0, 0, 0, 0)
         source_status_row.setSpacing(7)
@@ -3355,6 +3517,10 @@ class MainWindow(QMainWindow):
         self._responsive_mode = None
 
         self._restore_irbis_config()
+        self.irbis_host_edit.textChanged.connect(self._invalidate_irbis_connection_status)
+        self.irbis_port_spin.valueChanged.connect(self._invalidate_irbis_connection_status)
+        self.irbis_login_edit.textChanged.connect(self._invalidate_irbis_connection_status)
+        self.irbis_password_edit.textChanged.connect(self._invalidate_irbis_connection_status)
         self._apply_marker_settings_to_ui()
         for checkbox in (
             self.create_excel_report_check,
@@ -3681,9 +3847,17 @@ class MainWindow(QMainWindow):
             QLabel#irbisStateDot[state="success"] { background: #35b85f; }
             QLabel#irbisStateDot[state="running"], QLabel#irbisStateDot[state="warning"] { background: #e4a11b; }
             QLabel#irbisStateDot[state="error"] { background: #d94a4a; }
-            QLabel#directSourceDot { background: #35b85f; border-radius: 4px; }
+            QLabel#directSourceDot { background: #d94a4a; border-radius: 4px; }
+            QLabel#directSourceDot[state="success"] { background: #35b85f; }
+            QLabel#directSourceDot[state="running"], QLabel#directSourceDot[state="warning"] { background: #e4a11b; }
+            QLabel#directSourceDot[state="error"] { background: #d94a4a; }
             QLabel#directSourceDot[state="local"] { background: #6f7f8f; }
             QLabel#sourceStatusTitle { color: #202020; font-weight: 600; }
+            QLabel#sourceStateLabel { color: #d94a4a; }
+            QLabel#sourceStateLabel[state="success"] { color: #218b45; }
+            QLabel#sourceStateLabel[state="running"], QLabel#sourceStateLabel[state="warning"] { color: #9a6800; }
+            QLabel#sourceStateLabel[state="error"] { color: #b52f2f; }
+            QLabel#sourceStateLabel[state="local"] { color: #5a5a5a; }
             QLabel#fieldLabel { color: #202020; }
             QLabel#tabIntro, QLabel#cardDescription, QLabel#statusLabel { color: #5a5a5a; }
             QLabel:disabled { color: #6b6b6b; }
@@ -3749,10 +3923,13 @@ class MainWindow(QMainWindow):
     def _set_irbis_status(self, text: str, state: str = "success") -> None:
         self.irbis_status.setText(text)
         visual_state = state if state in {"success", "running", "warning", "error"} else "error"
+        self._irbis_connection_state = visual_state
+        self._irbis_connection_status_text = text
         self.irbis_status_dot.setProperty("state", visual_state)
         self.irbis_status_dot.style().unpolish(self.irbis_status_dot)
         self.irbis_status_dot.style().polish(self.irbis_status_dot)
         self.irbis_status_dot.update()
+        self._sync_direct_source_status()
 
     def _set_status(self, text: str, state: str = "idle") -> None:
         self.status_label.setText(text)
@@ -4067,6 +4244,19 @@ class MainWindow(QMainWindow):
             if not validated_direct:
                 return
             foreign_agents_path, excel_paths, output_path, irbis_params = validated_direct
+            if self._irbis_connection_state != "success":
+                current_status = self._irbis_connection_status_text
+                self._auto_check_irbis_connection()
+                QMessageBox.warning(
+                    self,
+                    APP_TITLE,
+                    "Запуск остановлен: соединение с ИРБИС не подтверждено.\n\n"
+                    f"Текущий статус: {current_status}\n\n"
+                    "Программа уже запустила проверку подключения. После появления "
+                    "зелёного статуса повторите запуск.",
+                )
+                self.workflow_tabs.setCurrentIndex(0)
+                return
             database_paths: list[str] = []
             modified_database_path = ""
         else:
@@ -4106,6 +4296,7 @@ class MainWindow(QMainWindow):
         self.last_modified_database_path = modified_database_path
 
         if direct_mode:
+            self._set_irbis_status("Проверка записей ИРБИС…", "running")
             self._append_progress(
                 f"Прямой режим ИРБИС: {irbis_params['host']}:{irbis_params['port']} / {irbis_params['database']}"
             )
@@ -4194,6 +4385,8 @@ class MainWindow(QMainWindow):
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
+        if isinstance(self.worker, DirectIrbisComparisonWorker):
+            self.worker.preview_requested.connect(self._confirm_direct_changes)
         self.worker.finished.connect(self.thread.quit)
         self.worker.failed.connect(self.thread.quit)
         self.worker.cancelled.connect(self.thread.quit)
@@ -4203,6 +4396,59 @@ class MainWindow(QMainWindow):
         self.thread.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self._cleanup_worker)
         self.thread.start()
+
+    @pyqtSlot(object)
+    def _confirm_direct_changes(self, payload: object) -> None:
+        worker = self.worker
+        if not isinstance(worker, DirectIrbisComparisonWorker):
+            return
+        data = payload if isinstance(payload, dict) else {}
+        records = data.get("records", [])
+        records = records if isinstance(records, list) else []
+        preview_lines: list[str] = []
+        for item in records[:15]:
+            if not isinstance(item, dict):
+                continue
+            markers = item.get("markers", [])
+            marker_text = "; ".join(str(marker) for marker in markers)
+            if len(marker_text) > 180:
+                marker_text = marker_text[:177] + "…"
+            actions = []
+            added = int(item.get("added", 0))
+            repaired = int(item.get("duplicates_repaired", 0))
+            if added:
+                actions.append(f"добавится: {added}")
+            if repaired:
+                actions.append(f"исправится дублей: {repaired}")
+            action_text = ", ".join(actions) or "нормализация записи"
+            preview_lines.append(
+                f"MFN {int(item.get('mfn', 0))}: {action_text}\n  {marker_text}"
+            )
+        remaining = max(0, len(records) - len(preview_lines))
+        if remaining:
+            preview_lines.append(f"…и ещё записей: {remaining}")
+
+        message = QMessageBox(self)
+        message.setWindowTitle(APP_TITLE)
+        message.setIcon(QMessageBox.Icon.Question)
+        message.setText(
+            f"Подготовлено к записи в базу {data.get('database', '')}: "
+            f"{int(data.get('record_count', 0))} записей."
+        )
+        message.setInformativeText(
+            f"Новых меток: {int(data.get('markers_added', 0))}\n"
+            f"Уже существовало: {int(data.get('markers_already_present', 0))}\n"
+            f"Будет исправлено дублей: {int(data.get('duplicates_repaired', 0))}\n"
+            f"Конфликтов версий: {int(data.get('conflicts', 0))}\n\n"
+            + "\n".join(preview_lines)
+            + "\n\nЗаписать эти изменения в ИРБИС?"
+        )
+        message.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        message.setDefaultButton(QMessageBox.StandardButton.No)
+        approved = message.exec() == QMessageBox.StandardButton.Yes
+        worker.confirm_preview(approved)
 
     def cancel_comparison(self) -> None:
         if self.worker:
@@ -4236,6 +4482,8 @@ class MainWindow(QMainWindow):
         )
 
         report_only = self.last_run_report_only
+        if self.last_run_direct:
+            self._set_irbis_status("ИРБИС доступен • проверка завершена", "success")
         if report_only:
             self.last_modified_database_path = ""
             self.open_modified_database_button.setEnabled(False)
@@ -4252,8 +4500,9 @@ class MainWindow(QMainWindow):
             self.write_irbis_button.setEnabled(False)
             self._set_status(
                 f"Готово. ИРБИС изменён: {summary.modified_database_records}; "
-                f"вещества: {summary.substance_matched_records}; "
-                f"иноагенты: {summary.foreign_agent_matched_records}",
+                f"добавлено меток: {summary.markers_added}; "
+                f"уже было: {summary.markers_already_present}; "
+                f"исправлено дублей: {summary.marker_duplicates_repaired}",
                 "idle",
             )
             self._append_progress(
@@ -4262,6 +4511,11 @@ class MainWindow(QMainWindow):
                 f"по иноагентам найдено {summary.matched_foreign_agent_rows} из {summary.foreign_agent_rows}; "
                 f"уникальных найденных MFN: {unique_records}; "
                 f"изменено записей непосредственно на сервере: {summary.modified_database_records}."
+            )
+            self._append_progress(
+                f"Метки ИРБИС: добавлено {summary.markers_added}; "
+                f"уже существовало {summary.markers_already_present}; "
+                f"исправлено дублей {summary.marker_duplicates_repaired}."
             )
         else:
             self.last_modified_database_path = summary.modified_database_file or self.last_modified_database_path
@@ -4322,6 +4576,9 @@ class MainWindow(QMainWindow):
                 f"• поле #{age_field:03d}: {age_marker}.\n\n"
                 f"Прочитано записей ИРБИС: {summary.database_records}\n"
                 f"Изменено записей ИРБИС: {summary.modified_database_records}\n"
+                f"Добавлено меток: {summary.markers_added}\n"
+                f"Уже существовало: {summary.markers_already_present}\n"
+                f"Исправлено дублей: {summary.marker_duplicates_repaired}\n"
                 f"Совпавших строк по веществам: {summary.matched_excel_rows}\n"
                 f"Иноагентов с совпадениями: {summary.matched_foreign_agent_rows}\n\n"
                 f"Excel-отчёт: {report_result}",
@@ -4339,6 +4596,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def on_failed(self, error_text: str) -> None:
         self.progress.hide()
+        if self.last_run_direct:
+            self._set_irbis_status("Ошибка подключения/обмена с ИРБИС", "error")
         self._set_status("Ошибка", "error")
         self.progress_dialog.finish("Ошибка. Подробности показаны ниже.", 0)
         self._append_progress(error_text)
@@ -4352,6 +4611,8 @@ class MainWindow(QMainWindow):
     @pyqtSlot(str)
     def on_cancelled(self, message: str) -> None:
         self.progress.hide()
+        if self.last_run_direct:
+            self._set_irbis_status("Операция с ИРБИС отменена", "warning")
         self._set_status(message, "warning")
         self.progress_dialog.finish(message, self.progress.value())
 

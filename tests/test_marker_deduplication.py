@@ -5,6 +5,7 @@ from matcher import (
     DatabaseRecord,
     ExcelEntry,
     ForeignAgentEntry,
+    MarkerApplicationStats,
     MatchResult,
     _modify_matched_record,
     apply_markers_to_tag_values,
@@ -80,6 +81,55 @@ class ForeignAgentMarkerDeduplicationTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertEqual([(333, first), (333, second)], fields)
+
+    def test_repeated_application_does_not_add_marker_again(self) -> None:
+        marker = "ПРЕДУПРЕЖДЕНИЕ О ВРЕДЕ ЗДОРОВЬЮ."
+
+        fields, changed = apply_markers_to_tag_values(
+            [(333, marker)],
+            [(333, marker)],
+            age_marker="",
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual([(333, marker)], fields)
+
+    def test_html_space_entity_is_the_same_marker(self) -> None:
+        marker = "ПРЕДУПРЕЖДЕНИЕ О ВРЕДЕ ЗДОРОВЬЮ."
+        stats = MarkerApplicationStats()
+
+        fields, changed = apply_markers_to_tag_values(
+            [(333, marker + "&#x20;")],
+            [(333, marker)],
+            age_marker="",
+            stats=stats,
+        )
+
+        self.assertFalse(changed)
+        self.assertEqual([(333, marker + "&#x20;")], fields)
+        self.assertEqual(1, stats.already_present)
+        self.assertEqual(0, stats.added)
+        self.assertEqual(0, stats.duplicates_repaired)
+
+    def test_marker_statistics_count_only_actual_changes(self) -> None:
+        marker = "ПРЕДУПРЕЖДЕНИЕ"
+        stats = MarkerApplicationStats()
+
+        fields, changed = apply_markers_to_tag_values(
+            [(333, marker), (333, marker), (333, "СЛУЖЕБНОЕ ЗНАЧЕНИЕ")],
+            [(333, marker), (333, "НОВАЯ МЕТКА")],
+            age_marker="",
+            stats=stats,
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(
+            [(333, marker), (333, "СЛУЖЕБНОЕ ЗНАЧЕНИЕ"), (333, "НОВАЯ МЕТКА")],
+            fields,
+        )
+        self.assertEqual(1, stats.already_present)
+        self.assertEqual(1, stats.added)
+        self.assertEqual(1, stats.duplicates_repaired)
 
 
 if __name__ == "__main__":

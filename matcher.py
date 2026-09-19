@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 import unicodedata
@@ -129,7 +130,17 @@ class ComparisonSummary:
     output_file: str = ""
     modified_database_file: str = ""
     modified_database_records: int = 0
+    markers_already_present: int = 0
+    markers_added: int = 0
+    marker_duplicates_repaired: int = 0
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MarkerApplicationStats:
+    already_present: int = 0
+    added: int = 0
+    duplicates_repaired: int = 0
 
 
 HEADER_SYNONYMS = {
@@ -1985,7 +1996,9 @@ def _normalized_marker_text(value: str) -> str:
     # выглядят одинаково, но простое сравнение строк считает их разными.
     # Для дедупликации убираем все форматирующие/управляющие символы и
     # приводим любые Unicode-разделители к обычному пробелу.
-    normalized = unicodedata.normalize("NFKC", safe_text(value))
+    # Некоторые источники сохраняют пробел как буквальную HTML-сущность
+    # ``&#x20;``. Для сравнения меток это тот же обычный пробел.
+    normalized = unicodedata.normalize("NFKC", html.unescape(safe_text(value)))
     cleaned: list[str] = []
     for char in normalized:
         category = unicodedata.category(char)
@@ -2475,6 +2488,7 @@ def apply_markers_to_tag_values(
     *,
     age_marker: str = DEFAULT_AGE_MARKER,
     age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
+    stats: MarkerApplicationStats | None = None,
 ) -> tuple[list[tuple[int, str]], bool]:
     """Добавляет метки прямо в набор полей записи ИРБИС без дублей.
 
@@ -2499,6 +2513,26 @@ def apply_markers_to_tag_values(
         requested_keys.add(key)
         requested.append((int(tag), marker))
 
+    if stats is not None:
+        for tag, marker in requested:
+            marker_identity = _foreign_marker_identity(marker)
+            occurrences = 0
+            for existing_tag, value in fields:
+                if existing_tag != tag:
+                    continue
+                same_foreign_marker = (
+                    marker_identity is not None
+                    and _foreign_marker_identity(value) == marker_identity
+                )
+                if not same_foreign_marker and not _field_contains_marker(value, marker):
+                    continue
+                repeat_count = _marker_only_repeat_count(value, marker)
+                occurrences += max(1, repeat_count)
+            if occurrences:
+                stats.already_present += 1
+            else:
+                stats.added += 1
+
     changed = False
 
     # Отдельно схлопываем короткие авторские метки ^AI^@... по смысловому
@@ -2518,6 +2552,8 @@ def apply_markers_to_tag_values(
             if pair is not None and pair in requested_foreign_keys:
                 if pair in seen_foreign:
                     changed = True
+                    if stats is not None:
+                        stats.duplicates_repaired += 1
                     continue
                 seen_foreign.add(pair)
             deduped_fields.append((tag, value))
@@ -2534,6 +2570,8 @@ def apply_markers_to_tag_values(
             if repeat_count > 1:
                 fields[index] = (existing_tag, marker)
                 changed = True
+                if stats is not None:
+                    stats.duplicates_repaired += repeat_count - 1
             matching_indices.append(index)
 
         # Если одинаковая метка записана отдельными повторениями одного поля,
@@ -2545,9 +2583,21 @@ def apply_markers_to_tag_values(
                 if _marker_only_repeat_count(fields[index][1], marker) == 1:
                     del fields[index]
                     changed = True
+                    if stats is not None:
+                        stats.duplicates_repaired += 1
 
     age_marker = age_marker.strip()
     age_positions = [index for index, (tag, _value) in enumerate(fields) if tag == int(age_marker_field)]
+    if stats is not None and age_marker:
+        if not age_positions:
+            stats.added += 1
+        else:
+            for index in age_positions:
+                _tag, value = fields[index]
+                if _field_contains_marker(value, age_marker):
+                    stats.already_present += 1
+                else:
+                    stats.added += 1
     if age_marker and age_positions:
         for index in age_positions:
             tag, value = fields[index]
