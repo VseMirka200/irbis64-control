@@ -1,6 +1,6 @@
 import unittest
 
-from matcher import (
+from irbis_control.core.matcher import (
     SOURCE_FOREIGN_AGENTS,
     DatabaseRecord,
     ExcelEntry,

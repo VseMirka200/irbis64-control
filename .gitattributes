@@ -1,2 +1,6 @@
-# Auto detect text files and perform LF normalization
+# Auto detect text files and keep source files consistent across platforms.
 * text=auto
+*.py text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf

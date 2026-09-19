@@ -1,0 +1,27 @@
+[project]
+name = "irbis64-control"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.6,<7",
+    "openpyxl>=3.1,<4",
+    "xlrd>=2.0,<3",
+    "rapidfuzz>=3.9,<4",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# На первом этапе блокируем только ошибки, способные сломать выполнение.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.coverage.run]
+branch = true
+source = ["irbis_control"]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
