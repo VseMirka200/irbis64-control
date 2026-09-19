@@ -196,11 +196,11 @@ class MainWindowLayoutMixin:
         defaults_note.setWordWrap(True)
         parameters_layout.addWidget(defaults_note)
 
-        confirmation_memory_card = SectionCard("Память подтверждений", "")
+        confirmation_memory_card = SectionCard("Память решений", "")
         confirmation_memory_row = QHBoxLayout()
         confirmation_memory_row.setSpacing(8)
         confirmation_memory_hint = QLabel(
-            "Сохранённые ручные подтверждения автоматически применяются к таким же совпадениям. "
+            "Сохранённые ручные подтверждения и отклонения автоматически применяются к таким же совпадениям. "
             "Здесь их можно просмотреть и удалить."
         )
         confirmation_memory_hint.setObjectName("cardDescription")
@@ -208,7 +208,7 @@ class MainWindowLayoutMixin:
         confirmation_memory_row.addWidget(confirmation_memory_hint, 1)
         self.confirmation_memory_button = QPushButton("Открыть память")
         self.confirmation_memory_button.setObjectName("mutedButton")
-        self.confirmation_memory_button.setToolTip("Просмотреть или удалить сохранённые подтверждения")
+        self.confirmation_memory_button.setToolTip("Просмотреть или удалить сохранённые решения")
         self.confirmation_memory_button.clicked.connect(self.open_confirmation_memory)
         confirmation_memory_row.addWidget(self.confirmation_memory_button, 0, Qt.AlignmentFlag.AlignVCenter)
         confirmation_memory_card.body.addLayout(confirmation_memory_row)
@@ -237,6 +237,9 @@ class MainWindowLayoutMixin:
         advanced_layout.setContentsMargins(0, 0, 4, 0)
         advanced_layout.setSpacing(7)
         self.match_settings_card.title_label.setText("Порядок сравнения")
+        self.match_order_label.hide()
+        self.match_rules_editor.show()
+        self.fuzzy_match_check.show()
         advanced_layout.addWidget(self.match_settings_card)
         self.report_lists_card.title_label.setText("Состав Excel-отчёта")
         advanced_layout.addWidget(self.report_lists_card)

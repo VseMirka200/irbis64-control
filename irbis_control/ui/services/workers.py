@@ -16,8 +16,8 @@ from irbis_control.application.updater import (
     fetch_latest_release,
 )
 from irbis_control.core.manual_review_memory import (
-    apply_remembered_confirmations,
-    remember_approved_results,
+    apply_remembered_decisions,
+    remember_review_decisions,
 )
 from irbis_control.core.matcher import (
     DEFAULT_AGE_MARKER,
@@ -136,9 +136,13 @@ class ComparisonWorker(QObject):
 
     def _review_if_needed(self, results, summary) -> None:
         memory_path = manual_review_memory_path()
-        remembered = apply_remembered_confirmations(results, summary, memory_path)
-        if remembered:
-            self.progress.emit(82, f"По сохранённым подтверждениям автоматически принято: {remembered:,}")
+        remembered_approved, remembered_rejected = apply_remembered_decisions(results, summary, memory_path)
+        if remembered_approved or remembered_rejected:
+            self.progress.emit(
+                82,
+                f"По сохранённым решениям: подтверждено {remembered_approved:,}, "
+                f"отклонено {remembered_rejected:,}",
+            )
 
         review_rows = [
             (index, result)
@@ -154,8 +158,7 @@ class ComparisonWorker(QObject):
         self.review_event.wait()
         if self.cancel_event.is_set() or self.review_decisions is None:
             raise ComparisonCancelled("Ручная проверка отменена пользователем")
-        approved_indices = {index for index, approved in self.review_decisions.items() if approved}
-        remember_approved_results(memory_path, results, approved_indices)
+        remember_review_decisions(memory_path, results, self.review_decisions)
         apply_manual_review_decisions(results, summary, self.review_decisions)
         approved = sum(self.review_decisions.values())
         removed = len(self.review_decisions) - approved
@@ -369,9 +372,13 @@ class DirectIrbisComparisonWorker(QObject):
                 )
 
                 memory_path = manual_review_memory_path()
-                remembered = apply_remembered_confirmations(results, summary, memory_path)
-                if remembered:
-                    self.progress.emit(82, f"По сохранённым подтверждениям автоматически принято: {remembered:,}")
+                remembered_approved, remembered_rejected = apply_remembered_decisions(results, summary, memory_path)
+                if remembered_approved or remembered_rejected:
+                    self.progress.emit(
+                        82,
+                        f"По сохранённым решениям: подтверждено {remembered_approved:,}, "
+                        f"отклонено {remembered_rejected:,}",
+                    )
 
                 review_rows = [
                     (index, result)
@@ -386,8 +393,7 @@ class DirectIrbisComparisonWorker(QObject):
                     self.review_event.wait()
                     if self._cancelled() or self.review_decisions is None:
                         raise ComparisonCancelled("Ручная проверка отменена пользователем")
-                    approved_indices = {index for index, approved in self.review_decisions.items() if approved}
-                    remember_approved_results(memory_path, results, approved_indices)
+                    remember_review_decisions(memory_path, results, self.review_decisions)
                     apply_manual_review_decisions(results, summary, self.review_decisions)
                     approved = sum(self.review_decisions.values())
                     removed = len(self.review_decisions) - approved

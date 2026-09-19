@@ -249,6 +249,21 @@ def extract_isbns(value: Any) -> list[str]:
     return found
 
 
+def isbn_match_keys(value: Any) -> set[str]:
+    """Возвращает ISBN и эквивалентный ISBN-13 для сопоставления изданий."""
+    keys: set[str] = set()
+    for code in extract_isbns(value):
+        keys.add(code)
+        if len(code) == 10:
+            body = "978" + code[:9]
+            weighted_sum = sum(
+                (1 if index % 2 == 0 else 3) * int(char) for index, char in enumerate(body)
+            )
+            checksum = (10 - weighted_sum % 10) % 10
+            keys.add(body + str(checksum))
+    return keys
+
+
 def normalize_isbn(value: Any) -> str:
     candidates = extract_isbns(value)
     return candidates[0] if candidates else ""
@@ -324,6 +339,28 @@ def _author_identity(value: Any) -> tuple[str, tuple[str, ...]] | None:
     return surname, initials
 
 
+def _author_order_variants(value: Any) -> set[str]:
+    """Нормализует полное ФИО в порядках «фамилия имя» и «имя фамилия»."""
+    normalized = normalize_author(value)
+    tokens = normalized.split()
+    variants = {normalized} if normalized else set()
+    if len(tokens) == 2 and all(len(token) > 1 for token in tokens):
+        variants.add(" ".join(reversed(tokens)))
+    elif len(tokens) == 3 and all(len(token) > 1 for token in tokens):
+        variants.add(" ".join((tokens[-1], tokens[0], tokens[1])))
+        variants.add(" ".join((tokens[1], tokens[2], tokens[0])))
+    return variants
+
+
+def author_surnames(value: Any) -> set[str]:
+    """Возвращает возможные фамилии, не переставляя сокращённые инициалы."""
+    surnames = {variant.split()[0] for variant in _author_order_variants(value) if variant}
+    identity = _author_identity(value)
+    if identity:
+        surnames.add(identity[0])
+    return surnames - {""}
+
+
 def author_surname(value: Any) -> str:
     identity = _author_identity(value)
     return identity[0] if identity else ""
@@ -362,7 +399,27 @@ def publisher_variants(value: Any) -> set[str]:
     raw = safe_text(value)
     variants = {normalize_publisher(raw)}
     variants.update(normalize_publisher(part) for part in re.split(r"[;,/|]+", raw))
-    return variants - {""}
+    expanded = set(variants)
+    removable_prefixes = (
+        "общество с ограниченной ответственностью ",
+        "издательский дом ",
+        "издательство ",
+        "ооо ",
+        "ао ",
+        "пао ",
+    )
+    for variant in variants:
+        shortened = variant
+        changed = True
+        while changed:
+            changed = False
+            for prefix in removable_prefixes:
+                if shortened.startswith(prefix):
+                    shortened = shortened[len(prefix) :].strip()
+                    changed = True
+        if shortened:
+            expanded.add(shortened)
+    return expanded - {""}
 
 
 def _extract_subfield(value: str, code: str) -> str:
@@ -915,6 +972,7 @@ def apply_manual_review_decisions(
     decisions: dict[int, bool],
     *,
     confirmation_note: str = "Подтверждено оператором вручную",
+    rejection_note: str = "Отклонено оператором вручную",
 ) -> None:
     """Применяет решения оператора к пограничным совпадениям.
 
@@ -936,7 +994,7 @@ def apply_manual_review_decisions(
             suffix = confirmation_note
         else:
             result.status = "Отклонено вручную"
-            suffix = "Отклонено оператором вручную"
+            suffix = rejection_note
         result.note = f"{result.note}; {suffix}" if result.note else suffix
 
     confirmed_substances = [
