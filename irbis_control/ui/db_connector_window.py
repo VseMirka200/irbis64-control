@@ -5,7 +5,6 @@ import json
 import sys
 from pathlib import Path
 
-from irbis_control.application.settings import load_application_settings
 from irbis_control.infrastructure.atomic_io import atomic_write_text
 
 from PyQt6.QtCore import QSize, QStandardPaths, Qt
@@ -40,8 +39,7 @@ from irbis_control.infrastructure.irbis_bridge import (
 )
 from irbis_control.paths import resource_path
 from irbis_control.ui.locale import install_russian_ui
-from irbis_control.ui.storage_paths import application_settings_path
-from irbis_control.ui.theme import apply_theme_palette
+from irbis_control.ui.theme import apply_light_palette
 
 APP_TITLE = "ИРБИС64 Контроль — подключение к базе"
 
@@ -302,6 +300,7 @@ class ConnectorWindow(QMainWindow):
         self.host_edit.setText(str(self._config.get("host", "127.0.0.1")))
         self.port_spin.setValue(int(self._config.get("port", 6666)))
         self.login_edit.setText(str(self._config.get("login", "")))
+        self.password_edit.setText(str(self._config.get("password", "")))
         self._populate_databases([], str(self._config.get("database", "IBIS")))
         self.query_edit.setText(str(self._config.get("query", "I=$")))
         if self._config.get("snapshot"):
@@ -310,12 +309,12 @@ class ConnectorWindow(QMainWindow):
             self.manifest_edit.setText(str(self._config["manifest"]))
         if self._config.get("modified"):
             self.modified_edit.setText(str(self._config["modified"]))
-        # Пароль специально не сохраняется на диск.
 
     def _save_config(self) -> None:
         data = {
             "host": self.host_edit.text().strip(), "port": self.port_spin.value(),
             "login": self.login_edit.text().strip(), "database": self._current_database(),
+            "password": self.password_edit.text(),
             "query": self.query_edit.text().strip(), "snapshot": self.snapshot_edit.text().strip(),
             "manifest": self.manifest_edit.text().strip(), "modified": self.modified_edit.text().strip(),
         }
@@ -440,8 +439,7 @@ def main() -> int:
     install_russian_ui(app)
     app.setApplicationName("IRBIS64ControlDB")
     app.setOrganizationName("IRBIS64Control")
-    settings = load_application_settings(application_settings_path())
-    apply_theme_palette(app, settings.theme)
+    apply_light_palette(app)
     window = ConnectorWindow(args.database, args.modified)
     window.show()
     return app.exec()

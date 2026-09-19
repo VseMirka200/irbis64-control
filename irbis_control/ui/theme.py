@@ -5,48 +5,14 @@ from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
 
-def apply_theme_palette(app: QApplication, theme: str) -> None:
-    if theme == "system":
-        app.setPalette(app.style().standardPalette())
-        return
-
+def apply_light_palette(app: QApplication) -> None:
+    """Apply the application's single supported light color scheme."""
     try:
-        app.styleHints().setColorScheme(
-            Qt.ColorScheme.Dark if theme == "dark" else Qt.ColorScheme.Light
-        )
+        app.styleHints().setColorScheme(Qt.ColorScheme.Light)
     except Exception:
         pass
 
     palette = QPalette()
-    if theme == "dark":
-        colors = {
-            QPalette.ColorRole.Window: "#20242a",
-            QPalette.ColorRole.WindowText: "#f1f3f5",
-            QPalette.ColorRole.Base: "#171a1f",
-            QPalette.ColorRole.AlternateBase: "#292e35",
-            QPalette.ColorRole.ToolTipBase: "#292e35",
-            QPalette.ColorRole.ToolTipText: "#f1f3f5",
-            QPalette.ColorRole.Text: "#f1f3f5",
-            QPalette.ColorRole.Button: "#2d333b",
-            QPalette.ColorRole.ButtonText: "#f1f3f5",
-            QPalette.ColorRole.BrightText: "#ffffff",
-            QPalette.ColorRole.Link: "#58a6ff",
-            QPalette.ColorRole.Highlight: "#1f6feb",
-            QPalette.ColorRole.HighlightedText: "#ffffff",
-            QPalette.ColorRole.PlaceholderText: "#9aa4af",
-            QPalette.ColorRole.Light: "#444c56",
-            QPalette.ColorRole.Midlight: "#373e47",
-            QPalette.ColorRole.Mid: "#768390",
-            QPalette.ColorRole.Dark: "#111418",
-            QPalette.ColorRole.Shadow: "#000000",
-        }
-        for role, color in colors.items():
-            palette.setColor(role, QColor(color))
-        for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
-            palette.setColor(QPalette.ColorGroup.Disabled, role, QColor("#768390"))
-        app.setPalette(palette)
-        return
-
     colors = {
         QPalette.ColorRole.Window: "#f5f5f5",
         QPalette.ColorRole.WindowText: "#111111",

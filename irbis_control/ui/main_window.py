@@ -67,10 +67,10 @@ from irbis_control.reporting.result_diff import (
 )
 from irbis_control.ui.locale import install_russian_ui
 from irbis_control.ui.storage_paths import application_settings_path
-from irbis_control.ui.theme import apply_theme_palette
+from irbis_control.ui.theme import apply_light_palette
 
 from PyQt6.QtCore import QObject, QRect, QSize, QStandardPaths, QThread, QTimer, Qt, QUrl, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette
+from PyQt6.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -88,6 +88,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -104,12 +105,6 @@ from PyQt6.QtWidgets import (
 
 APP_TITLE = "ИРБИС64 Контроль"
 APP_VERSION = __version__
-
-
-def apply_light_palette(app: QApplication) -> None:
-    """Backward-compatible helper retained for external integrations."""
-    apply_theme_palette(app, "light")
-
 
 def app_data_dir() -> Path:
     folder = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation))
@@ -1961,7 +1956,7 @@ class ApplicationSettingsDialog(QDialog):
         self.settings = settings
         self.setWindowTitle("Настройки приложения")
         self.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
-        self.resize(520, 330)
+        self.resize(520, 270)
         self.setMinimumWidth(460)
         if parent is not None:
             self.setStyleSheet(parent.styleSheet())
@@ -1969,20 +1964,6 @@ class ApplicationSettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
-
-        appearance_title = QLabel("Оформление")
-        appearance_title.setObjectName("cardTitle")
-        layout.addWidget(appearance_title)
-        theme_row = QHBoxLayout()
-        theme_row.addWidget(QLabel("Тема:"))
-        self.theme_combo = QComboBox()
-        self.theme_combo.addItem("Системная", "system")
-        self.theme_combo.addItem("Светлая", "light")
-        self.theme_combo.addItem("Тёмная", "dark")
-        index = self.theme_combo.findData(settings.theme)
-        self.theme_combo.setCurrentIndex(max(0, index))
-        theme_row.addWidget(self.theme_combo, 1)
-        layout.addLayout(theme_row)
 
         safety_title = QLabel("Безопасность базы")
         safety_title.setObjectName("cardTitle")
@@ -2034,7 +2015,6 @@ class ApplicationSettingsDialog(QDialog):
             if answer != QMessageBox.StandardButton.Yes:
                 return
         self.settings = ApplicationSettings(
-            theme=str(self.theme_combo.currentData()),
             create_database_backup=self.backup_check.isChecked(),
             check_updates_on_start=self.auto_updates_check.isChecked(),
         )
@@ -2201,11 +2181,33 @@ class MainWindow(QMainWindow):
             )
             return
         self.app_settings = dialog.settings
-        app = QApplication.instance()
-        if isinstance(app, QApplication):
-            apply_theme_palette(app, self.app_settings.theme)
-        self._apply_style()
         self._set_status("Настройки приложения сохранены", "idle")
+
+    def show_about_dialog(self) -> None:
+        releases_url = f"{GITHUB_REPOSITORY_URL}/releases/latest"
+        QMessageBox.about(
+            self,
+            f"О программе — {APP_TITLE}",
+            f"""
+            <h2>{APP_TITLE}</h2>
+            <p><b>Версия:</b> {APP_VERSION}</p>
+            <p>Программа для проверки и безопасного обновления библиотечных баз ИРБИС64.</p>
+            <p><b>Основные возможности:</b></p>
+            <ul>
+              <li>сверка записей по ISBN, названию и автору;</li>
+              <li>проверка по реестрам и установка меток;</li>
+              <li>работа напрямую с сервером ИРБИ64 или через TXT-копии;</li>
+              <li>Excel-отчёты, журнал операций и rollback-копии.</li>
+            </ul>
+            <p><b>Разработчик:</b> VseMirka200</p>
+            <p><b>Технологии:</b> Python, PyQt6</p>
+            <p><b>Скачать программу и обновления:</b><br>
+            <a href="{releases_url}">GitHub Releases</a></p>
+            <p><b>Исходный код и описание:</b><br>
+            <a href="{GITHUB_REPOSITORY_URL}">{GITHUB_REPOSITORY_URL}</a></p>
+            <p>Встроенная проверка обновлений использует официальные релизы этого репозитория.</p>
+            """,
+        )
 
     def open_database_connector(self) -> None:
         """Запускает отдельную утилиту прямого подключения к хранилищу/ИРБИС."""
@@ -2564,6 +2566,7 @@ class MainWindow(QMainWindow):
         except Exception:
             self.irbis_port_spin.setValue(6666)
         self.irbis_login_edit.setText(str(config.get("login", "")))
+        self.irbis_password_edit.setText(str(config.get("password", "")))
         saved_database = str(config.get("database", "IBIS")).strip()
         self._populate_irbis_databases([], saved_database)
         self.irbis_query_edit.setText(str(config.get("query", "I=$")))
@@ -2590,6 +2593,7 @@ class MainWindow(QMainWindow):
             "host": self.irbis_host_edit.text().strip(),
             "port": self.irbis_port_spin.value(),
             "login": self.irbis_login_edit.text().strip(),
+            "password": self.irbis_password_edit.text(),
             "database": self._current_irbis_database(),
             "query": self.irbis_query_edit.text().strip(),
             "read_workers": self.irbis_read_workers_spin.value(),
@@ -3208,9 +3212,15 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_comparison)
         self.header_actions.addWidget(self.start_button)
 
-        self.marker_settings_button = QPushButton("Настройки")
+        self.marker_settings_button = QPushButton("Настройки и справка")
         self.marker_settings_button.setObjectName("headerButton")
-        self.marker_settings_button.clicked.connect(self.open_application_settings)
+        self.main_menu = QMenu(self.marker_settings_button)
+        self.settings_action = self.main_menu.addAction("Настройки")
+        self.settings_action.triggered.connect(self.open_application_settings)
+        self.main_menu.addSeparator()
+        self.about_action = self.main_menu.addAction("О программе")
+        self.about_action.triggered.connect(self.show_about_dialog)
+        self.marker_settings_button.setMenu(self.main_menu)
         self.header_actions.addWidget(self.marker_settings_button)
 
         self.useful_links_button = QPushButton("Полезные ссылки")
@@ -3225,7 +3235,7 @@ class MainWindow(QMainWindow):
 
         self.header_layout.addLayout(self.header_actions)
         self.root_layout.addWidget(self.header_card)
-        self.header_card.show()
+        self.header_card.hide()
 
         self.workflow_tabs = CompactTabWidget()
         self.workflow_tabs.setObjectName("workflowTabs")
@@ -3236,6 +3246,11 @@ class MainWindow(QMainWindow):
         self.workflow_tabs.tabBar().setMovable(False)
         self.workflow_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideRight)
         self.workflow_tabs.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        # Keep settings and help in one compact drop-down beside the tabs.
+        self.workflow_tabs.setCornerWidget(
+            self.marker_settings_button,
+            Qt.Corner.TopRightCorner,
+        )
         self.root_layout.addWidget(self.workflow_tabs, 1)
 
         # ------------------------- Вкладка 1: ИРБИС -------------------------
@@ -3984,8 +3999,13 @@ class MainWindow(QMainWindow):
 
         self.start_button.setText("Запуск" if short_start else "Запустить проверку")
         self.start_button.setMinimumWidth(0)
+        self.marker_settings_button.setText("Настройки и справка")
+        self.marker_settings_button.setToolTip(
+            "Открыть настройки или сведения о программе"
+        )
+        self.marker_settings_button.setMinimumWidth(0)
+        self.marker_settings_button.setMaximumWidth(16777215)
         header_buttons = (
-            (self.marker_settings_button, "Настройки"),
             (self.useful_links_button, "Полезные ссылки"),
             (self.update_button, "Проверить обновление"),
         )
@@ -4200,34 +4220,7 @@ class MainWindow(QMainWindow):
                 border: none;
             }
             """
-        palette = QApplication.palette()
-        window_color = palette.color(QPalette.ColorRole.Window).name()
-        base_color = palette.color(QPalette.ColorRole.Base).name()
-        alternate_color = palette.color(QPalette.ColorRole.AlternateBase).name()
-        text_color = palette.color(QPalette.ColorRole.WindowText).name()
-        muted_color = palette.color(QPalette.ColorRole.PlaceholderText).name()
-        border_color = palette.color(QPalette.ColorRole.Mid).name()
-        accent_color = palette.color(QPalette.ColorRole.Highlight).name()
-        theme_override = f"""
-            QMainWindow, QDialog, QWidget#centralPage, QWidget#tabPage {{
-                background: {window_color}; color: {text_color};
-            }}
-            QScrollArea#mainScroll {{ border: none; background: {window_color}; }}
-            QFrame#sectionCard, QFrame#actionCard, QFrame#dangerCard {{
-                border-color: {border_color}; background: {base_color};
-            }}
-            QLabel, QLabel#mainTitle, QLabel#sourceStatusTitle, QLabel#fieldLabel {{
-                color: {text_color};
-            }}
-            QLabel#tabIntro, QLabel#cardDescription, QLabel#statusLabel {{
-                color: {muted_color};
-            }}
-            QLabel#cardTitle {{ color: {accent_color}; }}
-            QTabWidget#workflowTabs QTabBar::tab:hover:!selected {{
-                background: {alternate_color};
-            }}
-        """
-        self.setStyleSheet(base_style + theme_override)
+        self.setStyleSheet(base_style)
 
     def _set_irbis_status(self, text: str, state: str = "success") -> None:
         self.irbis_status.setText(text)
@@ -5143,8 +5136,7 @@ def main() -> int:
     install_russian_ui(app)
     app.setApplicationName(APP_TITLE)
     app.setApplicationVersion(APP_VERSION)
-    startup_settings = load_application_settings(application_settings_path())
-    apply_theme_palette(app, startup_settings.theme)
+    apply_light_palette(app)
     app.setWindowIcon(QIcon(resource_path("assets", "irbis64_control.ico")))
     window = MainWindow()
     window.show()
