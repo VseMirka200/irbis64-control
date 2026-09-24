@@ -1,0 +1,528 @@
+from __future__ import annotations
+
+import random
+import re
+import socket
+import time
+from collections.abc import Callable, Iterable
+from contextlib import suppress
+
+from irbis_control.infrastructure.irbis_models import IrbisError, IrbisField, IrbisRecord
+
+RECORD_SEPARATOR = "\x1f\x1e"
+ALL_RECORD_FORMAT = "!&uf('+0')"
+ProgressCallback = Callable[[int, str], None]
+
+
+def parse_all_format_record(payload: str, fallback_mfn: int = 0) -> IrbisRecord:
+    """Разбирает представление ИРБИС ``&uf('+0')``, полученное поиском с форматированием.
+
+    Сервер упаковывает запись в строки протокола, разделённые управляющими символами.
+    Такое же логическое представление использует команда C, но здесь оно приходит
+    в одной строке результата поиска (``MFN#<форматированная запись>``).
+    """
+    if payload is None:
+        raise IrbisError("Пустое представление записи ИРБИС.")
+
+    normalized = str(payload).replace("\x1f\x1e", "\n")
+    normalized = normalized.replace("\x1f", "\n").replace("\x1e", "\n")
+    parts = [part.strip("\r") for part in normalized.split("\n") if part.strip("\r") != ""]
+
+    # &uf('+0') может добавить служебный фрагмент перед самой записью протокола.
+    start = -1
+    for index, part in enumerate(parts):
+        if re.match(r"^\d+#-?\d+$", part.strip()):
+            start = index
+            break
+    if start < 0:
+        raise IrbisError(f"Не удалось разобрать запись ИРБИС MFN {fallback_mfn or '?'}.")
+
+    lines = [part.strip() if i < 2 else part for i, part in enumerate(parts[start:])]
+    first = lines[0].split("#", 1)
+    second = lines[1].split("#", 1) if len(lines) > 1 else ["0", "0"]
+    try:
+        mfn = int(first[0])
+    except (TypeError, ValueError):
+        mfn = int(fallback_mfn or 0)
+    try:
+        status = int(first[1]) if len(first) > 1 else 0
+    except ValueError:
+        status = 0
+    try:
+        version = int(second[1]) if len(second) > 1 else 0
+    except ValueError:
+        version = 0
+
+    fields: list[IrbisField] = []
+    for line in lines[2:]:
+        if not line or "#" not in line:
+            continue
+        tag_text, value = line.split("#", 1)
+        try:
+            fields.append(IrbisField(int(tag_text), value))
+        except ValueError:
+            continue
+    return IrbisRecord(mfn or int(fallback_mfn or 0), status, version, fields)
+
+
+class IrbisClient:
+    """Небольшой TCP-клиент ИРБИС64 для команд, нужных приложению.
+
+    Структура пакета соответствует открытым примерам TCP-клиентов ИРБИС64:
+    A/B отвечают за регистрацию, K — за поиск с форматированием,
+    C — за чтение записи, D — за обновление.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: int = 6666,
+        login: str = "",
+        password: str = "",
+        arm: str = "C",
+        timeout: float = 20.0,
+        connection_attempts: int = 3,
+        retry_delay: float = 0.5,
+    ) -> None:
+        self.host = host.strip() or "127.0.0.1"
+        self.port = int(port)
+        self.login = login
+        self.password = password
+        self.arm = arm or "C"
+        self.timeout = timeout
+        self.connection_attempts = max(1, int(connection_attempts))
+        self.retry_delay = max(0.0, float(retry_delay))
+        self.process_id = random.randint(10_000_000, 99_999_999)
+        self.command_number = 1
+        self.registered = False
+
+    def clone(self) -> IrbisClient:
+        """Создаёт независимый логический клиент ИРБИС для параллельного чтения."""
+        return IrbisClient(
+            self.host,
+            self.port,
+            self.login,
+            self.password,
+            self.arm,
+            self.timeout,
+            self.connection_attempts,
+            self.retry_delay,
+        )
+
+    def _packet(self, command: str, extra: Iterable[str], *, auth: bool = False) -> bytes:
+        header = [
+            command,
+            self.arm,
+            command,
+            str(self.process_id),
+            str(self.command_number),
+            self.password if auth else "",
+            self.login if auth else "",
+            "",
+            "",
+            "",
+        ]
+        body = "\n".join([*header, *[str(item) for item in extra]])
+        encoded = body.encode("utf-8")
+        return str(len(encoded)).encode("ascii") + b"\n" + encoded
+
+    def _send(self, packet: bytes) -> bytes:
+        try:
+            with socket.create_connection((self.host, self.port), timeout=self.timeout) as sock:
+                sock.settimeout(self.timeout)
+                sock.sendall(packet)
+                chunks: list[bytes] = []
+                while True:
+                    try:
+                        block = sock.recv(65536)
+                    except TimeoutError:
+                        break
+                    if not block:
+                        break
+                    chunks.append(block)
+        except OSError as exc:
+            raise IrbisError(f"Не удалось подключиться к {self.host}:{self.port}: {exc}") from exc
+        finally:
+            self.command_number += 1
+        data = b"".join(chunks)
+        if not data:
+            raise IrbisError("Сервер ИРБИС не вернул ответ.")
+        return data
+
+    @staticmethod
+    def _decode(data: bytes, *, registration: bool = False) -> list[str]:
+        encodings = ("cp1251", "utf-8") if registration else ("utf-8", "cp1251")
+        for encoding in encodings:
+            try:
+                return data.decode(encoding).split("\r\n")
+            except UnicodeDecodeError:
+                continue
+        return data.decode("utf-8", errors="replace").split("\r\n")
+
+    @staticmethod
+    def _status(lines: list[str]) -> int:
+        if len(lines) <= 10:
+            raise IrbisError("Некорректный ответ сервера ИРБИС.")
+        try:
+            return int(lines[10].strip())
+        except ValueError as exc:
+            raise IrbisError(f"Некорректный код ответа ИРБИС: {lines[10]!r}") from exc
+
+    def _register_once(self) -> None:
+        packet = self._packet("A", [self.login, self.password])
+        lines = self._decode(self._send(packet), registration=True)
+        status = self._status(lines)
+        if status != 0:
+            raise IrbisError(f"ИРБИС отклонил вход. Код: {status}")
+        self.registered = True
+
+    def register(self) -> None:
+        last_error: IrbisError | None = None
+        for attempt in range(1, self.connection_attempts + 1):
+            try:
+                self._register_once()
+                return
+            except IrbisError as exc:
+                last_error = exc
+                # Неверные учётные данные не являются временным сетевым сбоем.
+                if "отклонил вход" in str(exc).casefold():
+                    raise
+                if attempt < self.connection_attempts and self.retry_delay:
+                    time.sleep(self.retry_delay * attempt)
+        if last_error is not None:
+            raise IrbisError(
+                f"Не удалось подключиться к ИРБИС после {self.connection_attempts} попыток: {last_error}"
+            ) from last_error
+
+    def unregister(self) -> None:
+        if not self.registered:
+            return
+        try:
+            lines = self._decode(self._send(self._packet("B", [self.login])))
+            self._status(lines)
+        finally:
+            self.registered = False
+
+    def __enter__(self) -> IrbisClient:
+        self.register()
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        # Ошибка завершения сеанса не должна скрывать исходное исключение.
+        with suppress(Exception):
+            self.unregister()
+
+    @staticmethod
+    def _payload_text(data: bytes, *, ansi: bool = False) -> str:
+        """Возвращает полезную часть ответа ИРБИС после служебного заголовка из 10 строк."""
+        encodings = ("cp1251", "utf-8") if ansi else ("utf-8", "cp1251")
+        text = ""
+        for encoding in encodings:
+            try:
+                text = data.decode(encoding)
+                break
+            except UnicodeDecodeError:
+                continue
+        if not text:
+            text = data.decode("cp1251" if ansi else "utf-8", errors="replace")
+        # В ответах ИРБИС 10 строк служебного заголовка разделены CRLF.
+        # Ограничиваем число разбиений, чтобы сохранить структуру строк текстового файла.
+        parts = text.split("\r\n", 10)
+        return parts[10] if len(parts) > 10 else ""
+
+    def read_text_file(self, specification: str) -> str:
+        """Читает текстовый ресурс с сервера ИРБИС командой L."""
+        if not specification.strip():
+            return ""
+        payload = self._payload_text(self._send(self._packet("L", [specification.strip()])), ansi=True)
+        return payload.replace("\x1f\x1e", "\r\n").replace("\x1f", "\r\n")
+
+    def list_files(self, specification: str) -> list[str]:
+        """Возвращает файлы сервера по файловой спецификации ИРБИС командой !."""
+        if not specification.strip():
+            return []
+        payload = self._payload_text(self._send(self._packet("!", [specification.strip()])), ansi=True)
+        payload = payload.replace("\x1f\x1e", "\r\n").replace("\x1f", "\r\n")
+        result: list[str] = []
+        for line in payload.replace("\x00", "").splitlines():
+            value = line.strip()
+            if value and value not in result:
+                result.append(value)
+        return result
+
+    @staticmethod
+    def _parse_database_menu(text: str) -> list[dict[str, str]]:
+        """Разбирает DBNAM2.MNU в список баз для АРМ «Каталогизатор»."""
+        normalized = text.replace("\x1f\x1e", "\n").replace("\x1f", "\n")
+        lines = [line.strip() for line in normalized.replace("\r", "").split("\n") if line.strip()]
+        result: list[dict[str, str]] = []
+        seen: set[str] = set()
+        index = 0
+        while index < len(lines):
+            raw_name = lines[index]
+            description = lines[index + 1] if index + 1 < len(lines) else ""
+            index += 2
+            # Начальный '-' в DBNAM2.MNU означает, что база недоступна для ввода
+            # данных в АРМ «Каталогизатор», поэтому не показываем её в списке
+            # баз, доступных для записи.
+            if raw_name.startswith("-"):
+                continue
+            name = raw_name.strip().upper()
+            if not name or name.startswith("*") or name in seen:
+                continue
+            seen.add(name)
+            result.append({"name": name, "description": description})
+        return result
+
+    def list_databases(self) -> list[dict[str, str]]:
+        """Возвращает готовый для отображения список баз АРМ «Каталогизатор».
+
+        Основной источник — DATAI/DBNAM2.MNU. Если это меню недоступно,
+        используются существующие дескрипторы *.PAR из серверной папки
+        с описаниями баз данных.
+        """
+        try:
+            menu = self.read_text_file("1..DBNAM2.MNU")
+            databases = self._parse_database_menu(menu)
+            if databases:
+                return databases
+        except IrbisError:
+            # На старых серверах меню может быть недоступно: ниже есть запасной
+            # поиск баз по PAR-файлам.
+            pass
+
+        names: list[str] = []
+        try:
+            files = self.list_files("1..*.PAR")
+        except IrbisError:
+            files = []
+        for item in files:
+            filename = item.replace("/", "\\").rsplit("\\", 1)[-1]
+            if not filename.lower().endswith(".par"):
+                continue
+            name = filename[:-4].strip().upper()
+            if name and name not in names:
+                names.append(name)
+        return [{"name": name, "description": ""} for name in sorted(names)]
+
+    def search(
+        self, database: str, expression: str, number: int, first: int, format_pft: str = "@brief"
+    ) -> tuple[int, list[int]]:
+        packet = self._packet(
+            "K",
+            [database, expression, str(number), str(first), format_pft, "", "", ""],
+        )
+        lines = self._decode(self._send(packet))
+        status = self._status(lines)
+        if status != 0:
+            raise IrbisError(f"Ошибка поиска ИРБИС. Код: {status}")
+        if len(lines) < 12:
+            return 0, []
+        try:
+            total = int(lines[11].strip() or "0")
+        except ValueError:
+            total = 0
+        mfns: list[int] = []
+        for line in lines[12:]:
+            if not line or "#" not in line:
+                continue
+            prefix = line.split("#", 1)[0].strip()
+            try:
+                mfns.append(int(prefix))
+            except ValueError:
+                continue
+        return total, mfns
+
+    def search_all_mfns(
+        self,
+        database: str,
+        expression: str,
+        *,
+        page_size: int = 500,
+        progress_cb: ProgressCallback | None = None,
+    ) -> list[int]:
+        first = 1
+        all_mfns: list[int] = []
+        total = None
+        while total is None or len(all_mfns) < total:
+            current_total, page = self.search(database, expression, page_size, first, "@brief")
+            if total is None:
+                total = current_total
+            if not page:
+                break
+            all_mfns.extend(page)
+            first += len(page)
+            if progress_cb and total:
+                progress_cb(min(20, int(len(all_mfns) / total * 20)), f"Найдено MFN: {len(all_mfns):,} из {total:,}")
+            if len(page) < page_size:
+                break
+        return list(dict.fromkeys(all_mfns))
+
+    def search_read_page(
+        self,
+        database: str,
+        expression: str,
+        *,
+        number: int = 500,
+        first: int = 1,
+    ) -> tuple[int, list[IrbisRecord]]:
+        """Ищет и получает полные записи за один запрос к серверу.
+
+        Команда K форматирует каждую найденную запись. ``&uf('+0')`` запрашивает
+        у ИРБИС полное представление протокола, поэтому отдельный запрос командой C
+        для каждого MFN и локальный снимок TXT не нужны.
+        """
+        number = max(1, min(int(number or 500), 2000))
+        packet = self._packet(
+            "K",
+            [database, expression, str(number), str(max(1, int(first))), ALL_RECORD_FORMAT, "", "", ""],
+        )
+        lines = self._decode(self._send(packet))
+        status = self._status(lines)
+        if status != 0:
+            raise IrbisError(f"Ошибка пакетного чтения ИРБИС. Код: {status}")
+        if len(lines) < 12:
+            return 0, []
+        try:
+            total = int(lines[11].strip() or "0")
+        except ValueError:
+            total = 0
+
+        records: list[IrbisRecord] = []
+        for line in lines[12:]:
+            if not line or "#" not in line:
+                continue
+            mfn_text, payload = line.split("#", 1)
+            try:
+                mfn = int(mfn_text.strip())
+            except ValueError:
+                continue
+            try:
+                records.append(parse_all_format_record(payload, mfn))
+            except IrbisError:
+                # Не создаём запись из неполных данных: вызывающий код должен увидеть
+                # ошибку страницы, потому что запись по неверному MFN опаснее остановки.
+                raise
+        return total, records
+
+    def search_read_all(
+        self,
+        database: str,
+        expression: str,
+        *,
+        page_size: int = 500,
+        progress_cb: ProgressCallback | None = None,
+        cancel_cb: Callable[[], bool] | None = None,
+    ) -> list[IrbisRecord]:
+        """Читает результат поиска большими форматированными страницами без копии TXT."""
+        first = 1
+        total: int | None = None
+        records: list[IrbisRecord] = []
+        while total is None or len(records) < total:
+            if cancel_cb and cancel_cb():
+                raise IrbisError("Операция отменена пользователем.")
+            current_total, page = self.search_read_page(database, expression, number=page_size, first=first)
+            if total is None:
+                total = current_total
+                if total <= 0:
+                    return []
+            if not page:
+                break
+            records.extend(page)
+            first += len(page)
+            if progress_cb:
+                progress_cb(
+                    min(48, 5 + int(len(records) / max(total, 1) * 43)),
+                    f"Пакетное чтение ИРБИС: {len(records):,} из {total:,}",
+                )
+            if len(page) < max(1, int(page_size)):
+                break
+        return records
+
+    def tune_read_page_size(
+        self,
+        database: str,
+        expression: str,
+        *,
+        candidates: Iterable[int] = (100, 500, 1000, 1500, 2000),
+        progress_cb: ProgressCallback | None = None,
+    ) -> tuple[int, int]:
+        """Возвращает наибольший размер страницы, который успешно обрабатывает сервер.
+
+        Проверка только читает данные. Команда D ИРБИС записывает ровно одну запись,
+        поэтому скорость записи нельзя проверять изменением рабочей записи.
+        """
+        safe_size = 0
+        total = 0
+        normalized = sorted({max(1, min(int(value), 2000)) for value in candidates})
+        for index, size in enumerate(normalized, start=1):
+            if progress_cb:
+                progress_cb(
+                    55 + int(index / max(len(normalized), 1) * 40),
+                    f"Проверка пакета чтения: {size} записей…",
+                )
+            try:
+                current_total, page = self.search_read_page(database, expression or "I=$", number=size, first=1)
+            except IrbisError:
+                if safe_size == 0:
+                    raise
+                break
+            total = current_total
+            expected = min(size, current_total)
+            if current_total > 0 and len(page) < expected:
+                break
+            safe_size = size
+        if safe_size == 0:
+            raise IrbisError("Сервер не вернул полный тестовый пакет чтения.")
+        return safe_size, total
+
+    def read_record(self, database: str, mfn: int, *, lock: int = 0) -> IrbisRecord:
+        lines = self._decode(self._send(self._packet("C", [database, str(mfn), str(lock)])))
+        status = self._status(lines)
+        if status != 0:
+            raise IrbisError(f"Не удалось прочитать MFN {mfn}. Код: {status}")
+        if len(lines) < 13:
+            raise IrbisError(f"Сервер вернул неполную запись MFN {mfn}.")
+        mfn_part = lines[11].split("#", 1)
+        ver_part = lines[12].split("#", 1)
+        try:
+            real_mfn = int(mfn_part[0])
+        except ValueError:
+            real_mfn = int(mfn)
+        try:
+            record_status = int(mfn_part[1]) if len(mfn_part) > 1 else 0
+        except ValueError:
+            record_status = 0
+        try:
+            version = int(ver_part[1]) if len(ver_part) > 1 else 0
+        except ValueError:
+            version = 0
+        fields: list[IrbisField] = []
+        for line in lines[13:]:
+            if not line or "#" not in line:
+                continue
+            tag_text, value = line.split("#", 1)
+            try:
+                fields.append(IrbisField(int(tag_text), value))
+            except ValueError:
+                continue
+        return IrbisRecord(real_mfn, record_status, version, fields)
+
+    def write_record(self, database: str, record: IrbisRecord, *, lock: int = 0, actualize: int = 1) -> int:
+        record_text = f"{record.mfn}#{record.status}{RECORD_SEPARATOR}0#{record.version}"
+        for record_field in record.fields:
+            record_text += f"{RECORD_SEPARATOR}{record_field.tag}#{record_field.value}"
+        record_text += RECORD_SEPARATOR
+        lines = self._decode(
+            self._send(
+                self._packet(
+                    "D",
+                    [database, str(lock), str(actualize), record_text],
+                    auth=True,
+                )
+            )
+        )
+        status = self._status(lines)
+        if status <= 0:
+            raise IrbisError(f"Не удалось сохранить MFN {record.mfn}. Код: {status}")
+        return status

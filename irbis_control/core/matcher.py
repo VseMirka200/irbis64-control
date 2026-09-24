@@ -1,0 +1,1216 @@
+from __future__ import annotations
+
+import re
+import unicodedata
+from collections import defaultdict
+from collections.abc import Callable, Iterable
+from itertools import combinations
+from pathlib import Path
+from typing import Any
+
+from irbis_control.core.models import (
+    ComparisonOptions,
+    ComparisonSummary,
+    DatabaseRecord,
+    ExcelEntry,
+    ForeignAgentEntry,
+    MarkerApplicationStats,  # noqa: F401 - публичный импорт
+    MatchResult,
+)
+from irbis_control.core.review_groups import count_review_record_groups
+from irbis_control.core.text import safe_text as safe_text
+from irbis_control.infrastructure.atomic_io import atomic_write_via_path  # noqa: F401 - используется модулем экспорта
+from irbis_control.infrastructure.excel_io import load_workbook_quiet as _load_workbook_quiet
+
+ProgressCallback = Callable[[int, str], None]
+CancelCallback = Callable[[], bool]
+
+
+HEADER_SYNONYMS = {
+    "publisher": {
+        "издательство",
+        "издатель",
+        "изд-во",
+        "изд во",
+        "наименование издательства",
+        "publisher",
+        "publishing house",
+    },
+    "year": {"год", "год издания", "год выпуска", "год публикации", "year", "publication year"},
+    "author": {
+        "автор",
+        "авторы",
+        "фио автора",
+        "author",
+        "authors",
+    },
+    "title": {
+        "заглавие",
+        "название",
+        "наименование",
+        "название книги",
+        "title",
+        "book title",
+    },
+    "isbn": {
+        "isbn",
+        "isbn 10",
+        "isbn 13",
+        "исбн",
+        "международный стандартный номер книги",
+    },
+    "registration_number": {
+        "рег №",
+        "рег номер",
+        "регистрационный номер",
+        "регистрационный №",
+        "инв №",
+        "инвентарный номер",
+        "номер",
+        "рег. №",
+    },
+}
+
+
+FOREIGN_AGENT_HEADER_SYNONYMS = {
+    "registry_number": {"№ п/п", "номер", "номер п/п", "№ в реестре"},
+    "name": {
+        "полное наименование прежнее наименование в случае его изменения фио псевдоним при наличии прежние фио в случае их изменения",
+        "полное наименование фио псевдоним",
+        "полное наименование фио",
+        "наименование фио",
+        # Книжная выгрузка РГБ по иностранным агентам использует краткий
+        # заголовок «Автор», а не заголовок общего реестра Минюста.
+        "автор",
+    },
+    "participants": {"полное наименование или фио участников", "участники"},
+    "agent_type": {"тип иностранного агента", "тип иноагента"},
+    "inclusion_date": {
+        "дата принятия минюстом россии решения о включении в реестр",
+        "дата включения в реестр",
+    },
+    "exclusion_date": {
+        "дата принятия минюстом россии решения об исключении из реестра при наличии",
+        "дата исключения из реестра",
+    },
+    # Поля книжной выгрузки РГБ «Список изданий, выпущенных иностранными
+    # агентами». Они нужны для поиска именно книги, а не только имени агента.
+    "title": HEADER_SYNONYMS["title"],
+    "isbn": HEADER_SYNONYMS["isbn"],
+    "role": {"роль относительно произведения", "роль"},
+    "publication": {"выходные данные", "выходные сведения"},
+}
+
+SOURCE_SUBSTANCES = "Вещества"
+MATCH_FIELDS = {
+    "isbn": "ISBN",
+    "title": "Название",
+    "author": "автор",
+    "publisher": "издательство",
+    "year": "год",
+}
+EXTRA_MATCH_RULES = {
+    "_".join(fields): (" + ".join(MATCH_FIELDS[key] for key in fields), fields)
+    for size in range(2, len(MATCH_FIELDS) + 1)
+    for fields in combinations(MATCH_FIELDS, size)
+    if {"isbn", "title", "author"}.intersection(fields) and fields != ("title", "author")
+}
+MATCH_RULE_LABELS = {
+    "use_isbn_matching": "ISBN",
+    "use_title_fallback": "Название + автор",
+    **{key: label for key, (label, _fields) in EXTRA_MATCH_RULES.items()},
+}
+
+
+def match_rule_needs_review(fields: tuple[str, ...]) -> bool:
+    return not (
+        "isbn" in fields or "title" in fields and ("author" in fields or {"publisher", "year"}.issubset(fields))
+    )
+
+
+def parse_match_rule(value: str) -> str:
+    """Разбирает сочетание полей, не выполняя полученную строку как код."""
+    parts = re.split(r"[+,]", unicodedata.normalize("NFKC", value).strip())
+    if not value.strip() or any(not part.strip() for part in parts):
+        raise ValueError("Введите поля через +, например: Название + издательство + год.")
+    fields: set[str] = set()
+    for part in parts:
+        normalized = normalize_header(part)
+        key = next(
+            (key for key in MATCH_FIELDS if normalized in {normalize_header(alias) for alias in HEADER_SYNONYMS[key]}),
+            None,
+        )
+        if key is None:
+            raise ValueError(f"Неизвестное поле «{part.strip()}». Доступны: ISBN, название, автор, издательство, год.")
+        if key in fields:
+            raise ValueError(f"Поле «{MATCH_FIELDS[key]}» указано дважды.")
+        fields.add(key)
+    if fields == {"isbn"}:
+        return "use_isbn_matching"
+    if fields == {"title", "author"}:
+        return "use_title_fallback"
+    key = "_".join(field for field in MATCH_FIELDS if field in fields)
+    if key not in EXTRA_MATCH_RULES:
+        raise ValueError(
+            "Выберите ISBN либо название или автора с другим полем. Одного автора, года или издательства недостаточно."
+        )
+    return key
+
+
+SOURCE_FOREIGN_AGENTS = "Иностранные агенты"
+DEFAULT_SUBSTANCE_MARKER = "^AIII"
+DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE = "^AI^@{name}"
+DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE = "^AO^@{name}"
+DEFAULT_AGE_MARKER = "^Z18+"
+DEFAULT_SUBSTANCE_MARKER_FIELD = 333
+DEFAULT_FOREIGN_AGENT_MARKER_FIELD = 333
+DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD = 333
+DEFAULT_AGE_MARKER_FIELD = 900
+
+_BIBLIOGRAPHIC_TITLE_SEGMENT_RE = re.compile(
+    r"^(?:\[?\s*)?(?:"
+    r"роман(?:ы)?|повест(?:ь|и)|рассказ(?:ы)?|сборник|издание|учебник|"
+    r"учебное\s+пособие|пособие|текст|перевод(?:\s+с\s+\w+)?|"
+    r"книга|кн\.?|том|т\.?|часть|ч\.?)\b",
+    flags=re.IGNORECASE,
+)
+
+_FOREIGN_ORGANIZATION_HINT_RE = re.compile(
+    r"\b(?:ооо|ао|пао|нко|ано|общество|организация|фонд|ассоциация|союз|движение|"
+    r"проект|издание|газета|журнал|редакция|компания|агентство|центр|институт|"
+    r"телеканал|радио|издательский\s+дом|автономная\s+некоммерческая)\b",
+    flags=re.IGNORECASE,
+)
+
+
+class ComparisonCancelled(RuntimeError):
+    """Операция сравнения отменена пользователем."""
+
+
+def _cancelled(cancel_cb: CancelCallback | None) -> None:
+    if cancel_cb and cancel_cb():
+        raise ComparisonCancelled("Операция отменена пользователем")
+
+
+def normalize_header(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", safe_text(value)).lower().replace("ё", "е")
+    text = re.sub(r"[\s._-]+", " ", text)
+    text = re.sub(r"[^0-9a-zа-я №]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+ISBN_PLACEHOLDERS = {"", "0", "-", "—", "–", "нет", "нет isbn", "без isbn", "б/н", "бн", "n/a", "na"}
+ISBN_PATTERN = re.compile(
+    r"(?<![0-9X])(?:97[89](?:[\s\-\u2010-\u2015]?[0-9]){10}|(?:[0-9](?:[\s\-\u2010-\u2015]?[0-9]){8}[\s\-\u2010-\u2015]?[0-9X]))(?![0-9X])",
+    re.IGNORECASE,
+)
+
+
+def _isbn_checksum_valid(code: str) -> bool:
+    if len(code) == 13 and code.isdigit():
+        return sum((1 if index % 2 == 0 else 3) * int(char) for index, char in enumerate(code)) % 10 == 0
+    if len(code) == 10 and code[:9].isdigit() and (code[9].isdigit() or code[9] == "X"):
+        total = sum((10 - index) * int(char) for index, char in enumerate(code[:9]))
+        total += 10 if code[9] == "X" else int(code[9])
+        return total % 11 == 0
+    return False
+
+
+def extract_isbns(value: Any) -> list[str]:
+    """Возвращает все корректные ISBN-10/ISBN-13 из одной ячейки."""
+    text = unicodedata.normalize("NFKC", safe_text(value)).upper().replace("Х", "X").strip()
+    if text.lower() in ISBN_PLACEHOLDERS:
+        return []
+
+    found: list[str] = []
+    for match in ISBN_PATTERN.finditer(text):
+        code = re.sub(r"[^0-9X]", "", match.group(0).upper())
+        if _isbn_checksum_valid(code) and code not in found:
+            found.append(code)
+
+    # На случай ячейки, содержащей только ISBN с необычной пунктуацией.
+    if not found:
+        compact = re.sub(r"[^0-9X]", "", text)
+        if _isbn_checksum_valid(compact):
+            found.append(compact)
+    return found
+
+
+def isbn_match_keys(value: Any) -> set[str]:
+    """Возвращает ISBN и эквивалентный ISBN-13 для сопоставления изданий."""
+    keys: set[str] = set()
+    for code in extract_isbns(value):
+        keys.add(code)
+        if len(code) == 10:
+            body = "978" + code[:9]
+            weighted_sum = sum((1 if index % 2 == 0 else 3) * int(char) for index, char in enumerate(body))
+            checksum = (10 - weighted_sum % 10) % 10
+            keys.add(body + str(checksum))
+    return keys
+
+
+def normalize_title(value: Any) -> str:
+    """Нормализует заглавие, сохраняя слова, которые могут быть частью названия.
+
+    Старый вариант удалял ``роман``, ``рассказы``, ``книга`` и похожие слова
+    повсюду. Из-за этого разные книги вроде «Избранные рассказы» и
+    «Избранные романы» превращались в один ключ ``избранные``. Теперь
+    библиографические пометы отсекаются только как отдельные хвостовые
+    сегменты после двоеточия/косой черты, а внутри самого названия остаются.
+    """
+    raw = unicodedata.normalize("NFKC", safe_text(value)).strip().replace("ё", "е").replace("Ё", "Е")
+    if not raw:
+        return ""
+
+    # Удаляем только явно служебные квадратные пометы. Произвольный текст в
+    # скобках сохраняем: «Я (не) робот» и «Я робот» должны различаться.
+    raw = re.sub(r"\[\s*(?:текст|электронный\s+ресурс|звукозапись)\s*\]", " ", raw, flags=re.IGNORECASE)
+    raw = re.sub(r"\[?\s*\d{1,2}\+\s*\]?", " ", raw)
+
+    # Ответственность после « / Автор ...» не является заглавием.
+    raw = re.split(r"\s+/\s+", raw, maxsplit=1)[0]
+
+    # Срезаем библиографический хвост только если он действительно начинается
+    # с обозначения вида/жанра. Само название «Роман с кокаином» не меняется.
+    segments = raw.split(":")
+    kept = [segments[0]]
+    for segment in segments[1:]:
+        candidate = re.sub(r"^[\s,;\[\]()]+", "", segment).strip()
+        if not candidate:
+            continue
+        if _BIBLIOGRAPHIC_TITLE_SEGMENT_RE.match(candidate):
+            break
+        kept.append(segment)
+    text = ":".join(kept)
+
+    # Хвост в квадратных скобках без двоеточия: «Название [роман]».
+    text = re.sub(
+        r"\s*\[\s*(?:роман|повесть|рассказы?|сборник|учебник|пособие|текст)\s*\]\s*$",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = text.lower()
+    # Убираем сами скобки, но не их содержимое.
+    text = re.sub(r"[\[\]()]", " ", text)
+    return re.sub(r"\s+", " ", re.sub(r"[^0-9a-zа-я]+", " ", text)).strip()
+
+
+def looks_like_foreign_organization(value: Any) -> bool:
+    """Отличает организацию/проект от ФИО в книжной выгрузке иноагентов."""
+    normalized = normalize_header(value)
+    return bool(_FOREIGN_ORGANIZATION_HINT_RE.search(normalized))
+
+
+def normalize_author(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", safe_text(value)).lower().replace("ё", "е")
+    token_parts = re.findall(r"([a-zа-я]+)(\.)?", text)
+    tokens = [token for token, _dot in token_parts]
+
+    # В ИРБИС полное имя иногда хранится вместе с собственным инициалом:
+    # «Фаулз Д. Джон», «Фаулз Дж. Джон», «Акунин Б. Борис». Такое сокращение
+    # не является вторым именем и не должно отличать запись от полного ФИО.
+    normalized_tokens = [
+        token
+        for index, (token, dot) in enumerate(token_parts)
+        if not (
+            index > 0
+            and (bool(dot) or len(token) == 1)
+            and len(token) <= 2
+            and index + 1 < len(tokens)
+            and len(tokens[index + 1]) > 1
+            and tokens[index + 1].startswith(token)
+        )
+    ]
+    return " ".join(normalized_tokens)
+
+
+_NEXT_CONTRIBUTOR_RE = re.compile(r"\s+(?=(?:[A-ZА-ЯЁ][0-9A-Za-zА-Яа-яЁё'’\-]*),\s)")
+
+
+def primary_author_contributor(value: Any) -> str:
+    """Отделяет первого автора от приписанных к нему переводчиков/редакторов.
+
+    В перечне изданий РГБ роли не разделены по столбцам: несколько лиц записаны
+    подряд как ``Фамилия, Имя Фамилия, Имя``. Первым идёт автор произведения.
+    """
+    raw = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", safe_text(value))).strip()
+    first_comma = raw.find(",")
+    if first_comma < 0:
+        return raw
+
+    next_contributor = _NEXT_CONTRIBUTOR_RE.search(raw, first_comma + 1)
+    if next_contributor is not None:
+        return raw[: next_contributor.start()].strip()
+
+    # Иногда имя первого автора дано без запятой: ``Мураками Харуки
+    # Чинарева, Юлия``. Последнее слово перед единственной запятой тогда уже
+    # является фамилией следующего участника.
+    prefix_tokens = raw[:first_comma].split()
+    if len(prefix_tokens) >= 3:
+        return " ".join(prefix_tokens[:-1]).strip()
+    return raw
+
+
+def _author_identity(value: Any) -> tuple[str, tuple[str, ...]] | None:
+    raw = unicodedata.normalize("NFKC", safe_text(value)).strip()
+    if not raw:
+        return None
+    # Редакторские пометы вроде «(гл. ред.)» не являются частью ФИО.
+    raw = re.sub(r"\([^)]*\)", " ", raw)
+    first_person = re.split(r"[;\n]", raw, maxsplit=1)[0].strip()
+    tokens = normalize_author(first_person).split()
+    if not tokens:
+        return None
+
+    leading_initials: list[str] = []
+    index = 0
+    while index < len(tokens) - 1 and len(tokens[index]) == 1:
+        leading_initials.append(tokens[index])
+        index += 1
+
+    if leading_initials and index < len(tokens):
+        # «Л. Н. Толстой» / «Р. Фасхутдинов».
+        return tokens[index], tuple(leading_initials[:2])
+
+    # «Толстой Л. Н.», «Толстой Лев Николаевич», «Ильина, В. В.».
+    surname = tokens[0]
+    initials = tuple(token[0] for token in tokens[1:3] if token)
+    return surname, initials
+
+
+def _author_order_variants(value: Any) -> set[str]:
+    """Нормализует полное ФИО в порядках «фамилия имя» и «имя фамилия»."""
+    normalized = normalize_author(value)
+    tokens = normalized.split()
+    variants = {normalized} if normalized else set()
+    if len(tokens) == 2 and all(len(token) > 1 for token in tokens):
+        variants.add(" ".join(reversed(tokens)))
+    elif len(tokens) == 3 and all(len(token) > 1 for token in tokens):
+        variants.add(" ".join((tokens[-1], tokens[0], tokens[1])))
+        variants.add(" ".join((tokens[1], tokens[2], tokens[0])))
+    return variants
+
+
+def author_surnames(value: Any) -> set[str]:
+    """Возвращает возможные фамилии, не переставляя сокращённые инициалы."""
+    surnames = {variant.split()[0] for variant in _author_order_variants(value) if variant}
+    identity = _author_identity(value)
+    if identity:
+        surnames.add(identity[0])
+    return surnames - {""}
+
+
+def normalize_publication_year(value: Any) -> str:
+    match = re.fullmatch(
+        r"(?:cop|сор|печ)\.?\s*\[?(\d{4})\]?|\[?(\d{4})\]?(?:\s*г(?:од)?\.?)?",
+        safe_text(value),
+        re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1) or match.group(2)
+
+
+def normalize_publisher(value: Any) -> str:
+    normalized = normalize_header(value)
+    if normalized in {
+        "нет",
+        "не указано",
+        "не указан",
+        "неизвестно",
+        "б и",
+        "без издательства",
+        "unknown",
+        "na",
+        "n a",
+    }:
+        return ""
+    return normalized
+
+
+def publisher_variants(value: Any) -> set[str]:
+    """Возвращает полное название издателя и отдельные элементы списка."""
+    raw = safe_text(value)
+    variants = {normalize_publisher(raw)}
+    variants.update(normalize_publisher(part) for part in re.split(r"[;,/|]+", raw))
+    expanded = set(variants)
+    removable_prefixes = (
+        "общество с ограниченной ответственностью ",
+        "издательский дом ",
+        "издательство ",
+        "ооо ",
+        "ао ",
+        "пао ",
+    )
+    for variant in variants:
+        shortened = variant
+        changed = True
+        while changed:
+            changed = False
+            for prefix in removable_prefixes:
+                if shortened.startswith(prefix):
+                    shortened = shortened[len(prefix) :].strip()
+                    changed = True
+        if shortened:
+            expanded.add(shortened)
+    return expanded - {""}
+
+
+def _extract_subfield(value: str, code: str) -> str:
+    match = re.search(rf"\^{re.escape(code)}([^\^]*)", value)
+    return match.group(1).strip() if match else ""
+
+
+def _extract_subfields(value: str, code: str) -> list[str]:
+    return [item.strip() for item in re.findall(rf"\^{re.escape(code)}([^\^]*)", value) if item.strip()]
+
+
+def _has_author_responsibility(value: str) -> bool:
+    """Не принимает редакторов, художников и другие роли 70X за авторов книги."""
+    roles = _extract_subfields(value, "4")
+    if not roles:
+        return True
+    for role in roles:
+        normalized = normalize_header(role)
+        codes = set(re.findall(r"(?<!\d)\d{3}(?!\d)", role))
+        words = set(normalized.split())
+        if "070" in codes or words & {"авт", "автор", "соавтор", "aut", "author"}:
+            return True
+    return False
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    cleaned = value.strip()
+    if cleaned and cleaned.casefold() not in {item.casefold() for item in values}:
+        values.append(cleaned)
+
+
+def _read_text_file_with_encoding(path: str | Path) -> tuple[str, str]:
+    """Читает файл без изменения исходных переносов строк и BOM."""
+    path = Path(path)
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        return raw.decode("utf-8-sig"), "utf-8-sig"
+
+    last_error: Exception | None = None
+    for encoding in ("utf-8", "cp1251"):
+        try:
+            return raw.decode(encoding), encoding
+        except UnicodeDecodeError as exc:
+            last_error = exc
+    raise ValueError(f"Не удалось определить кодировку файла {path.name}: {last_error}")
+
+
+def _read_text_file(path: str | Path) -> str:
+    text, _ = _read_text_file_with_encoding(path)
+    return text
+
+
+def database_record_from_tag_values(
+    record_number: int,
+    tag_values: Iterable[tuple[int | str, str]],
+    *,
+    source_file: str = "",
+    source_record_number: int | None = None,
+    raw_record: str = "",
+) -> DatabaseRecord:
+    """Создаёт DatabaseRecord из полей ИРБИС без промежуточного TXT-файла."""
+    fields: dict[str, list[str]] = defaultdict(list)
+    record_lines: list[str] = []
+    for tag, value in tag_values:
+        text_value = safe_text(value)
+        try:
+            key = str(int(tag))
+            display_tag = f"{int(tag):03d}"
+        except (TypeError, ValueError):
+            key = str(tag).strip().lstrip("0") or "0"
+            display_tag = str(tag).strip() or "0"
+        fields[key].append(text_value)
+        record_lines.append(f"#{display_tag}: {text_value}")
+
+    # При прямом чтении из ИРБИС промежуточной TXT-выгрузки нет. Сохраняем
+    # полное представление записи здесь, чтобы ручная проверка показывала те же
+    # поля, из которых были извлечены данные для сравнения.
+    if not raw_record:
+        raw_record = "\n".join(record_lines)
+
+    isbns = [value for value in (_extract_subfield(item, "A") for item in fields.get("10", [])) if value]
+    titles: list[str] = []
+    for item in fields.get("200", []):
+        for title in _extract_subfields(item, "A"):
+            _append_unique(titles, title)
+
+    authors: list[str] = []
+    primary_authors: list[str] = []
+    # 700/701 содержат авторов и соавторов. Поле 702 предназначено для лиц
+    # вторичной ответственности (переводчиков, редакторов и т. п.), поэтому
+    # оно не должно участвовать в авторском сопоставлении и мешать меткам.
+    for tag in ("700", "701"):
+        for item in fields.get(tag, []):
+            if not _has_author_responsibility(item):
+                continue
+            parts = [
+                _extract_subfield(item, "A"),
+                _extract_subfield(item, "B"),
+                _extract_subfield(item, "G"),
+            ]
+            author = " ".join(part for part in parts if part).strip()
+            if author:
+                _append_unique(authors, author)
+                _append_unique(primary_authors, author)
+
+    # Поле 922 описывает отдельные произведения внутри сборника или издания:
+    # ^C содержит название, ^G — полное имя автора, ^F — сокращённую форму.
+    # Такие произведения должны находиться так же, как основное #200/#700.
+    for item in fields.get("922", []):
+        for title in _extract_subfields(item, "C"):
+            _append_unique(titles, title)
+        if not _has_author_responsibility(item):
+            continue
+        author = _extract_subfield(item, "G") or _extract_subfield(item, "F")
+        if author:
+            _append_unique(authors, author)
+            _append_unique(primary_authors, author)
+
+    # В некоторых связанных/многотомных записях ИРБИС основной автор
+    # переносится в 961 и помечается ``^ZДА``. Без этого тома одного и того же
+    # произведения выглядят как записи «без автора» и не получают метку даже
+    # при точном совпадении названия.
+    if not authors:
+        for item in fields.get("961", []):
+            if _extract_subfield(item, "Z").strip().upper() != "ДА":
+                continue
+            if not _has_author_responsibility(item):
+                continue
+            parts = [
+                _extract_subfield(item, "A"),
+                _extract_subfield(item, "B"),
+                _extract_subfield(item, "G"),
+            ]
+            author = " ".join(part for part in parts if part).strip()
+            if author:
+                _append_unique(authors, author)
+                _append_unique(primary_authors, author)
+
+    organizations: list[str] = []
+    for tag in ("710", "711", "712"):
+        for item in fields.get(tag, []):
+            organization = _extract_subfield(item, "A")
+            if organization:
+                organizations.append(organization)
+
+    inventory_numbers = [value for value in (_extract_subfield(item, "B") for item in fields.get("910", [])) if value]
+
+    return DatabaseRecord(
+        record_number=record_number,
+        source_file=source_file,
+        source_record_number=source_record_number if source_record_number is not None else record_number,
+        isbns=isbns,
+        titles=titles,
+        authors=authors,
+        primary_authors=primary_authors,
+        organizations=organizations,
+        inventory_numbers=inventory_numbers,
+        publication=fields.get("210", []),
+        raw_record=raw_record,
+    )
+
+
+def parse_database(
+    path: str | Path,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
+) -> list[DatabaseRecord]:
+    path = Path(path)
+    if progress_cb:
+        progress_cb(2, f"Чтение текстовой базы: {path.name}")
+    text = _read_text_file(path)
+    raw_records = [part for part in re.split(r"\r?\n\*{5}\s*(?:\r?\n|$)", text) if part.strip()]
+    records: list[DatabaseRecord] = []
+    total = max(len(raw_records), 1)
+
+    for index, raw_record in enumerate(raw_records, start=1):
+        if index % 250 == 0:
+            _cancelled(cancel_cb)
+            if progress_cb:
+                progress_cb(2 + int(index / total * 23), f"Разбор базы: {index:,} из {total:,}")
+
+        tag_values: list[tuple[int, str]] = []
+        for line in raw_record.splitlines():
+            match = re.match(r"#(\d+):\s?(.*)$", line.strip())
+            if match:
+                tag_values.append((int(match.group(1)), match.group(2)))
+
+        records.append(
+            database_record_from_tag_values(
+                index,
+                tag_values,
+                source_file=str(path),
+                source_record_number=index,
+                raw_record=raw_record,
+            )
+        )
+
+    if progress_cb:
+        progress_cb(25, f"База загружена: {len(records):,} записей")
+    return records
+
+
+def _detect_header(rows: list[tuple[Any, ...]]) -> tuple[int, dict[str, int], list[str]]:
+    best_score = 0
+    best_row = -1
+    best_map: dict[str, int] = {}
+    best_headers: list[str] = []
+
+    for row_index, row in enumerate(rows[:100]):
+        mapping: dict[str, int] = {}
+        headers = [safe_text(value) or f"Столбец {column + 1}" for column, value in enumerate(row)]
+        for column, value in enumerate(row):
+            normalized = normalize_header(value)
+            for key, synonyms in HEADER_SYNONYMS.items():
+                normalized_synonyms = {normalize_header(item) for item in synonyms}
+                if normalized in normalized_synonyms and key not in mapping:
+                    mapping[key] = column
+                    break
+        score = len(mapping) if any(key in mapping for key in ("isbn", "title", "author")) else 0
+        if score > best_score:
+            best_score = score
+            best_row = row_index
+            best_map = mapping
+            best_headers = headers
+
+    if best_score == 0:
+        raise ValueError(
+            "Не удалось найти строку заголовков. Нужен хотя бы один столбец: ISBN, Заглавие/Название или Автор."
+        )
+    return best_row, best_map, best_headers
+
+
+def _mapped_value(values: list[Any], mapping: dict[str, int], key: str) -> str:
+    column = mapping.get(key)
+    if column is None or column >= len(values):
+        return ""
+    return safe_text(values[column])
+
+
+def _make_entry(
+    entry_id: int,
+    source_file: Path,
+    sheet_name: str,
+    row_number: int,
+    row: Iterable[Any],
+    mapping: dict[str, int],
+    headers: list[str],
+) -> ExcelEntry:
+    values = list(row)
+
+    raw_data: dict[str, Any] = {}
+    for index, value in enumerate(values):
+        if value is None or safe_text(value) == "":
+            continue
+        header = headers[index] if index < len(headers) else f"Столбец {index + 1}"
+        raw_data[header] = safe_text(value)
+
+    raw_isbn = _mapped_value(values, mapping, "isbn")
+    isbn = "" if raw_isbn.strip().lower() in ISBN_PLACEHOLDERS else raw_isbn
+
+    return ExcelEntry(
+        entry_id=entry_id,
+        source_file=str(source_file),
+        sheet_name=sheet_name,
+        row_number=row_number,
+        author=_mapped_value(values, mapping, "author"),
+        title=_mapped_value(values, mapping, "title"),
+        isbn=isbn,
+        registration_number=_mapped_value(values, mapping, "registration_number"),
+        raw_data=raw_data,
+        publisher=_mapped_value(values, mapping, "publisher"),
+        year=_mapped_value(values, mapping, "year"),
+    )
+
+
+def _read_xlsx_entries(
+    path: Path,
+    start_entry_id: int,
+    cancel_cb: CancelCallback | None = None,
+) -> tuple[list[ExcelEntry], list[str]]:
+    entries: list[ExcelEntry] = []
+    warnings: list[str] = []
+    workbook = _load_workbook_quiet(path, read_only=True, data_only=True)
+    entry_id = start_entry_id
+
+    try:
+        for worksheet in workbook.worksheets:
+            _cancelled(cancel_cb)
+            if worksheet.max_row == 1 and worksheet.max_column == 1:
+                worksheet.reset_dimensions()
+            max_preview_row = 100 if worksheet.max_row is None else min(100, worksheet.max_row)
+            preview = list(worksheet.iter_rows(min_row=1, max_row=max_preview_row, values_only=True))
+            if not preview or not any(any(value is not None for value in row) for row in preview):
+                continue
+            try:
+                header_index, mapping, headers = _detect_header(preview)
+            except ValueError as exc:
+                warnings.append(f"{path.name}, лист «{worksheet.title}»: {exc}")
+                continue
+
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=header_index + 2, values_only=True), start=header_index + 2
+            ):
+                if row_number % 500 == 0:
+                    _cancelled(cancel_cb)
+                entry = _make_entry(entry_id, path, worksheet.title, row_number, row, mapping, headers)
+                if entry.isbn or entry.title or entry.author:
+                    entries.append(entry)
+                    entry_id += 1
+    finally:
+        workbook.close()
+
+    return entries, warnings
+
+
+def _read_xls_entries(
+    path: Path,
+    start_entry_id: int,
+    cancel_cb: CancelCallback | None = None,
+) -> tuple[list[ExcelEntry], list[str]]:
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise RuntimeError("Для файлов .xls требуется пакет xlrd. Запустите start.bat ещё раз.") from exc
+
+    entries: list[ExcelEntry] = []
+    warnings: list[str] = []
+    workbook = xlrd.open_workbook(path)
+    entry_id = start_entry_id
+
+    for sheet in workbook.sheets():
+        _cancelled(cancel_cb)
+        preview = [tuple(sheet.row_values(index)) for index in range(min(100, sheet.nrows))]
+        if not preview or not any(any(safe_text(value) for value in row) for row in preview):
+            continue
+        try:
+            header_index, mapping, headers = _detect_header(preview)
+        except ValueError as exc:
+            warnings.append(f"{path.name}, лист «{sheet.name}»: {exc}")
+            continue
+
+        for row_index in range(header_index + 1, sheet.nrows):
+            if row_index % 500 == 0:
+                _cancelled(cancel_cb)
+            row = tuple(sheet.row_values(row_index))
+            entry = _make_entry(entry_id, path, sheet.name, row_index + 1, row, mapping, headers)
+            if entry.isbn or entry.title or entry.author:
+                entries.append(entry)
+                entry_id += 1
+
+    return entries, warnings
+
+
+def _deduplicate_cross_sheet_entries(entries: list[ExcelEntry]) -> tuple[list[ExcelEntry], int]:
+    """Убирает зеркальные копии одной записи на разных листах, не трогая повторы внутри листа."""
+    first_sheet_by_key: dict[tuple[Any, ...], str] = {}
+    result: list[ExcelEntry] = []
+    skipped = 0
+
+    for entry in entries:
+        key = (
+            normalize_author(entry.author),
+            normalize_title(entry.title),
+            tuple(extract_isbns(entry.isbn)),
+            normalize_header(entry.registration_number),
+            normalize_header(entry.publisher),
+            normalize_publication_year(entry.year) or safe_text(entry.year),
+        )
+        first_sheet = first_sheet_by_key.get(key)
+        if first_sheet is None:
+            first_sheet_by_key[key] = entry.sheet_name
+            result.append(entry)
+        elif first_sheet == entry.sheet_name:
+            # Повтор на одном и том же листе может означать разные экземпляры книги.
+            result.append(entry)
+        else:
+            skipped += 1
+
+    return result, skipped
+
+
+def read_excel_entries(
+    paths: list[str | Path],
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
+) -> tuple[list[ExcelEntry], list[str]]:
+    all_entries: list[ExcelEntry] = []
+    warnings: list[str] = []
+    total = max(len(paths), 1)
+
+    for file_index, source_path in enumerate(paths, start=1):
+        _cancelled(cancel_cb)
+        path = Path(source_path)
+        if progress_cb:
+            progress_cb(
+                27 + int((file_index - 1) / total * 18),
+                f"Чтение Excel {file_index} из {total}: {path.name}",
+            )
+
+        suffix = path.suffix.lower()
+        if suffix in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+            entries, file_warnings = _read_xlsx_entries(path, len(all_entries) + 1, cancel_cb)
+        elif suffix == ".xls":
+            entries, file_warnings = _read_xls_entries(path, len(all_entries) + 1, cancel_cb)
+        else:
+            warnings.append(f"Файл {path.name} пропущен: неподдерживаемое расширение {suffix}")
+            continue
+
+        entries, duplicate_count = _deduplicate_cross_sheet_entries(entries)
+        if duplicate_count:
+            file_warnings.append(
+                f"{path.name}: исключено повторов одних и тех же записей на других листах: {duplicate_count}."
+            )
+
+        for entry in entries:
+            entry.entry_id = len(all_entries) + 1
+            all_entries.append(entry)
+        warnings.extend(file_warnings)
+
+    if progress_cb:
+        progress_cb(45, f"Excel-строк для проверки: {len(all_entries):,}")
+    return all_entries, warnings
+
+
+def _detect_foreign_agent_header(
+    rows: list[tuple[Any, ...]],
+) -> tuple[int, dict[str, int], list[str]]:
+    normalized_synonyms = {
+        key: {normalize_header(item) for item in values} for key, values in FOREIGN_AGENT_HEADER_SYNONYMS.items()
+    }
+    best_score = 0
+    best_row = -1
+    best_map: dict[str, int] = {}
+    best_headers: list[str] = []
+
+    for row_index, row in enumerate(rows[:100]):
+        mapping: dict[str, int] = {}
+        headers = [safe_text(value) or f"Столбец {column + 1}" for column, value in enumerate(row)]
+        for column, value in enumerate(row):
+            normalized = normalize_header(value)
+            for key, synonyms in normalized_synonyms.items():
+                if normalized in synonyms and key not in mapping:
+                    mapping[key] = column
+                    break
+        score = len(mapping)
+        if "name" in mapping:
+            score += 5
+        if score > best_score:
+            best_score = score
+            best_row = row_index
+            best_map = mapping
+            best_headers = headers
+
+    if best_row < 0 or "name" not in best_map:
+        raise ValueError("Не удалось найти столбец с полным наименованием/ФИО иностранного агента.")
+    return best_row, best_map, best_headers
+
+
+def _split_registry_participants(value: Any) -> list[str]:
+    text = safe_text(value).strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1].strip()
+    parts = re.split(r"\s*,\s*(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)", text)
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _read_foreign_agents_xlsx(
+    path: Path,
+    cancel_cb: CancelCallback | None = None,
+) -> tuple[list[ForeignAgentEntry], list[str]]:
+    entries: list[ForeignAgentEntry] = []
+    warnings: list[str] = []
+    workbook = _load_workbook_quiet(path, read_only=True, data_only=True)
+    entry_id = 1
+
+    try:
+        for worksheet in workbook.worksheets:
+            _cancelled(cancel_cb)
+            if worksheet.max_row == 1 and worksheet.max_column == 1:
+                worksheet.reset_dimensions()
+            max_preview_row = 100 if worksheet.max_row is None else min(100, worksheet.max_row)
+            preview = list(
+                worksheet.iter_rows(
+                    min_row=1,
+                    max_row=max_preview_row,
+                    values_only=True,
+                )
+            )
+            if not preview or not any(any(value is not None for value in row) for row in preview):
+                continue
+            try:
+                header_index, mapping, headers = _detect_foreign_agent_header(preview)
+            except ValueError as exc:
+                warnings.append(f"{path.name}, лист «{worksheet.title}»: {exc}")
+                continue
+            name_header = normalize_header(headers[mapping["name"]])
+            is_publication_list = name_header == normalize_header("Автор") and any(
+                key in mapping for key in ("title", "isbn", "role", "publication")
+            )
+
+            for row_number, row in enumerate(
+                worksheet.iter_rows(min_row=header_index + 2, values_only=True),
+                start=header_index + 2,
+            ):
+                if row_number % 500 == 0:
+                    _cancelled(cancel_cb)
+                values = list(row)
+
+                name = _mapped_value(values, mapping, "name")
+                if not name:
+                    continue
+
+                raw_data: dict[str, Any] = {}
+                for index, value in enumerate(values):
+                    if value is None or safe_text(value) == "":
+                        continue
+                    header = headers[index] if index < len(headers) else f"Столбец {index + 1}"
+                    raw_data[header] = safe_text(value)
+
+                entry = ForeignAgentEntry(
+                    entry_id=entry_id,
+                    source_file=str(path),
+                    sheet_name=worksheet.title,
+                    row_number=row_number,
+                    registry_number=_mapped_value(values, mapping, "registry_number"),
+                    name=name,
+                    participants=_split_registry_participants(_mapped_value(values, mapping, "participants")),
+                    agent_type=(
+                        _mapped_value(values, mapping, "agent_type")
+                        or (
+                            "Организация"
+                            if is_publication_list and looks_like_foreign_organization(name)
+                            else "Физическое лицо"
+                            if is_publication_list
+                            else ""
+                        )
+                    ),
+                    inclusion_date=_mapped_value(values, mapping, "inclusion_date"),
+                    exclusion_date=_mapped_value(values, mapping, "exclusion_date"),
+                    raw_data=raw_data,
+                    title=_mapped_value(values, mapping, "title"),
+                    isbn=_mapped_value(values, mapping, "isbn"),
+                    role=_mapped_value(values, mapping, "role"),
+                    publication=_mapped_value(values, mapping, "publication"),
+                )
+                # Для проверки используются только действующие записи. Исключённые остаются
+                # в исходном файле, но не должны приводить к новым меткам в библиотечной базе.
+                if entry.is_active:
+                    entries.append(entry)
+                    entry_id += 1
+    finally:
+        workbook.close()
+
+    return entries, warnings
+
+
+def read_foreign_agent_entries(
+    path: str | Path | None,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
+) -> tuple[list[ForeignAgentEntry], list[str]]:
+    if not path:
+        return [], []
+    source = Path(path)
+    if progress_cb:
+        progress_cb(47, f"Чтение реестра иностранных агентов: {source.name}")
+    if source.suffix.lower() not in {".xlsx", ".xlsm", ".xltx", ".xltm"}:
+        raise ValueError("Реестр иностранных агентов должен быть файлом Excel формата .xlsx или .xlsm.")
+    entries, warnings = _read_foreign_agents_xlsx(source, cancel_cb)
+    if progress_cb:
+        progress_cb(52, f"Действующих записей в реестре иностранных агентов: {len(entries):,}")
+    return entries, warnings
+
+
+from irbis_control.core.matching_engine import (  # noqa: F401 - публичный фасад
+    DatabaseIndex,
+    _foreign_agent_search_terms,
+    _name_order_variants,
+    _registry_name_variants,
+    _registry_plain_name,
+    compare_database_records,
+    compare_files,
+    compare_foreign_agents,
+    compare_substance_entries,
+)
+
+
+def export_results(*args: Any, **kwargs: Any) -> Path:
+    from irbis_control.core.report_export import export_results as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def _modify_matched_record(*args: Any, **kwargs: Any):
+    from irbis_control.core.marker_updates import _modify_matched_record as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def remove_markers_from_tag_values(*args: Any, **kwargs: Any):
+    from irbis_control.core.marker_updates import remove_markers_from_tag_values as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def remove_database_markers(*args: Any, **kwargs: Any):
+    from irbis_control.core.marker_updates import remove_database_markers as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def build_markers_by_record(*args: Any, **kwargs: Any):
+    from irbis_control.core.marker_updates import build_markers_by_record as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def apply_markers_to_tag_values(*args: Any, **kwargs: Any):
+    from irbis_control.core.marker_updates import apply_markers_to_tag_values as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def export_modified_database(*args: Any, **kwargs: Any) -> Path:
+    from irbis_control.core.marker_updates import export_modified_database as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def export_modified_databases(*args: Any, **kwargs: Any) -> list[Path]:
+    from irbis_control.core.marker_updates import export_modified_databases as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def apply_manual_review_decisions(
+    results: list[MatchResult],
+    summary: ComparisonSummary,
+    decisions: dict[int, bool],
+    *,
+    confirmation_note: str = "Подтверждено оператором вручную",
+    rejection_note: str = "Отклонено оператором вручную",
+) -> None:
+    """Применяет решения оператора к пограничным совпадениям.
+
+    ``True`` превращает строку в подтверждённое совпадение с точностью 100%,
+    ``False`` помечает её как отклонённую вручную. Индексы относятся к
+    исходному списку ``results``. После применения пересчитываются основные
+    показатели сводки, чтобы отчёт и последующая постановка меток использовали
+    уже ручное решение оператора.
+    """
+    for result_index, approved in decisions.items():
+        if result_index < 0 or result_index >= len(results):
+            continue
+        result = results[result_index]
+        if result.status != "Возможное совпадение":
+            continue
+        if approved:
+            result.status = "Совпадение"
+            result.confidence = 100.0
+            suffix = confirmation_note
+        else:
+            result.status = "Отклонено вручную"
+            suffix = rejection_note
+        result.note = f"{result.note}; {suffix}" if result.note else suffix
+
+    confirmed_substances = [
+        result for result in results if result.status == "Совпадение" and result.source_type == SOURCE_SUBSTANCES
+    ]
+    confirmed_foreign = [
+        result for result in results if result.status == "Совпадение" and result.source_type == SOURCE_FOREIGN_AGENTS
+    ]
+    matched_substance_ids = {result.excel.entry_id for result in confirmed_substances}
+    matched_foreign_ids = {
+        result.foreign_agent.entry_id for result in confirmed_foreign if result.foreign_agent is not None
+    }
+    summary.matched_excel_rows = len(matched_substance_ids)
+    summary.unmatched_excel_rows = max(0, summary.excel_rows - len(matched_substance_ids))
+    summary.matched_foreign_agent_rows = len(matched_foreign_ids)
+    summary.substance_matched_records = len(
+        {result.database.record_number for result in confirmed_substances if result.database is not None}
+    )
+    summary.foreign_agent_matched_records = len(
+        {result.database.record_number for result in confirmed_foreign if result.database is not None}
+    )
+    summary.review_rows = sum(1 for result in results if result.status == "Возможное совпадение")
+    summary.review_records = count_review_record_groups(results)
+
+
+def compare_and_export(
+    database_path: str | Path | list[str | Path],
+    excel_paths: list[str | Path],
+    output_path: str | Path,
+    modified_database_path: str | Path,
+    *,
+    foreign_agents_path: str | Path | None = None,
+    use_isbn_matching: bool = True,
+    use_title_fallback: bool = True,
+    match_rules: dict[str, bool] | None = None,
+    use_fuzzy: bool = False,
+    fuzzy_threshold: int = 90,
+    options: ComparisonOptions | None = None,
+    report_options: dict[str, Any] | None = None,
+    substance_marker: str = DEFAULT_SUBSTANCE_MARKER,
+    foreign_agent_marker_template: str = DEFAULT_FOREIGN_AGENT_MARKER_TEMPLATE,
+    foreign_organization_marker_template: str = DEFAULT_FOREIGN_ORGANIZATION_MARKER_TEMPLATE,
+    age_marker: str = DEFAULT_AGE_MARKER,
+    substance_marker_field: int = DEFAULT_SUBSTANCE_MARKER_FIELD,
+    foreign_agent_marker_field: int = DEFAULT_FOREIGN_AGENT_MARKER_FIELD,
+    foreign_organization_marker_field: int = DEFAULT_FOREIGN_ORGANIZATION_MARKER_FIELD,
+    age_marker_field: int = DEFAULT_AGE_MARKER_FIELD,
+    progress_cb: ProgressCallback | None = None,
+    cancel_cb: CancelCallback | None = None,
+) -> tuple[list[MatchResult], ComparisonSummary]:
+    database_paths = database_path if isinstance(database_path, list) else [database_path]
+    comparison_options = options or ComparisonOptions(
+        use_isbn_matching=use_isbn_matching,
+        use_title_fallback=use_title_fallback,
+        use_fuzzy=use_fuzzy,
+        fuzzy_threshold=fuzzy_threshold,
+        match_rules=match_rules or {},
+    )
+    results, summary = compare_files(
+        database_paths,
+        excel_paths,
+        foreign_agents_path=foreign_agents_path,
+        options=comparison_options,
+        progress_cb=progress_cb,
+        cancel_cb=cancel_cb,
+    )
+    if report_options is None or report_options.get("enabled", True):
+        export_results(
+            output_path,
+            results,
+            summary,
+            progress_cb,
+            cancel_cb,
+            report_options=report_options,
+        )
+    if not (report_options and report_options.get("report_only", False)):
+        export_modified_databases(
+            database_paths,
+            modified_database_path,
+            results,
+            summary,
+            progress_cb,
+            cancel_cb,
+            substance_marker=substance_marker,
+            foreign_agent_marker_template=foreign_agent_marker_template,
+            foreign_organization_marker_template=foreign_organization_marker_template,
+            age_marker=age_marker,
+            substance_marker_field=substance_marker_field,
+            foreign_agent_marker_field=foreign_agent_marker_field,
+            foreign_organization_marker_field=foreign_organization_marker_field,
+            age_marker_field=age_marker_field,
+        )
+    return results, summary

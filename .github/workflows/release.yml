@@ -1,0 +1,168 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+      - "[0-9]*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза (например, v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+  deployments: write
+  actions: write
+
+jobs:
+  register-deployment:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register production deployment
+        run: echo "Регистрация production deployment для GitHub"
+      - name: Запустить или обновить публикацию v0.1.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          expected_asset="IRBIS64Control-Installer-v0.1.0-Windows-x64.exe"
+          if gh release view "v0.1.0" --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$expected_asset"; then
+            echo "Релиз v0.1.0 уже содержит правильный установщик."
+            exit 0
+          fi
+          gh workflow run release.yml --ref main -f tag=v0.1.0
+
+  windows-release:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    environment:
+      name: production
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "pyinstaller>=6.6,<7"
+      - name: Verify version matches tag
+        shell: pwsh
+        run: |
+          $version = python -c "from irbis_control import __version__; print(__version__)"
+          $releaseTag = "${{ inputs.tag || github.ref_name }}"
+          $tagVersion = $releaseTag -replace '^v', ''
+          if ($version -ne $tagVersion) {
+            throw "Tag $releaseTag does not match application version $version"
+          }
+      - name: Build Windows executables
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --name IRBIS64Control --icon assets/icons/irbis64_control.ico `
+            --add-data "assets;assets" main.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed `
+            --name IRBIS64ControlDB --icon assets/icons/irbis64_control.ico `
+            --add-data "assets;assets" db_connector.py
+          Rename-Item -LiteralPath dist/IRBIS64Control.exe -NewName "ИРБИС64 Контроль.exe"
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            choco install innosetup --no-progress -y
+          }
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw "Inno Setup compiler was not found"
+          }
+          $version = python -c "from irbis_control import __version__; print(__version__)"
+          & $iscc "/DMyAppVersion=$version" "installer\IRBIS64Control.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+      - name: Package portable build and checksums
+        shell: pwsh
+        run: |
+          $version = python -c "from irbis_control import __version__; print(__version__)"
+          $installer = "dist/IRBIS64Control-Installer-v$version-Windows-x64.exe"
+          Compress-Archive `
+            -LiteralPath "dist/ИРБИС64 Контроль.exe", "dist/IRBIS64ControlDB.exe" `
+            -DestinationPath "dist/IRBIS64Control-windows-x64.zip"
+          Get-FileHash -Algorithm SHA256 `
+            $installer, `
+            "dist/IRBIS64Control-windows-x64.zip" |
+            ForEach-Object { "$($_.Hash.ToLower())  $($_.Path | Split-Path -Leaf)" } |
+            Set-Content -Encoding ascii "dist/SHA256SUMS.txt"
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $version = python -c "from irbis_control import __version__; print(__version__)"
+          @"
+          ## ИРБИС64 Контроль v$version
+
+          Первый публичный релиз «ИРБИС64 Контроль» — настольного помощника для проверки библиотечных записей ИРБИС64 по перечням и реестрам, подготовки отчётов и безопасного внесения служебных меток.
+
+          ### Что умеет версия $version
+
+          - подключаться к серверу ИРБИС64 или работать с выгрузкой базы в TXT;
+          - получать актуальные перечни НКП РГБ и использовать локальные Excel-таблицы;
+          - искать совпадения по ISBN, названию, автору, издательству и году;
+          - разделять уверенные и неоднозначные совпадения и передавать спорные случаи на ручную проверку;
+          - формировать Excel-отчёты с результатами проверки;
+          - безопасно добавлять служебные метки в записи ИРБИС64;
+          - создавать изменённую TXT-копию базы без перезаписи исходного файла;
+          - сохранять журнал действий и резервные данные для восстановления.
+
+          ### Файлы релиза
+
+          **IRBIS64Control-Installer-v$version-Windows-x64.exe** — установщик для 64-разрядной Windows. В имени указаны тип файла, версия программы и целевая система.
+
+          **IRBIS64Control-windows-x64.zip** — переносная сборка для запуска без установки.
+
+          **SHA256SUMS.txt** — контрольные суммы SHA-256 для проверки целостности скачанных файлов.
+
+          ### Перед началом работы
+
+          Перед массовым изменением рабочей базы рекомендуется сначала проверить небольшую выборку записей, просмотреть подготовленные изменения и сохранить резервную копию. Программа повторно проверяет записи перед записью, чтобы снизить риск перезаписи изменений, сделанных другим пользователем.
+
+          Сборка предназначена для 64-разрядной Windows. Исходный код распространяется по лицензии MIT.
+          "@ | Set-Content -Encoding utf8 "release-notes.md"
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "from irbis_control import __version__; print(__version__)"
+          $releaseTag = "${{ inputs.tag || github.ref_name }}"
+          $installer = "dist/IRBIS64Control-Installer-v$version-Windows-x64.exe"
+          $assets = @(
+            $installer,
+            "dist/IRBIS64Control-windows-x64.zip",
+            "dist/SHA256SUMS.txt"
+          )
+          gh release view $releaseTag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$releaseTag" `
+              -f sha="${{ github.sha }}" -F force=true
+            gh release delete-asset $releaseTag "IRBIS64Control-.-v$version-Windows-x64.exe" -y 2>$null
+            gh release upload $releaseTag $assets --clobber
+            gh release edit $releaseTag `
+              --title "ИРБИС64 Контроль $releaseTag" `
+              --notes-file "release-notes.md"
+          } else {
+            gh release create $releaseTag $assets `
+              --target "${{ github.sha }}" `
+              --title "ИРБИС64 Контроль $releaseTag" `
+              --notes-file "release-notes.md"
+          }
