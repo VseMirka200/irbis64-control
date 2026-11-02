@@ -1,0 +1,32 @@
+name: Dependabot safe auto-merge
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-safe-auto-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    name: Merge only tested patch/minor updates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BASE_BRANCH: main
+      MERGE_METHOD: squash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Inspect and safely merge Dependabot PRs
+        run: bash .github/scripts/merge-dependabot.sh
