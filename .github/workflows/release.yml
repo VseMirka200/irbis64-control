@@ -2,53 +2,26 @@ name: Release
 
 on:
   push:
-    branches:
-      - main
     tags:
       - "v*"
-      - "[0-9]*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Тег релиза (например, v0.1.0)"
-        required: true
 
 permissions:
-  contents: write
-  deployments: write
-  actions: write
+  contents: read
 
 jobs:
-  register-deployment:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment:
-      name: production
-    steps:
-      - uses: actions/checkout@v7
-      - name: Register production deployment
-        run: echo "Регистрация production deployment для GitHub"
-      - name: Запустить или обновить публикацию v0.1.0
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          expected_asset="IRBIS64Control-Installer-v0.1.0-Windows-x64.exe"
-          if gh release view "v0.1.0" --json assets --jq '.assets[].name' 2>/dev/null | grep -Fxq "$expected_asset"; then
-            echo "Релиз v0.1.0 уже содержит правильный установщик."
-            exit 0
-          fi
-          gh workflow run release.yml --ref main -f tag=v0.1.0
-
   windows-release:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
+    permissions:
+      contents: write
     environment:
       name: production
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.13"
           cache: pip
@@ -61,10 +34,18 @@ jobs:
         shell: pwsh
         run: |
           $version = python -c "from irbis_control import __version__; print(__version__)"
-          $releaseTag = "${{ inputs.tag || github.ref_name }}"
+          $releaseTag = "${{ github.ref_name }}"
           $tagVersion = $releaseTag -replace '^v', ''
           if ($version -ne $tagVersion) {
             throw "Tag $releaseTag does not match application version $version"
+          }
+      - name: Check release tag belongs to main
+        shell: pwsh
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "${{ github.sha }}" origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release tag must point to a commit reachable from main"
           }
       - name: Build Windows executables
         shell: pwsh
@@ -144,7 +125,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $version = python -c "from irbis_control import __version__; print(__version__)"
-          $releaseTag = "${{ inputs.tag || github.ref_name }}"
+          $releaseTag = "${{ github.ref_name }}"
           $installer = "dist/IRBIS64Control-Installer-v$version-Windows-x64.exe"
           $assets = @(
             $installer,
@@ -153,16 +134,9 @@ jobs:
           )
           gh release view $releaseTag 2>$null
           if ($LASTEXITCODE -eq 0) {
-            gh api -X PATCH "repos/${{ github.repository }}/git/refs/tags/$releaseTag" `
-              -f sha="${{ github.sha }}" -F force=true
-            gh release delete-asset $releaseTag "IRBIS64Control-.-v$version-Windows-x64.exe" -y 2>$null
-            gh release upload $releaseTag $assets --clobber
-            gh release edit $releaseTag `
-              --title "ИРБИС64 Контроль $releaseTag" `
-              --notes-file "release-notes.md"
-          } else {
-            gh release create $releaseTag $assets `
-              --target "${{ github.sha }}" `
-              --title "ИРБИС64 Контроль $releaseTag" `
-              --notes-file "release-notes.md"
+            throw "Release $releaseTag already exists and will not be modified"
           }
+          gh release create $releaseTag $assets `
+            --verify-tag `
+            --title "ИРБИС64 Контроль $releaseTag" `
+            --notes-file "release-notes.md"
