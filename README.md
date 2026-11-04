@@ -63,5 +63,7 @@
 - [Руководство пользователя](docs/USER_GUIDE.md)
 - [Сообщить об ошибке](https://github.com/VseMirka200/irbis64-control/issues/new)
 - [Правила безопасности](.github/SECURITY.md)
+- [Кодекс поведения](.github/CODE_OF_CONDUCT.md)
+- [Контакт для связи](mailto:vsemirka200@bk.ru) — vsemirka200@bk.ru
 
 Техническая информация для разработчиков находится в [описании архитектуры](docs/ARCHITECTURE.md) и [правилах участия в проекте](docs/CONTRIBUTING.md).
